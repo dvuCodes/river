@@ -42,7 +42,7 @@ concept_write writes without asking, but nothing runs your scripts until the use
   \tvar h := img.get_height()
   \tKit.vgradient(img, Rect2i(0, 0, w, h), Color("#2b3a4a"), Color("#e0a070"))
   \tKit.ridge(img, h * 0.7, 30.0, Color(0.32, 0.45, 0.3), 1)
-  \tKit.dog(img, Vector2(w * 0.5, h * 0.9), 24.0, Color("#1b1626"))
+  \tKit.glow(img, Vector2(w * 0.7, h * 0.6), 60.0, Color(1.0, 0.7, 0.4))
 
 - The first line of code is exactly "extends RefCounted", and the script defines func draw(img: Image) -> void at the top level.
 - River calls draw() once on a blank 256x256 RGBA image. Size shapes from img.get_width() and img.get_height().
