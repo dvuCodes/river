@@ -139,6 +139,13 @@ describe.skipIf(!bin)("renderConcept with real Godot (GODOT_BIN)", { timeout: 60
     expect(existsSync(png)).toBe(false)
   })
 
+  it("renders a script that infers a type from a Variant, which Godot's default settings treat as an error", async () => {
+    const png = path.join(out, "variant.png")
+    const script = "extends RefCounted\n\nfunc draw(img: Image) -> void:\n\tvar t := clamp(0.5, 0.0, 1.0)\n\timg.fill(Color.RED.lerp(Color.BLUE, t))\n"
+    await renderConcept({ bin: bin!, script, outPng: png })
+    expect(readFileSync(png).length).toBeGreaterThan(0)
+  })
+
   it("fails on a runtime error, a parse error and a timeout, and writes no PNG", async () => {
     const runtime = DRAW + "\tvar a := [1]\n\tvar b = a[5]\n"
     const png = path.join(out, "bad.png")

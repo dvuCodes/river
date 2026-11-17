@@ -99,6 +99,7 @@ config/name="river-concept"
 [debug]
 file_logging/enable_file_logging=false
 file_logging/enable_file_logging.pc=false
+gdscript/warnings/enable=false
 `
 
 const RUNNER = `extends SceneTree
