@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises"
 import { userInfo } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
-import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobDeps, PermissionDecision } from "@river/agent"
+import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobAgentSettings, JobDeps, PermissionDecision } from "@river/agent"
 import { createGodotAdapter } from "@river/adapter-godot"
 import {
   type Capture,
@@ -26,6 +26,7 @@ import {
   listPlans,
   listStories,
   listThreads,
+  loadBoard,
   loadJob,
   loadProject,
   loadSchema,
@@ -60,7 +61,7 @@ import type {
 import { type JobApi, loadAgent } from "./agent"
 import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
-import { boardHandlers } from "./board"
+import { boardHandlers, closeRowGap, jobRevisable } from "./board"
 import { type ProjectWatch, noteOwnWrite, watchProject } from "./watch"
 
 let project: Project | null = null
@@ -430,7 +431,8 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
   })
   handle("agent:restore", (ref: string) => restoreCheckpoint(need().root, ref))
 
-  handle("job:start", async (board: string, markId: string) => {
+  /** Jobs run in the background; one that fails before its job file exists (bad mark, no git) is thrown here. */
+  const runJob = async (start: (jobs: JobApi, settings: JobAgentSettings) => Promise<unknown>) => {
     const p = need()
     const jobs = await jobApi()
     const status = await agentStatus()
@@ -439,25 +441,31 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     const jobsDir = join(p.root, ".river", "jobs")
     await mkdir(jobsDir, { recursive: true })
     projectWatch?.add(jobsDir)
-    const run = jobs.startConceptJob({ workspaceRoot: p.root, board, markId, model: status.model, ...auth }, opts.jobDeps)
+    const run = start(jobs, { model: status.model, ...auth })
     run.catch((err: unknown) => console.warn("river: concept job failed", err))
-    // Once the job exists its errors land in its file; one that fails before that (bad mark, no git) is thrown here.
     await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
-  })
+  }
+  handle("job:start", (board: string, markId: string) => runJob((jobs, settings) => jobs.startConceptJob({ workspaceRoot: need().root, board, markId, ...settings }, opts.jobDeps)))
+  handle("job:revise", (jobId: string) => runJob((jobs, settings) => jobs.reviseJob(need().root, jobId, settings, opts.jobDeps)))
   handle("job:get", async (jobId: string): Promise<JobDTO> => {
     const p = need()
     const job = await loadJob(p.root, jobId)
-    if (job.status !== "approval") return { job }
-    // The committed bytes, hashed as read: the only bytes approveJobScript will run.
-    return { job, script: await (await jobApi()).readJobScript(p.root, jobId) }
+    const revisable = await jobRevisable(p.root, job)
+    if (job.status !== "approval") return { job, revisable }
+    // The committed bytes, hashed as read: the only bytes approveJobScripts will run.
+    return { job, scripts: await (await jobApi()).readJobScripts(p.root, jobId), revisable }
   })
-  handle("job:approve", async (jobId: string, sha256: string) => {
-    await (await jobApi()).approveJobScript(need().root, jobId, sha256)
+  handle("job:approve", async (jobId: string, shas: Record<string, string>) => {
+    await (await jobApi()).approveJobScripts(need().root, jobId, shas, opts.jobDeps)
   })
-  handle("job:accept", async (jobId: string) => {
-    await (await jobApi()).acceptJob(need().root, jobId)
+  handle("job:accept", async (jobId: string, variants?: string[]) => {
+    const p = need()
+    const { board } = await loadJob(p.root, jobId)
+    const options = variants ? (await loadBoard(p.root, board)).cards.filter((c) => c.pending?.jobId === jobId && c.kind === "concept") : []
+    await (await jobApi()).acceptJob(p.root, jobId, variants ? { variants } : {})
+    if (options.length > 1) await closeRowGap(p.root, board, options).catch((err: unknown) => console.warn("river: could not close the row after accepting", err))
   })
-  handle("job:dismiss", async (jobId: string) => {
-    await (await jobApi()).dismissJob(need().root, jobId)
+  handle("job:dismiss", async (jobId: string, reason?: string) => {
+    await (await jobApi()).dismissJob(need().root, jobId, typeof reason === "string" ? reason : undefined)
   })
 }

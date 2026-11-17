@@ -319,13 +319,18 @@ func draw(img: Image) -> void:
 	img.fill_rect(Rect2i(w * 7 / 10, h / 10, w / 10, w / 10), Color(0.98, 0.90, 0.62))
 `
 
-/** RIVER_SMOKE_JOB: the agent turn writes a fixed draw.gd instead of calling a model. */
+/** RIVER_SMOKE_JOB: the agent turn writes three options instead of calling a model; option B does not compile, so its render fails. */
 const smokeJobDeps: JobDeps = {
   runTurn: async (req, h) => {
     const dir = join(req.root, "concepts", req.conceptId ?? "missing")
     await mkdir(dir, { recursive: true })
-    await writeFile(join(dir, "draw.gd"), SMOKE_DRAW_GD)
-    h.onEvent({ type: "text", text: "Calmer: a low horizon, soft sky, one still pond." })
+    await writeFile(join(dir, "draw_a.gd"), SMOKE_DRAW_GD)
+    await writeFile(join(dir, "caption_a.txt"), "Low horizon, soft sky")
+    await writeFile(join(dir, "draw_b.gd"), SMOKE_DRAW_GD.replace("img.fill(", "img.no_such_method("))
+    await writeFile(join(dir, "caption_b.txt"), "Same pond, broken script")
+    await writeFile(join(dir, "draw_c.gd"), SMOKE_DRAW_GD.replace("Color(0.62, 0.74, 0.80)", "Color(0.86, 0.66, 0.52)"))
+    await writeFile(join(dir, "caption_c.txt"), "Warmer sky")
+    h.onEvent({ type: "text", text: "Calmer: a low horizon, soft sky, one still pond. B tries a different call." })
   },
 }
 
@@ -382,10 +387,11 @@ const exists = (abs: string) => access(abs).then(
 )
 
 /**
- * RIVER_SMOKE_JOB=1: pin a passage and put a pin mark with a request beside it (IPC), then with real clicks:
- * open the mark, ask the concept artist, review and run its script, Accept; then ask on a second mark and
- * Dismiss it while it waits for approval. The agent turn is the fake from
- * smokeJobDeps; the render is real Godot. Screenshots the answered card and the accepted card.
+ * RIVER_SMOKE_JOB=1: pin a passage and put two pin marks with requests beside it (IPC), then with real clicks:
+ * open the first mark, ask the concept artist, show its answer, review both options' scripts and run them all,
+ * see options A and C render and option B show Godot's error, keep C only (it closes up to the row start); dismiss the second mark's answer with a reason
+ * (it lands in the project brief); then reply on the first mark and revise its answer. The agent turn is the fake
+ * from smokeJobDeps; the renders are real Godot. Screenshots the review, the answer and the kept option.
  */
 async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, ms: number) => Promise<boolean>): Promise<boolean> {
   const p = currentProject()
@@ -411,87 +417,119 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const saveMark = async (req: object) =>
     ((await w.webContents.executeJavaScript(`window.river.boardSaveMark("main", ${JSON.stringify(req)})`)) as { mark: Mark }).mark
   const mark = await saveMark(markReq)
-  // The second mark's card lands left of the passage, clear of the first one's.
+  // The second mark's answer lands left of the passage, clear of the first one's.
   const toDismiss = await saveMark({ ...markReq, path: [card.x - 330, card.y + 40], thread: [{ by: "you", at: new Date().toISOString(), text: "try it at dusk" }] })
-  console.log(`river smoke: pinned ${card.ref} as ${card.id}; marks ${mark.id} (accept) and ${toDismiss.id} (dismiss)`)
+  console.log(`river smoke: pinned ${card.ref} as ${card.id}; marks ${mark.id} (keep) and ${toDismiss.id} (dismiss)`)
   w.webContents.send("smoke:navigate", "canvas")
   if (!(await waitFor("canvas", 15_000))) console.warn("river smoke: canvas did not report ready")
   w.focus()
   w.webContents.focus()
   await sleep(300)
 
-  if (!(await clickEl(w, `[data-mark="${mark.id}"] .mark-pin`, 8_000))) return false
-  if (!(await clickEl(w, `[data-action="ask-concept"]`, 3_000))) return false
-  console.log("river smoke: asked the concept artist")
-  // Agents place their answer beside the mark, maybe off screen: the mark panel brings it into view.
-  if (!(await clickEl(w, `[data-action="show-answer"]`, 120_000))) return false
-  if (!(await clickEl(w, `.concept[data-job-status="approval"] [data-action="review"]`, 120_000))) return false
-  if (!(await waitRect(w, ".concept-script-text", 5_000))) {
-    console.error("river smoke: the script did not show")
-    return false
+  /** The answer's cards on disk, once the job has written them: its note and its options by variant. */
+  const answer = async (markId: string, ms: number) => {
+    let found: { note: Card; options: Card[] } | undefined
+    await until(async () => {
+      const cards = (await loadBoard(p.root, "main")).cards.filter((c) => c.pending?.markId === markId)
+      const note = cards.find((c) => c.kind === "note")
+      const options = cards.filter((c) => c.kind === "concept")
+      found = note && options.length > 0 ? { note, options } : undefined
+      return found !== undefined
+    }, ms)
+    return found
   }
-  const shown = (await w.webContents.executeJavaScript(`document.querySelector(".concept-script-text").textContent`)) as string
-  console.log(`river smoke: reviewing script (${shown.split("\n").length} lines)`)
-  await sleep(300)
-  const review = join(dir, "job-review.png")
-  await writeFile(review, (await w.webContents.capturePage()).toPNG())
-  console.log(`river smoke: wrote ${review}`)
-  if (!(await clickEl(w, `.concept[data-job-status="approval"] [data-action="run"]`, 3_000))) return false
-  console.log("river smoke: approved; rendering")
-  if (!(await waitImage(w, `.concept[data-job-status="answered"] img.cnode-img`, 120_000))) {
-    const jobs = (await loadBoard(p.root, "main")).cards.filter((c) => c.kind === "concept")
-    console.error(`river smoke: no rendered image; concept cards ${JSON.stringify(jobs)}`)
+  const askAndShow = async (markId: string) => {
+    if (!(await clickEl(w, `[data-mark="${markId}"] .mark-pin`, 8_000))) return undefined
+    if (!(await clickEl(w, `[data-action="ask-concept"]`, 3_000))) return undefined
+    const cards = await answer(markId, 60_000)
+    // Agents place their answer beside the mark, maybe off screen: the mark panel brings it into view.
+    if (!cards || !(await clickEl(w, `[data-action="show-answer"]`, 10_000))) return undefined
+    await sleep(500)
+    return cards
+  }
+
+  const kept = await askAndShow(mark.id)
+  if (!kept) return false
+  const jobId = kept.note.pending!.jobId
+  const noteSel = `.react-flow__node[data-id="${kept.note.id}"]`
+  console.log(`river smoke: asked the concept artist; job ${jobId}`)
+  if (!(await clickEl(w, `${noteSel} [data-action="review"]`, 120_000))) return false
+  const sections = await until(async () => (await w.webContents.executeJavaScript(`document.querySelectorAll(".review .review-script").length`)) === 3, 5_000)
+  console.log(`river smoke: review shows ${sections ? "all three" : "NOT all three"} scripts`)
+  await shoot(w, dir, "job-review.png")
+  if (!(await clickEl(w, `.review [data-action="run"]`, 3_000))) return false
+  console.log("river smoke: ran all; rendering")
+  // While drawing, the answer holds one placeholder card; each option has its own card from approval on.
+  const options = (await answer(mark.id, 5_000))?.options ?? []
+  console.log(`river smoke: the answer has option cards ${options.map((c) => c.variant ?? "-").join(", ")}`)
+  // The options run off to the right of the note; fit the board so all of them are on screen.
+  await key(w, "1", ["shift"])
+  await sleep(500)
+  const optSel = (v: string) => `.react-flow__node[data-id="${options.find((c) => c.variant === v)?.id}"]`
+  const rendered = (await waitImage(w, `${optSel("a")} img.cnode-img`, 120_000)) && (await waitImage(w, `${optSel("c")} img.cnode-img`, 10_000))
+  const brokenShown = Boolean(await waitRect(w, `${optSel("b")} .render-error`, 10_000))
+  console.log(`river smoke: options A and C ${rendered ? "rendered" : "did NOT render"}; option B ${brokenShown ? "shows its render error" : "does NOT show an error"}`)
+  await sleep(500)
+  await shoot(w, dir, "job-answered.png")
+  if (!(await clickEl(w, `${optSel("c")} [data-action="keep"]`, 5_000))) return false
+  const optionC = options.find((c) => c.variant === "c")!
+  if (!(await waitImage(w, `.react-flow__node[data-id="${optionC.id}"] .cnode-concept:not(.is-pending) img.cnode-img`, 30_000))) {
+    console.error("river smoke: the kept option did not show its image")
     return false
   }
   await sleep(500)
-  const answered = join(dir, "job-answered.png")
-  await writeFile(answered, (await w.webContents.capturePage()).toPNG())
-  console.log(`river smoke: wrote ${answered}`)
-
-  const concept = (await loadBoard(p.root, "main")).cards.find((c) => c.kind === "concept" && c.pending?.markId === mark.id)
-  if (!concept?.pending) {
-    console.error("river smoke: no pending concept card on disk")
-    return false
-  }
-  const jobId = concept.pending.jobId
-  if (!(await clickEl(w, `.concept[data-job-status="answered"] [data-action="accept"]`, 3_000))) return false
-  if (!(await waitImage(w, `.react-flow__node[data-id="${concept.id}"] .cnode-concept:not(.is-pending) img.cnode-img`, 30_000))) {
-    console.error("river smoke: the accepted card did not show its image")
-    return false
-  }
-  await sleep(500)
-  const accepted = join(dir, "job-accepted.png")
-  await writeFile(accepted, (await w.webContents.capturePage()).toPNG())
-  console.log(`river smoke: wrote ${accepted}`)
-
-  const conceptDir = join(p.root, "concepts", concept.ref)
-  const files = { "draw.gd": await exists(join(conceptDir, "draw.gd")), "concept.png": await exists(join(conceptDir, "concept.png")) }
+  await shoot(w, dir, "job-accepted.png")
   const job = await loadJob(p.root, jobId)
+  const conceptDir = join(p.root, "concepts", job.conceptId)
+  const files = {
+    "draw_c.gd": await exists(join(conceptDir, "draw_c.gd")),
+    "concept_c.png": await exists(join(conceptDir, "concept_c.png")),
+    "draw_a.gd (not kept)": await exists(join(conceptDir, "draw_a.gd")),
+  }
+  // The kept option closes up to where the row started.
+  const rowStart = Math.min(...options.map((c) => c.x))
+  const closed = await until(async () => (await loadCard(p.root, "main", optionC.id))?.x === rowStart, 5_000)
   const markNow = (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)
-  console.log(`river smoke: concepts/${concept.ref}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}`)
+  console.log(`river smoke: concepts/${job.conceptId}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}; kept card ${closed ? "moved to the row start" : "did NOT close the gap"}`)
+  const keptOk = sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
 
+  // Dismiss the second answer with a reason: the job, its cards and connectors go, and the reason joins the brief.
   await key(w, "Escape")
   await key(w, "1", ["shift"])
   await sleep(500)
-  if (!(await clickEl(w, `[data-mark="${toDismiss.id}"] .mark-pin`, 3_000))) return false
-  if (!(await clickEl(w, `[data-action="ask-concept"]`, 3_000))) return false
-  if (!(await clickEl(w, `[data-action="show-answer"]`, 120_000))) return false
-  if (!(await clickEl(w, `.concept[data-job-status="approval"] [data-action="dismiss"]`, 120_000))) return false
-  const until = Date.now() + 10_000
-  let dismissedJob: string | undefined
-  let leftover: Card[] = []
-  while (Date.now() < until) {
-    const board = await loadBoard(p.root, "main")
-    dismissedJob = board.marks.find((m) => m.id === toDismiss.id)?.jobId
-    leftover = board.cards.filter((c) => c.pending?.markId === toDismiss.id)
-    const status = dismissedJob ? (await loadJob(p.root, dismissedJob)).status : undefined
-    const onCanvas = (await w.webContents.executeJavaScript(`document.querySelectorAll(".concept[data-job-status]").length`)) as number
-    if (status === "dismissed" && leftover.length === 0 && onCanvas === 0) break
-    await sleep(200)
-  }
-  const dismissed = dismissedJob ? (await loadJob(p.root, dismissedJob)).status === "dismissed" && leftover.length === 0 : false
-  console.log(`river smoke: dismiss leg: job ${dismissedJob} ${dismissed ? "dismissed, card gone" : "NOT dismissed"}`)
-  const ok = files["draw.gd"] && files["concept.png"] && job.status === "accepted" && dismissed
+  const gone = await askAndShow(toDismiss.id)
+  if (!gone) return false
+  const goneJob = gone.note.pending!.jobId
+  if (!(await waitRect(w, `.react-flow__node[data-id="${gone.note.id}"] [data-action="review"]`, 120_000))) return false
+  if (!(await clickEl(w, `.react-flow__node[data-id="${gone.note.id}"] [data-action="dismiss"]`, 3_000))) return false
+  if (!(await clickEl(w, ".ref-form input", 3_000))) return false
+  await typeText(w, "too dark for a calm walk")
+  if (!(await clickEl(w, `[data-action="dismiss-confirm"]`, 3_000))) return false
+  const dismissed = await until(async () => {
+    const b = await loadBoard(p.root, "main")
+    return (await loadJob(p.root, goneJob)).status === "dismissed" && !b.cards.some((c) => c.pending?.jobId === goneJob) && !b.edges.some((e) => e.id.includes(goneJob.slice(2)))
+  }, 10_000)
+  const brief = await readFile(join(p.root, ".river", "brief.md"), "utf8").catch(() => "")
+  const reasoned = brief.includes("too dark for a calm walk")
+  console.log(`river smoke: dismiss leg: job ${goneJob} ${dismissed ? "dismissed, cards and connectors gone" : "NOT dismissed"}; reason ${reasoned ? "is" : "is NOT"} in .river/brief.md`)
+
+  // Reply on the first mark, then revise: a new job starts from the kept answer.
+  await key(w, "Escape")
+  await key(w, "1", ["shift"])
+  await sleep(500)
+  if (!(await clickEl(w, `[data-mark="${mark.id}"] .mark-pin`, 5_000))) return false
+  if (!(await clickEl(w, ".mark-reply textarea", 3_000))) return false
+  await typeText(w, "warmer light please")
+  if (!(await clickEl(w, `.mark-reply [data-action="reply"]`, 3_000))) return false
+  const replied = await until(async () => (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)?.thread.some((t) => t.by === "you" && t.text === "warmer light please") ?? false, 4_000)
+  if (!(await clickEl(w, `.mark-panel [data-action="revise"]`, 5_000))) return false
+  const revised = await until(async () => {
+    const m = (await loadBoard(p.root, "main")).marks.find((x) => x.id === mark.id)
+    return Boolean(m?.jobId && m.jobId !== jobId && (await loadJob(p.root, m.jobId)).parentJobId === jobId)
+  }, 15_000)
+  console.log(`river smoke: reply ${replied ? "saved in the thread" : "NOT saved"}; revise ${revised ? "started a job revising " + jobId : "did NOT start"}`)
+
+  const ok = keptOk && dismissed && reasoned && replied && revised
   console.log(`river smoke: job checks ${ok ? "PASSED" : "FAILED"}`)
   return ok
 }

@@ -286,30 +286,10 @@
   color: var(--star);
   animation: concept-breathe 2.4s ease-in-out infinite;
 }
-.concept-status {
-  margin: 0;
-  color: var(--star);
-  font-size: 12px;
-  font-weight: 600;
-}
 @keyframes concept-breathe {
   50% {
     opacity: 0.55;
   }
-}
-.concept-panel {
-  display: grid;
-  gap: 8px;
-  padding: 8px 10px;
-  background: var(--card);
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
-}
-.concept-summary {
-  margin: 0;
-  color: var(--text-2);
-  font-size: 12px;
-  line-height: 1.5;
 }
 .concept-warn {
   margin: 0;
@@ -319,11 +299,6 @@
   color: var(--cond);
   font-size: 11.5px;
   line-height: 1.45;
-}
-.concept-script {
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--panel);
 }
 .concept-script-head {
   display: flex;
@@ -1021,4 +996,137 @@
 .shot-pin {
   margin: 2px 0 6px 10px;
   font-size: 11px;
+}
+
+/* ---- a job's answer ---- */
+.job-bar {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--note-agent-line) 80%, transparent);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 400;
+}
+.cnode-concept .job-bar {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--card);
+}
+.job-line {
+  margin: 0;
+  color: var(--star);
+  font-weight: 600;
+}
+.job-line.is-working {
+  animation: concept-breathe 2.4s ease-in-out infinite;
+}
+.job-bar .concept-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.keep-chip {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  height: 26px;
+  padding: 0 11px;
+  border: none;
+  border-radius: 13px;
+  background: rgb(255 255 255 / 0.94);
+  color: #23221f;
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+  cursor: pointer;
+}
+.keep-chip:hover {
+  background: #fff;
+  color: var(--sel);
+}
+.render-error {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  aspect-ratio: 4 / 3;
+  padding: 36px 10px 10px;
+  overflow: auto;
+  border-radius: 3px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1.4;
+  cursor: text;
+  user-select: text;
+}
+.render-error pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+.review {
+  width: min(760px, 92%);
+  max-height: calc(100% - 48px);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  gap: 10px;
+  padding: 16px;
+  background: var(--chrome);
+  border: 1px solid var(--chrome-line);
+  border-radius: 12px;
+  box-shadow: var(--chrome-shadow), 0 20px 60px rgb(0 0 0 / 0.18);
+}
+.review-list {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+}
+.review-script {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.review-script .concept-script-head {
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.review-script .concept-script-head b {
+  color: var(--ink);
+}
+.review-caption {
+  color: var(--cap);
+}
+.review-script .concept-script-text {
+  max-height: none;
+}
+.mark-claim {
+  margin: 6px 0 0;
+  color: var(--agent);
+  font-weight: 600;
+}
+.mark-reply {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.mark-reply textarea {
+  resize: vertical;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.4;
 }

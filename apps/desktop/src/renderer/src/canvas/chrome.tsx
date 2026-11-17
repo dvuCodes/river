@@ -1,6 +1,7 @@
 import { useReactFlow, useViewport, useViewportStore } from "@xyflow/react"
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react"
 import type { Mark, MarkStatus } from "@river/core"
+import type { JobDTO } from "../../../shared/api"
 import { cx, errorText, shortTime } from "../util"
 import type { Pt } from "./geometry"
 import { ME } from "./nodes"
@@ -294,6 +295,103 @@ export function RefForm(props: { fileName: string; licence: string; left: number
   )
 }
 
+// ---------- concept jobs ----------
+
+/** Every script a job wants to run, each with the hash of exactly the bytes shown; Run all approves those hashes. */
+export function ReviewDialog(props: { jobId: string; onClose(): void }) {
+  const [dto, setDto] = useState<JobDTO | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    window.river.jobGet(props.jobId).then(setDto, (e: unknown) => setErr(errorText(e)))
+  }, [props.jobId])
+  const scripts = dto?.scripts ?? []
+  const run = () => {
+    setBusy(true)
+    window.river.jobApprove(props.jobId, Object.fromEntries(scripts.map((s) => [s.file, s.sha256]))).then(props.onClose, (e: unknown) => {
+      setErr(errorText(e))
+      setBusy(false)
+    })
+  }
+  return (
+    <div className="canvas-modal" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="review" role="dialog" aria-label="Review the scripts">
+        <header className="dialog-head">
+          <h2>{!dto ? "Review" : scripts.length > 1 ? `Review ${scripts.length} scripts` : "Review the script"}</h2>
+          <span className="mono sec-hint">{props.jobId}</span>
+        </header>
+        <p className="concept-warn">Running a script executes its code on this computer. Read each one before you run them.</p>
+        <div className="review-list nowheel">
+          {scripts.map((s) => (
+            <section key={s.file} className="review-script" data-variant={s.variant ?? ""}>
+              <header className="concept-script-head">
+                <span>
+                  <b>{s.variant ? `Option ${s.variant.toUpperCase()}` : "Script"}</b>
+                  {s.caption && <span className="review-caption"> · {s.caption}</span>}
+                </span>
+                <span className="mono" title={`${s.file} sha256 ${s.sha256}`}>
+                  {s.file.split("/").pop()} · {s.sha256.slice(0, 12)}
+                </span>
+              </header>
+              <pre className="concept-script-text">{s.text}</pre>
+            </section>
+          ))}
+          {dto && !dto.scripts && <p className="sec-hint">This job is {dto.job.status} now; there is nothing to run.</p>}
+          {!dto && !err && <p className="sec-hint">Reading the scripts…</p>}
+        </div>
+        {err && <p className="err-note">{err}</p>}
+        <footer className="dialog-foot">
+          <button type="button" className="btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button className="btn btn-primary" data-action="run" disabled={busy || scripts.length === 0} onClick={run}>
+            {scripts.length > 1 ? `Run all ${scripts.length}` : "Run script"}
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+/** Dismiss a whole answer; the reason, when given, joins the project brief so later answers avoid it. */
+export function DismissDialog(props: { onDismiss(reason: string): Promise<void>; onCancel(): void }) {
+  const [reason, setReason] = useState("")
+  const [err, setErr] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  return (
+    <div className="canvas-modal" onPointerDown={(e) => e.stopPropagation()}>
+      <form
+        className="ref-form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          setBusy(true)
+          props.onDismiss(reason.trim()).catch((x: unknown) => {
+            setErr(errorText(x))
+            setBusy(false)
+          })
+        }}
+      >
+        <header className="dialog-head">
+          <h2>Dismiss this answer</h2>
+        </header>
+        <label className="field">
+          <span>Why not? Optional; it goes into the project brief, so later answers avoid it.</span>
+          <input value={reason} placeholder="too dark, wrong era, the dog is missing…" autoFocus onChange={(e) => setReason(e.target.value)} />
+        </label>
+        {err && <p className="err-note">{err}</p>}
+        <footer className="dialog-foot">
+          <button type="button" className="btn" onClick={props.onCancel}>
+            Keep it
+          </button>
+          <button className="btn btn-danger" data-action="dismiss-confirm" disabled={busy}>
+            Dismiss
+          </button>
+        </footer>
+      </form>
+    </div>
+  )
+}
+
 // ---------- marks ----------
 
 /** "What do you want?" box placed beside a fresh mark. */
@@ -341,9 +439,39 @@ const STATUS_LABEL: Record<MarkStatus, string> = {
   dismissed: "dismissed",
 }
 
-export function MarkPanel(props: { mark: Mark; answers: number; cardTitle(id: string): string; onAsk(): Promise<void>; onShowAnswer(): void; onDelete(): void; onClose(): void }) {
+export function MarkPanel(props: {
+  mark: Mark
+  answers: number
+  cardTitle(id: string): string
+  onAsk(): Promise<void>
+  onReply(text: string): Promise<void>
+  onRevise(jobId: string): Promise<void>
+  onShowAnswer(): void
+  onDelete(): void
+  onClose(): void
+}) {
   const { mark: m } = props
   const [asking, setAsking] = useState(false)
+  const [reply, setReply] = useState("")
+  const [sending, setSending] = useState(false)
+  const [revisable, setRevisable] = useState(false)
+  // The thread changes when you reply, so whether the answer can be revised is asked again.
+  useEffect(() => {
+    let live = true
+    if (!m.jobId) setRevisable(false)
+    else window.river.jobGet(m.jobId).then((d) => live && setRevisable(d.revisable), () => live && setRevisable(false))
+    return () => {
+      live = false
+    }
+  }, [m])
+  const send = () => {
+    if (!reply.trim()) return
+    setSending(true)
+    props
+      .onReply(reply)
+      .then(() => setReply(""))
+      .finally(() => setSending(false))
+  }
   return (
     <aside className="mark-panel" onPointerDown={(e) => e.stopPropagation()}>
       <header className="mark-panel-head">
@@ -356,6 +484,7 @@ export function MarkPanel(props: { mark: Mark; answers: number; cardTitle(id: st
           ×
         </button>
       </header>
+      {m.claimedBy && <p className="mark-claim">✦ claimed by {m.claimedBy}</p>}
       {m.anchors.length > 0 && (
         <p className="mark-panel-anchors">
           On{" "}
@@ -393,7 +522,35 @@ export function MarkPanel(props: { mark: Mark; answers: number; cardTitle(id: st
           {asking ? "Starting…" : "✦ Ask concept artist"}
         </button>
       )}
-      {m.status === "working" && <p className="mark-working">✦ The concept artist is on it. Its card beside the mark shows each step.</p>}
+      {m.status === "working" && <p className="mark-working">✦ {m.claimedBy ? `${m.claimedBy} is on it.` : "The concept artist is on it. Its card beside the mark shows each step."}</p>}
+      <form
+        className="mark-reply"
+        onSubmit={(e) => {
+          e.preventDefault()
+          send()
+        }}
+      >
+        <textarea
+          value={reply}
+          rows={2}
+          placeholder={m.thread.length ? "Reply: say what to change…" : "What do you want?"}
+          onChange={(e) => setReply(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault()
+              send()
+            }
+          }}
+        />
+        <button className="btn" data-action="reply" disabled={sending || !reply.trim()}>
+          Reply
+        </button>
+      </form>
+      {revisable && m.jobId && (
+        <button className="btn btn-primary mark-ask" data-action="revise" onClick={() => void props.onRevise(m.jobId!).then(() => setRevisable(false))}>
+          ✦ Revise the answer
+        </button>
+      )}
       {props.answers > 0 && (
         <button className="btn mark-ask" data-action="show-answer" onClick={props.onShowAnswer}>
           Show the answer{props.answers > 1 ? ` (${props.answers} cards)` : ""}

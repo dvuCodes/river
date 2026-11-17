@@ -5,7 +5,7 @@ type StartAgentTurn = (req: AgentTurnRequest, handlers: AgentTurnHandlers) => un
 type GetClaudeCodeStatus = (claudePath?: string) => Promise<ClaudeCodeStatus>
 type OpenClaudeSignIn = (claudePath?: string) => Promise<void>
 
-const JOB_FNS = ["startConceptJob", "readJobScript", "approveJobScript", "acceptJob", "dismissJob", "recoverJobs"] as const
+const JOB_FNS = ["startConceptJob", "readJobScripts", "approveJobScripts", "acceptJob", "dismissJob", "reviseJob", "repliesAfter", "recoverJobs"] as const
 export type JobApi = Pick<typeof Agent, (typeof JOB_FNS)[number]>
 
 export interface LoadedAgent {

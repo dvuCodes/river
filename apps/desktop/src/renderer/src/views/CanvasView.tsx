@@ -15,11 +15,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import "@fontsource/caveat/600.css"
 import type { Card, Edge, Mark, MarkShape } from "@river/core"
 import type { BoardDTO, CardDTO, StagedImage } from "../../../shared/api"
-import { AskBox, BoardPill, type JumpItem, Lightbox, MarkPanel, QuickJump, RefForm, SelectionBar, TOOLS, type Tool, ToolBar, ZoomControls } from "../canvas/chrome"
+import { AskBox, BoardPill, DismissDialog, type JumpItem, Lightbox, MarkPanel, QuickJump, RefForm, ReviewDialog, SelectionBar, TOOLS, type Tool, ToolBar, ZoomControls } from "../canvas/chrome"
 import { type Pt, type Rect, anchorsFor, bounds, ellipsePoints, flatten, grow, intersects, markBox, translatePath } from "../canvas/geometry"
 import { type Step, createHistory } from "../canvas/history"
 import { LinkEdge, type LinkEdgeType, linkEdge } from "../canvas/LinkEdge"
-import { Actions, type BoardNode, type CanvasActions, CardView, ME, MarkShapeView, MarkView, cardNode, markNode } from "../canvas/nodes"
+import { Actions, AnswerNotes, type BoardNode, type CanvasActions, CardView, ME, MarkShapeView, MarkView, cardNode, markNode } from "../canvas/nodes"
 import { cx, errorText, useSmokeReady } from "../util"
 import "../canvas/canvas.css"
 
@@ -122,6 +122,8 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
   const [jumping, setJumping] = useState(false)
   const [lightbox, setLightbox] = useState<string | null>(null)
   const [dropping, setDropping] = useState(false)
+  const [reviewing, setReviewing] = useState<string | null>(null)
+  const [dismissing, setDismissing] = useState<string | null>(null)
   const lastPen = useRef<{ id: string; endedAt: number; box: Rect } | null>(null)
   const pointer = useRef<Pt | null>(null)
   /** Ids to select once their nodes exist (after a duplicate). */
@@ -364,9 +366,17 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
       remove: (id) => deleteItems([id]),
       refresh,
       fail,
+      review: setReviewing,
+      dismissJob: setDismissing,
     }),
     [commit, deleteItems, refresh, fail],
   )
+  const answerNotes = useMemo(() => new Set(cardList.flatMap((d) => (d.card.kind === "note" && d.card.pending ? [d.card.pending.jobId] : []))), [cardList])
+
+  const reply = async (markId: string, text: string) => {
+    const { mark, openMarks } = await window.river.boardReply(board, markId, text)
+    putMark(mark.id, mark, openMarks)
+  }
 
   /** Saves where dragged cards and marks ended up, as one step. A moved mark is re-anchored to the cards under it. */
   const persistMoves = (moved: BoardNode[]) => {
@@ -547,9 +557,7 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
     setAsk(null)
     lastPen.current = null
     if (!a || !text) return
-    const m = stateRef.current?.marks[a.markId]
-    if (!m) return
-    void commit([{ kind: "mark", id: m.id, before: { thread: m.thread }, after: { thread: [...m.thread, { by: ME, at: new Date().toISOString(), text }] } }])
+    reply(a.markId, text).catch(fail)
   }
 
   const placeNote = (p: Pt) => {
@@ -723,6 +731,7 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
           </div>
         )}
         <Actions.Provider value={actions}>
+          <AnswerNotes.Provider value={answerNotes}>
           <ReactFlow<BoardNode, LinkEdgeType>
             nodes={nodes}
             edges={links}
@@ -747,6 +756,7 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
             panOnScroll
             zoomOnDoubleClick={false}
             onlyRenderVisibleElements={CULL}
+            elevateEdgesOnSelect={false}
             minZoom={0.05}
             maxZoom={4}
             proOptions={{ hideAttribution: true }}
@@ -807,6 +817,7 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
               <ZoomControls />
             </Panel>
           </ReactFlow>
+          </AnswerNotes.Provider>
         </Actions.Provider>
         <BoardPill board={board} items={cardList.length} openMarks={state?.openMarks ?? 0} onBoard={props.onBoard} />
         {selectedNodes.length + selectedLinks.length > 0 && !soleMark && (
@@ -825,6 +836,8 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
             onShowAnswer={() => showAnswer(soleMark.id)}
             cardTitle={cardTitle}
             onAsk={() => window.river.jobStart(board, soleMark.id).catch(fail)}
+            onReply={(text) => reply(soleMark.id, text).catch(fail)}
+            onRevise={(jobId) => window.river.jobRevise(jobId).catch(fail)}
             onClose={() => setSelected(() => false)}
             onDelete={() => deleteItems([soleMark.id])}
           />
@@ -861,6 +874,19 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
           />
         )}
         {box && <Lightbox url={box.url} caption={box.caption} onClose={() => setLightbox(null)} />}
+        {reviewing && <ReviewDialog key={reviewing} jobId={reviewing} onClose={() => setReviewing(null)} />}
+        {dismissing && (
+          <DismissDialog
+            onCancel={() => setDismissing(null)}
+            onDismiss={async (reason) => {
+              const jobId = dismissing
+              await window.river.jobDismiss(jobId, reason || undefined)
+              // The job removes its own cards and connectors; the watcher brings that in, this is only quicker.
+              for (const d of Object.values(stateRef.current?.cards ?? {})) if (d.card.pending?.jobId === jobId) putCard(d.card.id, null)
+              setDismissing(null)
+            }}
+          />
+        )}
       </div>
     </div>
   )

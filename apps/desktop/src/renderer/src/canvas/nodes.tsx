@@ -1,7 +1,7 @@
 import { Handle, type Node, type NodeProps, NodeResizeControl, Position, ResizeControlVariant } from "@xyflow/react"
 import { type ReactNode, createContext, memo, useContext, useEffect, useRef, useState } from "react"
 import type { Card, Mark } from "@river/core"
-import type { CardDTO, ImageSize, JobDTO } from "../../../shared/api"
+import type { CardDTO, ConceptJob, ImageSize } from "../../../shared/api"
 import { cx } from "../util"
 import { type Pt, arrowPath, bounds, markBox, pointsOf, smoothPath, strokesOf } from "./geometry"
 
@@ -19,6 +19,10 @@ export interface CanvasActions {
   /** Read the card from disk again. */
   refresh(id: string): void
   fail(err: unknown): void
+  /** Open the review of a job's scripts. */
+  review(jobId: string): void
+  /** Ask why not, then dismiss a job's whole answer. */
+  dismissJob(jobId: string): void
 }
 export const Actions = createContext<CanvasActions | null>(null)
 
@@ -117,106 +121,136 @@ function NoteBody({ id, text }: { id: string; text: string }) {
 
 type ConceptView = Extract<CardDTO["view"], { kind: "concept" }>
 
-/** A concept card follows its job: drawing, waiting for the user to approve the script, rendering, then Accept or Dismiss. */
-function ConceptBody({ card, view, frame }: { card: Card; view: ConceptView; frame(content: ReactNode): ReactNode }) {
+/** Jobs whose answer has a note card on the board: that note carries the job's actions, so its option cards do not. */
+export const AnswerNotes = createContext<ReadonlySet<string>>(new Set())
+
+function useJobAction(cardId: string) {
   const actions = useContext(Actions)!
-  const [script, setScript] = useState<JobDTO["script"] | null>(null)
   const [busy, setBusy] = useState(false)
-  const jobId = card.pending?.jobId
-  const status = view.job?.status
-  useEffect(() => {
-    if (status !== "approval") setScript(null)
-  }, [status])
-  const image = <CardImage url={view.url} size={view.size} alt={`Concept ${view.id}`} />
-  if (!jobId) return frame(image)
   const act = (fn: () => Promise<unknown>) => {
     setBusy(true)
     fn()
       .catch(actions.fail)
       .finally(() => {
         setBusy(false)
-        actions.refresh(card.id)
+        actions.refresh(cardId)
       })
   }
-  const placeholder = (text: string) => frame(<div className="concept-wait">{text}</div>)
-  // Variant cards of one job share its summary; the agent's note card carries it.
-  const summary = !card.variant && view.job?.summary && <p className="concept-summary">{view.job.summary}</p>
-  let content: ReactNode
-  if (view.missing) content = <p className="cnode-missing">{view.missing}</p>
-  else
-    switch (status) {
-      case "queued":
-      case "running":
-        content = placeholder("✦ concept artist is drawing…")
-        break
-      case "approval":
-        content = (
-          <>
-            <div className="concept-panel">
-              <p className="concept-status">✦ Waiting for you to review the script</p>
-              {summary}
-              <p className="concept-warn">Running the script executes its code on this computer. Read it before you run it.</p>
-              {script && (
-                <div className="concept-script">
-                  <div className="concept-script-head">
-                    <span className="mono" title={script.file}>
-                      {script.file.split("/").pop()}
-                    </span>
-                    <span className="mono" title={script.sha256}>
-                      sha256 {script.sha256.slice(0, 12)}
-                    </span>
-                  </div>
-                  <pre className="concept-script-text nodrag nowheel">{script.text}</pre>
-                </div>
-              )}
-            </div>
-          </>
-        )
-        break
-      case "rendering":
-        content = placeholder("Running the approved script in Godot…")
-        break
-      case "failed":
-        content = (
-          <div className="concept-panel">
-            <p className="cnode-missing concept-error nodrag nowheel">{view.job?.error ?? "The job failed."}</p>
-          </div>
-        )
-        break
-      default:
-        content = (
-          <>
-            {frame(image)}
-            {summary && <div className="concept-panel">{summary}</div>}
-          </>
-        )
-    }
-  const open = status !== "accepted" && status !== "dismissed"
+  return { busy, act }
+}
+
+/** The answer as a whole: what the job is doing, and Review / Accept / Revise / Dismiss. */
+function JobBar({ job, cardId }: { job: ConceptJob; cardId: string }) {
+  const actions = useContext(Actions)!
+  const { busy, act } = useJobAction(cardId)
+  const scripts = job.scripts ?? []
+  const rendered = scripts.filter((s) => s.render?.ok).length
+  const failed = scripts.filter((s) => s.render && !s.render.ok).length
+  let line: ReactNode
+  switch (job.status) {
+    case "queued":
+    case "running":
+      line = <p className="job-line is-working">✦ The concept artist is drawing…</p>
+      break
+    case "approval":
+      line = <p className="job-line">✦ {scripts.length > 1 ? `${scripts.length} scripts are` : "A script is"} waiting for you to review</p>
+      break
+    case "rendering":
+      line = <p className="job-line is-working">Running the approved scripts in Godot…</p>
+      break
+    case "answered":
+      line = failed > 0 ? <p className="job-line">{rendered} rendered, {failed} failed to render</p> : null
+      break
+    case "failed":
+      line = <p className="cnode-missing concept-error nodrag nowheel">{job.error ?? "The job failed."}</p>
+      break
+    default:
+      line = null
+  }
+  const open = job.status !== "accepted" && job.status !== "dismissed"
+  if (!open && !job.revisable) return null
   return (
-    <div className="concept" data-job-status={status ?? "missing"}>
-      {content}
-      {open && (
-        <div className="concept-actions">
-          {status === "approval" &&
-            (script ? (
-              <button className="btn btn-primary nodrag" data-action="run" disabled={busy} onClick={() => act(() => window.river.jobApprove(jobId, script.sha256))}>
-                Run script
-              </button>
-            ) : (
-              <button className="btn btn-primary nodrag" data-action="review" disabled={busy} onClick={() => act(() => window.river.jobGet(jobId).then((d) => setScript(d.script ?? null)))}>
-                Review script
-              </button>
-            ))}
-          {status === "answered" && (
-            <button className="btn btn-primary nodrag" data-action="accept" disabled={busy} onClick={() => act(() => window.river.jobAccept(jobId))}>
-              Accept
-            </button>
-          )}
-          <button className="btn nodrag" data-action="dismiss" disabled={busy} onClick={() => actions.remove(card.id)}>
+    <div className="job-bar" data-job-status={job.status}>
+      {line}
+      <div className="concept-actions">
+        {job.status === "approval" && (
+          <button className="btn btn-primary nodrag" data-action="review" onClick={() => actions.review(job.id)}>
+            Review {scripts.length > 1 ? `${scripts.length} scripts` : "script"}
+          </button>
+        )}
+        {job.status === "answered" && rendered > 0 && (
+          <button className="btn btn-primary nodrag" data-action="accept" disabled={busy} onClick={() => act(() => window.river.jobAccept(job.id))}>
+            {rendered > 1 ? "Accept all" : "Accept"}
+          </button>
+        )}
+        {job.revisable && (
+          <button className="btn nodrag" data-action="revise" disabled={busy} title="Answer your replies on the mark with a new set of options" onClick={() => act(() => window.river.jobRevise(job.id))}>
+            Revise
+          </button>
+        )}
+        {open && (
+          <button className="btn nodrag" data-action="dismiss" disabled={busy} onClick={() => actions.dismissJob(job.id)}>
             Dismiss
           </button>
-        </div>
-      )}
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** One option of a job's answer: its own progress, its render or the error Godot gave, and Keep. */
+function ConceptBody({ card, view, frame }: { card: Card; view: ConceptView; frame(content: ReactNode): ReactNode }) {
+  const notes = useContext(AnswerNotes)
+  const { busy, act } = useJobAction(card.id)
+  const jobId = card.pending?.jobId
+  const image = <CardImage url={view.url} size={view.size} alt={card.caption ?? `Concept ${view.id}`} />
+  if (!jobId) return frame(image)
+  if (view.missing || !view.job) return <p className="cnode-missing">{view.missing ?? "The job is missing."}</p>
+  const job = view.job
+  const script = job.scripts?.find((s) => s.variant === card.variant)
+  const placeholder = (text: string, working = true) => frame(<div className={cx("concept-wait", working && "is-working")}>{text}</div>)
+  // Keeping one option accepts just it; the job's own Accept takes all of them.
+  const keepable = job.status === "answered" && script?.render?.ok && card.variant && (job.scripts ?? []).length > 1
+  const keep = keepable && (
+    <button className="keep-chip nodrag" data-action="keep" disabled={busy} title="Accept only this option" onClick={() => act(() => window.river.jobAccept(job.id, [card.variant!]))}>
+      Keep {card.label ?? card.variant!.toUpperCase()}
+    </button>
+  )
+  let body: ReactNode
+  if (script?.render && !script.render.ok) {
+    body = frame(
+      <div className="render-error nodrag nowheel">
+        <b>Godot could not render this option</b>
+        <pre>{script.render.error}</pre>
+      </div>,
+    )
+  } else
+    switch (job.status) {
+      case "queued":
+      case "running":
+        body = placeholder("✦ drawing…")
+        break
+      case "approval":
+        body = placeholder("Waiting for you to review the script", false)
+        break
+      case "rendering":
+        body = script?.render?.ok ? frame(image) : placeholder("Rendering in Godot…")
+        break
+      case "failed":
+        body = placeholder("No render", false)
+        break
+      default:
+        body = frame(
+          <>
+            {image}
+            {keep}
+          </>,
+        )
+    }
+  return (
+    <div className="concept" data-job-status={job.status} data-variant={card.variant ?? ""}>
+      {body}
+      {!notes.has(job.id) && <JobBar job={job} cardId={card.id} />}
     </div>
   )
 }
@@ -279,6 +313,7 @@ export const CardView = memo(function CardView({ id, data, selected }: NodeProps
         <>
           {agent && <Star by={card.madeBy} />}
           <NoteBody id={id} text={card.text ?? ""} />
+          {view.job && <JobBar job={view.job} cardId={id} />}
           {pending && <span className="cnode-pending-tag">pending</span>}
         </>
       )

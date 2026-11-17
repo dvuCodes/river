@@ -5,6 +5,7 @@
 import type {
   AgentBackend,
   AgentEvent,
+  JobScript,
   AgentMode,
   AgentModel,
   ClaudeCodeStatus,
@@ -178,15 +179,20 @@ export type CardView =
       /** The pending card's job file could not be read. */
       missing?: string
     }
-  | { kind: "note" }
+  /** A pending note is a job's answer note: it carries the job, for the answer's actions. */
+  | { kind: "note"; job?: ConceptJob }
 
-export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error">
+export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error" | "scripts"> & {
+  /** The user replied on the mark since this answer, or the job failed: it can be revised. */
+  revisable: boolean
+}
 
-/** A job and, while it waits for approval, the exact script bytes it wants to run. */
+/** A job and, while it waits for approval, the exact bytes of every script it wants to run. */
 export interface JobDTO {
   job: Job
-  /** sha256 of exactly these bytes: approving sends it back, so only the shown script can run. */
-  script?: { file: string; sha256: string; text: string }
+  /** Each with the sha256 of exactly these bytes: approving sends them back, so only the shown scripts can run. */
+  scripts?: JobScript[]
+  revisable: boolean
 }
 
 export interface CardDTO {
@@ -262,6 +268,8 @@ export interface RiverApi {
   /** Saves the mark; returns it with the board's open mark count. */
   boardSaveMark(name: string, mark: NewMark): Promise<{ mark: Mark; openMarks: number }>
   boardDeleteMark(name: string, markId: string): Promise<number>
+  /** Add your message to a mark's thread (core replyToMark); returns it with the open mark count. */
+  boardReply(name: string, markId: string, text: string): Promise<{ mark: Mark; openMarks: number }>
   boardOpenCount(name: string): Promise<number>
   /** Add a passage ("<story>#<id>") or frame (shot id) card at the next free spot. */
   boardPin(name: string, pin: { kind: "passage" | "frame"; ref: string; rev?: string }): Promise<CardDTO>
@@ -275,10 +283,14 @@ export interface RiverApi {
   /** Ask the concept artist about a mark. Runs in the background; progress shows on the mark and its concept card. */
   jobStart(board: string, markId: string): Promise<void>
   jobGet(jobId: string): Promise<JobDTO>
-  /** Run the script whose bytes hash to `sha256` (from jobGet) and render it. */
-  jobApprove(jobId: string, sha256: string): Promise<void>
-  jobAccept(jobId: string): Promise<void>
-  jobDismiss(jobId: string): Promise<void>
+  /** Run every script, each only if its bytes still hash to the sha256 shown (file -> sha256, from jobGet). */
+  jobApprove(jobId: string, shas: Record<string, string>): Promise<void>
+  /** Keep the rendered options `variants` ("a".."e"), or all of them. */
+  jobAccept(jobId: string, variants?: string[]): Promise<void>
+  /** `reason`, when given, goes into the project brief so later answers avoid it. */
+  jobDismiss(jobId: string, reason?: string): Promise<void>
+  /** A new job revising this answer after the user's replies on the mark. Runs in the background like jobStart. */
+  jobRevise(jobId: string): Promise<void>
   // agent
   agentStatus(): Promise<AgentStatus>
   agentStart(req: AgentStartRequest): Promise<string>

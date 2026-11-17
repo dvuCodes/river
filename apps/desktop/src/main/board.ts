@@ -5,11 +5,13 @@ import { type BrowserWindow, dialog } from "electron"
 import {
   type Card,
   type Edge,
+  type Job,
   type Mark,
   type Project,
   type Story,
   boardJsonText,
   cardFile,
+  cardHeight,
   deleteCard,
   deleteEdge,
   deleteMark,
@@ -24,15 +26,20 @@ import {
   loadStory,
   markFile,
   newBoardId,
+  occupiedRects,
   openMarks,
+  placeRow,
+  replyToMark,
   saveCard,
   saveEdge,
   saveMark,
 } from "@river/core"
-import type { BoardDTO, CardDTO, CardView, ImageSize, NewCard, NewEdge, NewMark, StagedImage } from "../shared/api"
+import type { BoardDTO, CardDTO, CardView, ConceptJob, ImageSize, NewCard, NewEdge, NewMark, StagedImage } from "../shared/api"
+import { loadAgent } from "./agent"
 import { imageSize } from "./imageSize"
 import { noteOwnWrite } from "./watch"
 
+const ME = "you"
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp"])
 
 export function riverFileUrl(p: Project, abs: string): string {
@@ -61,6 +68,45 @@ async function imageAt(p: Project, abs: string): Promise<{ url?: string; size?: 
 /** Card files are written by agents too, and the variant becomes part of a file name. */
 const VARIANT = /^[a-e]$/
 
+/**
+ * Whether the answer can be revised: it is the mark's latest job, and the job failed or the user replied on the
+ * mark since it answered (the same rule reviseJob applies).
+ */
+export async function jobRevisable(root: string, job: Job): Promise<boolean> {
+  if (!["answered", "accepted", "failed"].includes(job.status)) return false
+  const mark = await loadMark(root, job.board, job.markId).catch(() => undefined)
+  if (mark?.jobId !== job.id) return false
+  if (job.status === "failed") return true
+  const jobs = (await loadAgent()).jobs
+  return jobs ? jobs.repliesAfter(mark, job).length > 0 : false
+}
+
+async function jobView(p: Project, jobId: string): Promise<{ job: ConceptJob } | { missing: string }> {
+  try {
+    const job = await loadJob(p.root, jobId)
+    const { id, status, summary, error, scripts } = job
+    return { job: { id, status, summary, error, scripts, revisable: await jobRevisable(p.root, job) } }
+  } catch (e) {
+    return { missing: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * After keeping some of a job's options, the kept cards close up into one row where the options started. Written
+ * with core's saveCard, not as River's own write, so the watcher reports the move to the canvas.
+ */
+export async function closeRowGap(root: string, board: string, options: readonly Card[]): Promise<void> {
+  const now = await loadBoard(root, board)
+  const kept = options.map((o) => now.cards.find((c) => c.id === o.id)).filter((c): c is Card => c !== undefined).sort((a, b) => a.x - b.x)
+  if (kept.length === 0) return
+  const start = { x: Math.min(...options.map((c) => c.x)), y: Math.min(...options.map((c) => c.y)) }
+  const spots = placeRow(start, kept.map((c) => ({ w: c.w, h: cardHeight(c) })), occupiedRects(now, new Set(kept.map((c) => c.id))))
+  for (const [i, c] of kept.entries()) {
+    const at = spots[i]!
+    if (at.x !== c.x || at.y !== c.y) await saveCard(root, board, { ...c, x: at.x, y: at.y })
+  }
+}
+
 /** A concept card: the job's render while pending, the applied concepts/<id>/concept[_<variant>].png once accepted. */
 async function conceptView(p: Project, card: Card): Promise<CardView> {
   if (card.variant !== undefined && !VARIANT.test(card.variant)) {
@@ -70,12 +116,7 @@ async function conceptView(p: Project, card: Card): Promise<CardView> {
   if (!card.pending) return { kind: "concept", id: card.ref, ...(await imageAt(p, join(p.root, "concepts", card.ref, `concept${suffix}.png`))) }
   const { jobId } = card.pending
   const image = await imageAt(p, join(p.root, ".river", "jobs", jobId, `render${suffix}.png`))
-  try {
-    const { id, status, summary, error } = await loadJob(p.root, jobId)
-    return { kind: "concept", id: card.ref, ...image, job: { id, status, summary, error } }
-  } catch (e) {
-    return { kind: "concept", id: card.ref, ...image, missing: e instanceof Error ? e.message : String(e) }
-  }
+  return { kind: "concept", id: card.ref, ...image, ...(await jobView(p, jobId)) }
 }
 
 /** First prose lines of a passage: no rule lines, no choice lines, links reduced to their labels. */
@@ -140,8 +181,10 @@ export function cardResolver(p: Project) {
       case "concept":
         view = await conceptView(p, card)
         break
-      default:
-        view = { kind: "note" }
+      default: {
+        const job = card.pending ? await jobView(p, card.pending.jobId) : undefined
+        view = job && "job" in job ? { kind: "note", job: job.job } : { kind: "note" }
+      }
     }
     return { card, view }
   }
@@ -233,6 +276,13 @@ export function boardHandlers(need: () => Project, onOpen: (dir: string) => void
     "board:deleteMark": async (name: string, id: string): Promise<number> => {
       await deleteMark(need().root, name, id)
       return countOpen(need(), name)
+    },
+    "board:reply": async (name: string, markId: string, text: string): Promise<{ mark: Mark; openMarks: number }> => {
+      const p = need()
+      if (typeof text !== "string" || !text.trim()) throw new Error("Write a reply first.")
+      const mark = await replyToMark(p.root, name, markId, ME, text.trim())
+      for (const cb of boardWritten) cb({ kind: "mark", value: mark })
+      return { mark, openMarks: await countOpen(p, name) }
     },
     "board:openCount": (name: string) => countOpen(need(), name),
     "board:pin": async (name: string, pin: { kind: "passage" | "frame"; ref: string; rev?: string }): Promise<CardDTO> => {
