@@ -38,7 +38,7 @@ Tools that write: `story_write_passage`, `story_add_passage`, `review_reply`, `p
 - Every path is relative to `--root`, and the server never writes outside it.
 - The story tools write only story files.
 - `implement_edit` runs only for a plan with status `approved`, and only on a file that the plan's steps name and that matches the `editable` globs in `river.json`. The `oldText` you pass must match exactly once.
-- `concept_write` writes only inside `concepts/<id>/`, and the only script it takes is `concepts/<id>/draw.gd`. For that file it returns the concept lint problems. River runs nothing it writes until the user approves the script's exact bytes.
+- `concept_write` writes only inside `concepts/<id>/`, and the only script it takes is `concepts/<id>/draw.gd`. It refuses names that start or end with a dot and Windows device names (CON, NUL, COM1 and the like). `draw.gd` may hold only printable ASCII, tabs and LF line ends; anything else is refused, so the text the user reads is the text that runs. For that file it returns the concept lint problems. River runs nothing it writes until the user approves the script's exact bytes.
 - Errors come back as MCP tool errors (`isError: true`). They do not stop the server.
 
 ## Use it in-process
