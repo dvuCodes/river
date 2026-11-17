@@ -13,7 +13,7 @@ import { createHash } from "node:crypto"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { hostname } from "node:os"
 import path from "node:path"
-import { godotSettings, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
+import { conceptScriptBytesProblem, godotSettings, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
 import {
   applyJobFiles,
   commitJobFile,
@@ -227,11 +227,17 @@ async function conceptPrompt(project: Project, board: string, mark: Mark): Promi
   return lines.join("\n")
 }
 
-/** The bytes of the job's script in its latest commit: the only copy River hashes, renders and applies. */
+/**
+ * The bytes of the job's script in its latest commit: the only copy River shows, hashes, renders and
+ * applies. Refuses bytes a person could not read as shown (a job committed before that rule).
+ */
 async function committedScript(root: string, job: Job): Promise<{ file: string; bytes: Buffer }> {
   const script = job.scripts?.[0]
   if (!script || !job.headSha) throw new Error(`river: job ${job.id} has no script yet`)
-  return { file: script.file, bytes: await readCommittedFile(root, job.headSha, inRepo(job, script.file)) }
+  const bytes = await readCommittedFile(root, job.headSha, inRepo(job, script.file))
+  const unreadable = conceptScriptBytesProblem(bytes)
+  if (unreadable) throw new Error(`river: refused: ${script.file} cannot be shown as it would run. ${unreadable} Dismiss the job and ask again.`)
+  return { file: script.file, bytes }
 }
 
 /**
@@ -328,6 +334,8 @@ async function runConceptTurn(project: Project, req: ConceptJobRequest, mark: Ma
     const file = conceptPath(job.conceptId, CONCEPT_SCRIPT)
     const written = await readFile(path.join(created.worktree, job.projectSub, file)).catch(() => undefined)
     if (!written) return await fail(root, job, errors.length > 0 ? errors.join("\n") : `The concept artist did not write ${file}.`)
+    const unreadable = conceptScriptBytesProblem(written)
+    if (unreadable) return await fail(root, job, `${file}: ${unreadable}`)
     const problems = lintConceptScript(written.toString("utf8"))
     if (problems.length > 0) return await fail(root, job, [`${file} does not pass the concept lint:`, ...problems].join("\n"))
 

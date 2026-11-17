@@ -69,7 +69,15 @@ describe("river mark and job", { timeout: 120_000 }, () => {
     expect(preview.code).toBe(0)
     expect(preview.out).toContain(`concepts/${job.id}/draw.gd  sha256 ${job.scripts![0]!.sha256}`)
     expect(preview.out).toContain(DRAW)
-    expect(preview.out).toContain("add --yes")
+    expect(preview.out).toContain(`river job approve --root ${root} --job ${job.id} --sha256 ${job.scripts![0]!.sha256} --yes`)
+    expect((await loadJob(root, job.id)).status).toBe("approval")
+
+    const unseen = await cli(["job", "approve", "--root", root, "--job", job.id, "--yes"])
+    expect(unseen.code).toBe(2)
+    expect(unseen.err).toContain("--sha256")
+    const wrong = await cli(["job", "approve", "--root", root, "--job", job.id, "--yes", "--sha256", "0".repeat(64)])
+    expect(wrong.code).toBe(1)
+    expect(wrong.err).toContain("refused")
     expect((await loadJob(root, job.id)).status).toBe("approval")
 
     const dismissed = await cli(["job", "dismiss", "--root", root, "--job", job.id])
@@ -82,7 +90,7 @@ describe("river mark and job", { timeout: 120_000 }, () => {
   it.skipIf(!process.env.GODOT_BIN)("job approve --yes renders with Godot and job accept applies the concept", async () => {
     const markId = (await cli(["mark", "add", "--root", root, "--text", "make this calmer"])).out.trim()
     const job = await startConceptJob({ workspaceRoot: root, board: "main", markId, model: "claude-sonnet-5-5", backend: "claude-code" }, { runTurn: writeDraw })
-    const approved = await cli(["job", "approve", "--root", root, "--job", job.id, "--yes"])
+    const approved = await cli(["job", "approve", "--root", root, "--job", job.id, "--sha256", job.scripts![0]!.sha256, "--yes"])
     expect(approved.code).toBe(0)
     expect(approved.out).toContain(`job ${job.id}  answered`)
     expect(approved.out).toContain(`render: ${path.join(root, ".river", "jobs", job.id, "render.png")}`)

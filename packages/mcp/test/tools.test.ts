@@ -246,9 +246,36 @@ describe("concept_write", () => {
       `/concepts/${CONCEPT}/draw.gd`,
       `concepts/${CONCEPT}/helper.gd`,
       `concepts/${CONCEPT}/draw.gd:stream`,
+      `concepts/${CONCEPT}/x.gd.`,
+      `concepts/${CONCEPT}/draw.gd.`,
+      `concepts/${CONCEPT}/notes.md.`,
+      `concepts/${CONCEPT}/.gitattributes`,
+      `concepts/${CONCEPT}/.git/HEAD`,
+      `concepts/${CONCEPT}/sub/.hidden`,
+      `concepts/${CONCEPT}/nul`,
+      `concepts/${CONCEPT}/NUL.txt`,
+      `concepts/${CONCEPT}/con.png`,
+      `concepts/${CONCEPT}/Aux`,
+      `concepts/${CONCEPT}/prn.md`,
+      `concepts/${CONCEPT}/com1`,
+      `concepts/${CONCEPT}/LPT9.txt`,
     ]
     for (const file of refused) await expect(write({ file, content: draw }), file).rejects.toThrow(/cannot write/)
     expect(readFileSync(join(dir, "river.json"), "utf8")).not.toContain("extends")
+    expect(existsSync(join(dir, "concepts"))).toBe(false)
+  })
+
+  it("refuses a draw.gd a person could not read as shown, and writes nothing", async () => {
+    const hidden = [
+      draw + "\tpass # \u001b[2K\u001b[1G\n",
+      draw.replace(/\n/g, "\r\n"),
+      draw + "\tpass # a\rb\n",
+      draw + "\tpass # ‮ x\n",
+      draw + "\t# dusk — calm\n",
+    ]
+    for (const content of hidden) {
+      await expect(write({ file: `concepts/${CONCEPT}/draw.gd`, content }), JSON.stringify(content)).rejects.toThrow(/cannot write[\s\S]*Line \d+, column \d+/)
+    }
     expect(existsSync(join(dir, "concepts"))).toBe(false)
   })
 })

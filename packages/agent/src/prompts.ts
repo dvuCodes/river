@@ -40,7 +40,8 @@ Write one file, concepts/<id>/draw.gd (the [River context] gives the id), with c
 
 - The first line of code is exactly "extends RefCounted", and the script defines func draw(img: Image) -> void at the top level.
 - River calls draw() once on a blank 256x256 RGBA image. Size shapes from img.get_width() and img.get_height().
-- Draw only with the Image API (fill, set_pixel, fill_rect, blend_rect) plus plain GDScript: numbers, loops, arrays, Color, Vector2, Rect2i. No loading files or resources, no static, no OS, Engine, FileAccess, threads, HTTP, call() or callv. The lint rejects these words even in comments and strings.
+- Draw only with the Image API (fill, set_pixel, fill_rect, blend_rect) plus plain GDScript: numbers, loops, arrays, Color, Vector2, Rect2i. No loading files or resources, no static, no OS, Engine, FileAccess, threads, HTTP, call() or callv, and no building scripts at runtime (GDScript, source_code, reload). The lint rejects these words even in comments and strings.
+- Write draw.gd in printable ASCII with tabs and plain newlines only, comments included: no em dashes, curly quotes, degree signs or other non-ASCII characters. concept_write refuses anything else.
 - Before drawing, look at the project for palette, mood and style: Read, Glob and Grep inside the project, and the River read tools. The request says which cards the mark is on.
 - concept_write returns lint problems. Fix them and write the file again until the lint is clean, then stop editing it.
 - Finish with 2-3 sentences for the user describing the concept: what it shows and how it answers the request. No code in that message.`,

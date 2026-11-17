@@ -56,7 +56,9 @@ Storyboard (--root defaults to the current folder, --board to main):
   job start --mark <id> [--backend claude-code|api-key] [--model claude-sonnet-5-5]
                                            the concept artist answers the mark; waits until its script needs approval
   job show --job <id>                      status, summary, error and script of a job
-  job approve --job <id> [--yes]           print the script and its sha256; --yes runs exactly that script in Godot
+  job approve --job <id>                   print the script and its sha256; runs nothing
+  job approve --job <id> --sha256 <hex> --yes
+                                           run the script in Godot, only if its bytes still hash to the sha256 you read
   job accept --job <id>                    apply the job's concept folder to your checkout
   job dismiss --job <id>                   throw the job away
 `
@@ -110,6 +112,7 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
         backend: { type: "string" },
         model: { type: "string" },
         yes: { type: "boolean" },
+        sha256: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     })

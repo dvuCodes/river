@@ -4,8 +4,8 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { lintConceptScript, type RenderConceptRequest } from "@river/adapter-godot"
-import { ensureBoard, listCheckpoints, listJobs, loadBoard, loadJob, loadMark, saveCard, saveJob, saveMark, type Job, type Mark } from "@river/core"
+import { conceptScriptBytesProblem, lintConceptScript, type RenderConceptRequest } from "@river/adapter-godot"
+import { commitJobFile, ensureBoard, listCheckpoints, listJobs, loadBoard, loadJob, loadMark, saveCard, saveJob, saveMark, type Job, type Mark } from "@river/core"
 import { acceptJob, approveJobScript, dismissJob, readJobScript, recoverJobs, startConceptJob, type JobDeps, type RunTurn } from "../src/jobs"
 import { SYSTEM_PROMPTS } from "../src/prompts"
 import type { AgentTurnRequest } from "../src/types"
@@ -291,6 +291,25 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     await dismissJob(game, none.id)
   })
 
+  it("fails a script with bytes a person could not read as shown, even when it reaches the worktree without concept_write", async () => {
+    const job = await start({ runTurn: fakeTurn(DRAW + "\tpass # \u001b[2K\u001b[1G\n") })
+    expect(job.status).toBe("failed")
+    expect(job.error).toMatch(/Line 6, column \d+/)
+    expect(job.headSha).toBeUndefined()
+  })
+
+  it("will not show or run a waiting script whose committed bytes break the rule (a job from before it)", async () => {
+    const job = await start({ runTurn: fakeTurn(DRAW) })
+    const hidden = Buffer.from(DRAW + "\tpass # \u001b[2K\u001b[1G\n")
+    const headSha = await commitJobFile(game, job.id, `game/concepts/${job.id}/draw.gd`, hidden, "river: concept from an older River")
+    await saveJob(game, { ...job, headSha, scripts: [{ file: job.scripts![0]!.file, sha256: sha(hidden), approved: false }] })
+    const rendered: Buffer[] = []
+    await expect(readJobScript(game, job.id)).rejects.toThrow(/Line 6, column \d+/)
+    await expect(approveJobScript(game, job.id, sha(hidden), { render: fakeRender(rendered), env: { GODOT_BIN: "godot-not-run" } })).rejects.toThrow(/Line 6, column \d+/)
+    expect(rendered).toEqual([])
+    expect((await loadJob(game, job.id)).status).toBe("approval")
+  })
+
   it("keeps working after the repo folder moves: approve and accept from the new place", async () => {
     const job = await start({ runTurn: fakeTurn(DRAW) })
     moveRepo()
@@ -467,5 +486,6 @@ describe("concept prompt", () => {
     const example = prompt.slice(prompt.indexOf("  extends RefCounted"), prompt.indexOf("\n\n- ")).split("\n").map((l) => l.replace(/^ {2}/, "")).join("\n")
     expect(example).toContain("func draw(img: Image) -> void:")
     expect(lintConceptScript(example)).toEqual([])
+    expect(conceptScriptBytesProblem(Buffer.from(example))).toBeUndefined()
   })
 })

@@ -5,7 +5,7 @@
  * Nothing here may run Godot on a script the user has not approved: even `--check-only` runs
  * static initialisers. `lintConceptScript` is plain text matching that tells the agent what to
  * rewrite; it is not a security boundary. The boundary is the user's approval of the exact bytes
- * that `renderConcept` is given.
+ * that `renderConcept` is given, and `conceptScriptBytesProblem` keeps those bytes readable as shown.
  */
 import { execFile, spawn } from "node:child_process"
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
@@ -33,7 +33,45 @@ const FORBIDDEN: readonly [token: string, find: RegExp][] = [
   ["call(", /\bcall(_deferred)?\s*\(/],
   ["callv", /\bcallv\b/],
   ["set_script", /\bset_script\b/],
+  ["GDScript", /\bGDScript\b/],
+  ["Script", /\bScript\b/],
+  ["source_code", /\bsource_code\b/],
+  ["reload(", /\breload\s*\(/],
+  // Class names start upper case (FastNoiseLite.new() is fine); a lower-case name is a value, such as a script built at runtime.
+  [".new() on a variable", /\b[a-z_]\w*\s*\.\s*new\s*\(/],
+  ["str_to_var", /\bstr_to_var\b/],
+  ["str2var", /\bstr2var\b/],
+  ["bytes_to_var", /\bbytes_to_var/],
+  ["bytes2var", /\bbytes2var\b/],
+  ["dict_to_inst", /\bdict_to_inst\b/],
+  ["dict2inst", /\bdict2inst\b/],
+  ["instance_from_id", /\binstance_from_id\b/],
+  ["get_class", /\bget_class\b/],
 ]
+
+/**
+ * The rule on draw.gd's bytes, checked before River writes, commits, shows or runs it: printable
+ * ASCII, tabs and LF line ends only. Then the text a person reads is exactly what Godot runs; an
+ * escape code, a lone CR or a bidi control cannot hide or reorder code. Returns where it breaks, or
+ * undefined when the bytes pass.
+ */
+export function conceptScriptBytesProblem(bytes: Uint8Array): string | undefined {
+  let line = 1
+  let column = 1
+  for (const b of bytes) {
+    if (b === 0x0a) {
+      line++
+      column = 1
+      continue
+    }
+    if (b !== 0x09 && (b < 0x20 || b > 0x7e)) {
+      const hex = b.toString(16).toUpperCase().padStart(2, "0")
+      return `Line ${line}, column ${column}: byte 0x${hex} is not allowed. draw.gd may hold only printable ASCII, tabs and LF line ends (no CR, control or non-ASCII characters, in comments and strings too).`
+    }
+    column++
+  }
+  return undefined
+}
 
 /** Problems that make the agent rewrite draw.gd, one sentence each. Empty means the text passes. */
 export function lintConceptScript(text: string): string[] {
@@ -160,6 +198,8 @@ const tail = (text: string, lines = 30) => text.trim().split(/\r?\n/).slice(-lin
  * failure, including a runtime script error (Godot reports those but still exits 0).
  */
 export async function renderConcept(req: RenderConceptRequest): Promise<void> {
+  const unreadable = conceptScriptBytesProblem(Buffer.from(req.script))
+  if (unreadable) throw new Error(`river: refused to render: ${unreadable}`)
   const width = req.width ?? 256
   const height = req.height ?? 256
   const timeoutMs = req.timeoutMs ?? 30_000

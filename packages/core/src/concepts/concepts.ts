@@ -9,6 +9,8 @@ export const CONCEPT_RENDER = "concept.png"
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/
+/** Device names Windows reserves, with any extension: writing "nul.txt" goes nowhere, "con" can hang. */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
 
 export function assertConceptId(conceptId: string): void {
   if (typeof conceptId !== "string" || !SAFE_ID.test(conceptId)) throw new Error(`river: invalid concept id ${JSON.stringify(conceptId)}`)
@@ -34,6 +36,10 @@ export function assertConceptFile(conceptId: string, file: string): string {
   if (!rel) return deny("use a path relative to the project root, without '..'")
   if (!rel.startsWith(`${folder}/`)) return deny(`this job writes only inside ${folder}/`)
   if (!rel.split("/").every((seg) => SAFE_SEGMENT.test(seg))) return deny("use only letters, digits, '.', '_' and '-' in file names")
+  const names = rel.slice(folder.length + 1).split("/")
+  // A leading dot makes .git or .gitattributes; Windows drops a trailing dot, so "x.gd." would land as a second script.
+  if (names.some((n) => n.startsWith(".") || n.endsWith("."))) return deny("names may not start or end with '.'")
+  if (names.some((n) => WINDOWS_RESERVED.test(n))) return deny("CON, PRN, AUX, NUL, COM1-9 and LPT1-9 are reserved names on Windows, with any extension")
   if (rel.toLowerCase().endsWith(".gd") && rel !== conceptPath(conceptId, CONCEPT_SCRIPT)) {
     return deny(`one script per job: the only script is ${conceptPath(conceptId, CONCEPT_SCRIPT)}`)
   }

@@ -16,6 +16,8 @@ export interface JobArgs {
   backend?: string | undefined
   model?: string | undefined
   yes?: boolean | undefined
+  /** The sha256 the user read in `job approve` without --yes; --yes runs the script only if it still matches. */
+  sha256?: string | undefined
 }
 
 const BACKENDS: readonly AgentBackend[] = ["claude-code", "api-key"]
@@ -116,18 +118,21 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
       return 0
     }
     case "approve": {
+      // Two steps, so what runs is what the user read: the run step takes the sha256 printed by the read step.
+      if (a.yes) {
+        if (!a.sha256) return usage("approve --yes needs --sha256 <hex>: run `river job approve --job <id>` first, read the script, then pass the sha256 it printed")
+        const job = await agent.approveJobScript(root, a.job, a.sha256)
+        printJob(root, job, out)
+        return job.status === "answered" ? 0 : 1
+      }
       const script = await agent.readJobScript(root, a.job)
       out.line(`${script.file}  sha256 ${script.sha256}`)
       out.line("-".repeat(60))
       out.write(script.text.endsWith("\n") ? script.text : `${script.text}\n`)
       out.line("-".repeat(60))
-      if (!a.yes) {
-        out.line("Not run. Running a script executes its code on this computer. Read it, then add --yes to run exactly these bytes.")
-        return 0
-      }
-      const job = await agent.approveJobScript(root, a.job, script.sha256)
-      printJob(root, job, out)
-      return job.status === "answered" ? 0 : 1
+      out.line("Not run. Running a script executes its code on this computer. Read it; to run exactly these bytes:")
+      out.line(`  river job approve --root ${root} --job ${a.job} --sha256 ${script.sha256} --yes`)
+      return 0
     }
     case "accept": {
       const job = await agent.acceptJob(root, a.job)

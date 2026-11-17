@@ -7,7 +7,7 @@
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { createGodotAdapter, lintConceptScript } from "@river/adapter-godot"
+import { conceptScriptBytesProblem, createGodotAdapter, lintConceptScript } from "@river/adapter-godot"
 import {
   assertConceptFile,
   assertConceptId,
@@ -612,7 +612,8 @@ function conceptWrite(project: Project, conceptId: string): RiverTool {
     name: "concept_write",
     description:
       `Write one file in this job's folder, concepts/${conceptId}/ (path relative to the project root, e.g. concepts/${conceptId}/draw.gd). ` +
-      "Replaces the whole file. For draw.gd the result lists lint problems; fix them and write the file again until there are none.",
+      "Replaces the whole file. draw.gd may hold only printable ASCII, tabs and LF line ends; anything else is refused. " +
+      "For draw.gd the result lists lint problems; fix them and write the file again until there are none.",
     inputSchema: {
       file: relPath,
       content: z.string().max(200_000).describe("The whole file content"),
@@ -620,6 +621,8 @@ function conceptWrite(project: Project, conceptId: string): RiverTool {
     mutating: true,
     async run({ file, content }) {
       const rel = assertConceptFile(conceptId, file)
+      const unreadable = rel.endsWith(".gd") ? conceptScriptBytesProblem(Buffer.from(content, "utf8")) : undefined
+      if (unreadable) throw new Error(`river: cannot write ${rel}: ${unreadable} Write the whole file again without them.`)
       const full = safePath(project, rel)
       await mkdir(path.dirname(full), { recursive: true })
       await writeFile(full, content, "utf8")
