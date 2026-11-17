@@ -3,6 +3,8 @@ import { mkdir, readdir } from "node:fs/promises"
 import path from "node:path"
 import type { EngineAdapter, Project, ShotDef } from "@river/core"
 
+export { lintConceptScript, renderConcept, type RenderConceptRequest } from "./concept"
+
 /** Godot settings read from manifest.adapter.godot. */
 export interface GodotSettings {
   /** Godot executable. Required. Can be "$GODOT_BIN" or "${GODOT_BIN}". */
