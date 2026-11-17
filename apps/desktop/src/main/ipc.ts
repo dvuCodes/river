@@ -336,11 +336,11 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     }))
   })
   handle("story:openState", async (rel: string, state: GameState): Promise<OpenStateDTO> => {
-    const { story } = await readStory(rel)
+    const { story, schema } = await readStory(rel)
     const out: OpenStateDTO = { passages: {}, choices: {} }
     for (const p of contentPassages(story)) {
       out.passages[p.id] = p.when ? evalCond(p.when, state) : true
-      out.choices[p.id] = openChoices(p, state).map((c) => c.open)
+      out.choices[p.id] = openChoices(p, state, { story, schema }).map((c) => c.open)
     }
     return out
   })
