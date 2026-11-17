@@ -471,27 +471,32 @@ const loadKit = () => window.river.jobKit()
 
 /**
  * Every script a job wants to run, each with the hash of exactly the bytes shown; Run all approves those hashes. Run
- * stays off while any part of a script is out of view sideways, so the user can always read every byte they approve.
+ * stays off while any part of a script is out of view, past an edge or under something drawn on top of the list, so the
+ * user can always read every byte they approve. While the Kit is open over it, nothing in the review takes focus.
  */
 export function ReviewDialog(props: { jobId: string; onClose(): void }) {
   const [dto, setDto] = useState<JobDTO | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [kit, setKit] = useState(false)
-  const [inView, setInView] = useState(false)
+  const [view, setView] = useState<"in" | "out" | "covered">("out")
   const list = useRef<HTMLDivElement>(null)
   useEffect(() => {
     window.river.jobGet(props.jobId).then(setDto, (e: unknown) => setErr(errorText(e)))
   }, [props.jobId])
   const scripts = dto?.scripts ?? []
   const lines = scripts.reduce((n, s) => n + s.text.split("\n").length, 0)
-  const check = useCallback(() => list.current !== null && allInView(measureReview(list.current, lines)), [lines])
-  useInViewWatch(list, dto, () => setInView(check()))
+  const check = useCallback(() => {
+    if (!list.current) return "out"
+    const layout = measureReview(list.current, lines)
+    return allInView(layout) ? "in" : layout.occluded ? "covered" : "out"
+  }, [lines])
+  useInViewWatch(list, dto, () => setView(check()))
   const run = () => {
-    if (!check()) {
-      setInView(false)
-      return
-    }
+    if (kit) return
+    const now = check()
+    setView(now)
+    if (now !== "in") return
     setBusy(true)
     window.river.jobApprove(props.jobId, Object.fromEntries(scripts.map((s) => [s.file, s.sha256]))).then(props.onClose, (e: unknown) => {
       setErr(errorText(e))
@@ -500,7 +505,7 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
   }
   return (
     <div className="canvas-modal" onPointerDown={(e) => e.stopPropagation()}>
-      <div className="review nowheel" role="dialog" aria-label="Review the scripts">
+      <div className="review nowheel" role="dialog" aria-label="Review the scripts" inert={kit}>
         <header className="dialog-head">
           <h2>{!dto ? "Review" : scripts.length > 1 ? `Review ${scripts.length} scripts` : "Review the script"}</h2>
           <span className="mono sec-hint">{props.jobId}</span>
@@ -537,15 +542,17 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
         </div>
         {err && <p className="err-note">{err}</p>}
         <footer className="dialog-foot">
-          {scripts.length > 0 && !inView && (
+          {scripts.length > 0 && view !== "in" && (
             <p className="err-note review-blocked" role="status">
-              Part of a script is out of view. Widen the window or zoom out to read every line before running it.
+              {view === "covered"
+                ? "Something is covering the script. Close it to run."
+                : "Part of a script is out of view. Widen the window or zoom out to read every line before running it."}
             </p>
           )}
           <button type="button" className="btn" onClick={props.onClose}>
             Cancel
           </button>
-          <button className="btn btn-primary" data-action="run" disabled={busy || scripts.length === 0 || !inView} onClick={run}>
+          <button className="btn btn-primary" data-action="run" disabled={busy || scripts.length === 0 || view !== "in" || kit} onClick={run}>
             {scripts.length > 1 ? `Run all ${scripts.length}` : "Run script"}
           </button>
         </footer>
@@ -555,7 +562,10 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
   )
 }
 
-/** Call `update` now and whenever the review's layout may have moved: resize, zoom, scrolling, fonts loading, rows reflowing. */
+/**
+ * Call `update` now and whenever the review's layout may have moved or something may have opened over it: resize, zoom,
+ * scrolling, fonts loading, rows reflowing, elements added or removed anywhere in the page.
+ */
 function useInViewWatch(list: { current: HTMLElement | null }, content: unknown, update: () => void) {
   const latest = useRef(update)
   latest.current = update
@@ -565,6 +575,12 @@ function useInViewWatch(list: { current: HTMLElement | null }, content: unknown,
     let live = true
     const recheck = () => live && latest.current()
     recheck()
+    let frame = 0
+    const mo = new MutationObserver(() => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(recheck)
+    })
+    mo.observe(document.body, { childList: true, subtree: true })
     const ro = new ResizeObserver(recheck)
     for (const box of [el, ...el.querySelectorAll(".review-script, .concept-script-text")]) ro.observe(box)
     let zoom: MediaQueryList | null = null
@@ -581,6 +597,8 @@ function useInViewWatch(list: { current: HTMLElement | null }, content: unknown,
     void document.fonts.ready.then(recheck)
     return () => {
       live = false
+      mo.disconnect()
+      cancelAnimationFrame(frame)
       ro.disconnect()
       zoom?.removeEventListener("change", onZoom)
       window.removeEventListener("resize", recheck)

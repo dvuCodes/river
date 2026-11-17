@@ -342,6 +342,8 @@ func draw(img: Image) -> void:
 /** What the fake look at the renders says, once the smoke lets it answer. */
 const LOOK_NOTE = "Looked at the renders: A keeps the low horizon, C warms the sky, B did not render."
 let releaseLook: (() => void) | null = null
+/** Calls that reached the job:approve handler, refused ones included. */
+let approveCalls = 0
 /** Option A's caption, at the longest a job keeps: the review must still fit it without scrolling sideways. */
 const LONG_CAPTION = "Low horizon and a soft evening sky over two quiet ridges, with the path from the gate down to the pond kept calm, warm light at the far edge, no ducks in frames"
 
@@ -551,8 +553,75 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const kitShown =
     (await clickEl(w, `.review [data-action="view-kit"]`, 3_000)) &&
     (await until(async () => ((await w.webContents.executeJavaScript(`document.querySelector(".text-panel-body")?.textContent ?? ""`)) as string).includes("class_name Kit"), 5_000))
-  await clickEl(w, `.text-panel [data-action="close-text"]`, 2_000)
   console.log(`river smoke: the review's Kit link ${kitShown ? "shows River's kit.gd" : "does NOT show the kit"}`)
+  await shoot(w, dir, "job-review-kit.png")
+  // The Kit covers the whole list: Run must be off, out of the tab order and deaf to Return.
+  const kitCovers = (await w.webContents.executeJavaScript(`(() => {
+    const list = document.querySelector(".review .review-list").getBoundingClientRect()
+    const top = document.elementFromPoint((list.left + list.right) / 2, (list.top + list.bottom) / 2)
+    return Boolean(top?.closest(".text-panel")) && document.querySelector(".review").inert && document.querySelector('.review [data-action="run"]').disabled
+  })()`)) as boolean
+  const approvesBefore = approveCalls
+  const tabbed: string[] = []
+  for (let i = 0; i < 60; i++) {
+    await key(w, "Tab")
+    tabbed.push(
+      (await w.webContents.executeJavaScript(`(() => {
+        const a = document.activeElement
+        if (!a || a === document.body) return "body"
+        return (a.closest(".review") ? "REVIEW " : a.closest(".canvas-behind") ? "BEHIND " : "") + a.tagName.toLowerCase() + (a.dataset.action ? "[" + a.dataset.action + "]" : "") + (a.className ? "." + String(a.className).split(" ")[0] : "")
+      })()`)) as string,
+    )
+  }
+  const tabReached = [...new Set(tabbed)]
+  const tabSafe = tabbed.every((t) => !t.startsWith("REVIEW") && !t.startsWith("BEHIND"))
+  // Return wherever focus is would follow an app link out of the canvas, so focus the Kit itself with a real click first.
+  const kitHead = await rectOf(w, ".text-panel .dialog-head h2")
+  if (kitHead) await click(w, kitHead.x + 4, kitHead.y + kitHead.h / 2)
+  await key(w, "Return")
+  const runForced = (await w.webContents.executeJavaScript(`(() => {
+    const run = document.querySelector('.review [data-action="run"]')
+    run.focus()
+    return document.activeElement === run
+  })()`)) as boolean
+  await key(w, "Return")
+  await sleep(1_500)
+  const kitHeld = kitCovers && tabSafe && !runForced && approveCalls === approvesBefore && (await loadJob(p.root, jobId)).status === "approval"
+  console.log(
+    `river smoke: with the Kit open over the review Run ${kitCovers ? "is off and the review inert" : "is NOT held"}; 60 Tabs reached ${tabReached.join(", ")}${tabSafe ? "" : " (INSIDE the review or the canvas)"}; Return ${approveCalls === approvesBefore ? "sent no approve" : `sent ${approveCalls - approvesBefore} approve call(s)`}`,
+  )
+  await clickEl(w, `.text-panel [data-action="close-text"]`, 2_000)
+  const kitClosedRun = await until(async () => (await reviewSeen(w)).run, 3_000)
+  // Canvas shortcuts sleep while the review is open: Ctrl+K must not open the jump box hidden under it.
+  await w.webContents.executeJavaScript(`document.querySelector('.review [data-action="view-kit"]').focus()`)
+  await key(w, "K", ["control"])
+  await sleep(400)
+  const noJump = (await w.webContents.executeJavaScript(
+    `!document.querySelector(".jump") && document.activeElement === document.querySelector('.review [data-action="view-kit"]')`,
+  )) as boolean
+  console.log(`river smoke: with the Kit closed Run ${kitClosedRun ? "is back on" : "is NOT back"}; Ctrl+K ${noJump ? "left focus in the review" : "opened the jump box or moved focus"}`)
+  // Any element drawn over part of the list, not only the Kit, turns Run off.
+  await w.webContents.executeJavaScript(`(() => {
+    const r = document.querySelector(".review .review-list").getBoundingClientRect()
+    const cover = Object.assign(document.createElement("div"), { id: "smoke-cover" })
+    Object.assign(cover.style, { position: "fixed", left: r.left + r.width / 3 + "px", top: r.top + r.height / 3 + "px", width: r.width / 3 + "px", height: r.height / 3 + "px", zIndex: 100, background: "#888" })
+    document.body.append(cover)
+  })()`)
+  const coverSeen = await until(
+    async () =>
+      (await w.webContents.executeJavaScript(
+        `document.querySelector('.review [data-action="run"]').disabled && (document.querySelector(".review .review-blocked")?.textContent ?? "").startsWith("Something is covering")`,
+      )) as boolean,
+    3_000,
+  )
+  await shoot(w, dir, "job-review-covered.png")
+  await w.webContents.executeJavaScript(`document.activeElement?.blur(), document.querySelector('.review [data-action="run"]').focus()`)
+  await key(w, "Return")
+  await sleep(800)
+  await w.webContents.executeJavaScript(`document.getElementById("smoke-cover").remove()`)
+  const uncovered = await until(async () => (await reviewSeen(w)).run, 3_000)
+  const coverHeld = coverSeen && uncovered && approveCalls === approvesBefore
+  console.log(`river smoke: with a box drawn over a third of the list Run ${coverSeen ? "is off with the covering note" : "is NOT off"}; Return ${approveCalls === approvesBefore ? "sent no approve" : "SENT an approve"}; Run ${uncovered ? "came back once it was gone" : "did NOT come back"}`)
   const firstNote = (await loadJob(p.root, jobId)).summary
 
   // At 200% the warning and legend fill the smallest window and leave the list no room, so Run goes off.
@@ -592,7 +661,7 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const stillWaiting = (await loadJob(p.root, jobId)).status === "approval" && Boolean(await rectOf(w, ".review .review-list"))
   await w.webContents.executeJavaScript(`document.getElementById("smoke-unfix").remove()`)
   const runBack = await until(async () => (await reviewSeen(w)).run, 3_000)
-  const guardOk = blockedShown && blockedClicked && !runFocused && stillWaiting && runBack
+  const guardOk = blockedShown && blockedClicked && !runFocused && stillWaiting && runBack && kitHeld && kitClosedRun && noJump && coverHeld && approveCalls === approvesBefore
   console.log(
     `river smoke: with the list scrolling sideways Run ${blockedShown ? "is off with the out-of-view note" : "is NOT off"}${runFocused ? " but takes focus" : ""}; a click and Enter ${stillWaiting ? "left the job awaiting approval" : "did NOT leave it waiting"}; Run ${runBack ? "came back once it fit" : "did NOT come back"}`,
   )
@@ -602,7 +671,9 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   // While drawing, the answer holds one placeholder card; each option has its own card from approval on.
   const options = (await answer(mark.id, 5_000))?.options ?? []
   console.log(`river smoke: the answer has option cards ${options.map((c) => c.variant ?? "-").join(", ")}`)
-  // The options run off to the right of the note; fit the board so all of them are on screen.
+  // The options run off to the right of the note; fit the board so all of them are on screen. Canvas shortcuts wait
+  // for the review to close.
+  await until(async () => !(await rectOf(w, ".review")), 10_000)
   await key(w, "1", ["shift"])
   await sleep(500)
   const looking = Boolean(await waitRect(w, `${noteSel} .job-line.is-looking`, 120_000))
@@ -1756,7 +1827,7 @@ app.whenReady().then(async () => {
     if (!abs) return new Response("Not found", { status: 404 })
     return net.fetch(pathToFileURL(abs).toString())
   })
-  registerIpc(() => win, isSmoke && process.env["RIVER_SMOKE_JOB"] === "1" ? { jobDeps: smokeJobDeps } : {})
+  registerIpc(() => win, isSmoke && process.env["RIVER_SMOKE_JOB"] === "1" ? { jobDeps: smokeJobDeps, onApprove: () => approveCalls++ } : {})
 
   const initial = isSmoke ? process.env["RIVER_PROJECT"] : (argProject() ?? process.env["RIVER_PROJECT"] ?? getLastProject())
   if (initial && process.env["RIVER_SMOKE_PREMIUM"] === "1") await seedStripCapture(resolve(initial))

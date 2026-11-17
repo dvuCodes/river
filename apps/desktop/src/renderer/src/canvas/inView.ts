@@ -21,6 +21,8 @@ export interface ReviewLayout {
   boxes: { scrollWidth: number; clientWidth: number }[]
   /** Each code row's horizontal extent. */
   code: { left: number; right: number }[]
+  /** Something else is on top of the list at one of the points sampled across it. */
+  occluded: boolean
 }
 
 /** Sub-pixel layout rounds each measure on its own. */
@@ -32,6 +34,7 @@ export function allInView(l: ReviewLayout): boolean {
   const { list, visible } = l
   return (
     l.lines > 0 &&
+    !l.occluded &&
     l.code.length === l.lines &&
     list.bottom - list.top >= ROW &&
     list.left >= visible.left - SLACK &&
@@ -50,6 +53,48 @@ const clientBox = (el: Element): Box => {
   return { left, right: left + el.clientWidth, top, bottom: top + el.clientHeight }
 }
 
+/** Grid points per side, sampled across the list's visible box. */
+const GRID = 5
+/** Code rows on screen whose first and last characters are sampled; a list at a small zoom can show hundreds. */
+const MAX_ROWS = 200
+
+/**
+ * Whether anything other than the list itself is the topmost element at a grid of points across the list's visible
+ * part, or at the first and last character of a code row on screen. Hit testing passes through `pointer-events: none`,
+ * so an overlay styled that way goes unseen here.
+ */
+function occluded(list: HTMLElement, box: Box): boolean {
+  if (box.right - box.left < 1 || box.bottom - box.top < 1) return false
+  const points: [number, number][] = []
+  for (let i = 0; i < GRID; i++) {
+    for (let j = 0; j < GRID; j++) {
+      points.push([box.left + ((i + 0.5) * (box.right - box.left)) / GRID, box.top + ((j + 0.5) * (box.bottom - box.top)) / GRID])
+    }
+  }
+  const range = document.createRange()
+  const inside = (r: DOMRect) => r.bottom > box.top && r.top < box.bottom
+  let rows = 0
+  for (const code of list.querySelectorAll(".script-code")) {
+    if (rows >= MAX_ROWS) break
+    const text = code.firstChild
+    if (!(text instanceof Text) || !inside(code.getBoundingClientRect())) continue
+    const first = text.data.search(/\S/)
+    if (first < 0) continue
+    rows++
+    for (const at of [first, text.data.trimEnd().length - 1]) {
+      range.setStart(text, at)
+      range.setEnd(text, at + 1)
+      const r = range.getBoundingClientRect()
+      points.push([(r.left + r.right) / 2, (r.top + r.bottom) / 2])
+    }
+  }
+  return points.some(([x, y]) => {
+    if (x < box.left || x > box.right || y < box.top || y > box.bottom) return false
+    const hit = document.elementFromPoint(x, y)
+    return !hit || !list.contains(hit)
+  })
+}
+
 /** Read the layout of the review list `list` as it is laid out now. */
 export function measureReview(list: HTMLElement, lines: number): ReviewLayout {
   const root = document.documentElement
@@ -66,15 +111,23 @@ export function measureReview(list: HTMLElement, lines: number): ReviewLayout {
       visible.bottom = Math.min(visible.bottom, box.bottom)
     }
   }
+  const listBox = clientBox(list)
+  const shown: Box = {
+    left: Math.max(listBox.left, visible.left),
+    right: Math.min(listBox.right, visible.right),
+    top: Math.max(listBox.top, visible.top),
+    bottom: Math.min(listBox.bottom, visible.bottom),
+  }
   const inner = list.querySelectorAll(".review-script, .concept-script-head, .concept-script-head > *, .concept-script-text, .script-row, .script-code")
   return {
     lines,
-    list: clientBox(list),
+    list: listBox,
     visible,
     boxes: [list, ...inner].map((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth })),
     code: [...list.querySelectorAll(".script-code")].map((el) => {
       const r = el.getBoundingClientRect()
       return { left: r.left, right: r.right }
     }),
+    occluded: occluded(list, shown),
   }
 }

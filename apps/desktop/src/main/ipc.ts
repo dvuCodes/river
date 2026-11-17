@@ -288,8 +288,8 @@ const approving = new Map<string, Promise<void>>()
 /** Tell the canvas a job's cards changed although its file did not (the look started or ended). */
 const jobTouched = (jobId: string) => send("fs:change", [{ kind: "job", rel: `.river/jobs/${jobId}.json` }])
 
-/** `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn). */
-export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: JobDeps } = {}): void {
+/** `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn); `onApprove` lets a smoke count approve calls. */
+export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: JobDeps; onApprove?: () => void } = {}): void {
   getWindow = windowGetter
   const handle = <A extends unknown[], R>(channel: string, fn: (...args: A) => Promise<R> | R) =>
     ipcMain.handle(channel, (_e, ...args) => fn(...(args as A)))
@@ -485,6 +485,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
    * started rendering; a refusal (changed bytes) comes before that and is thrown here.
    */
   handle("job:approve", async (jobId: string, shas: Record<string, string>) => {
+    opts.onApprove?.()
     const p = need()
     const jobs = await jobApi()
     const agent = await loadAgent()

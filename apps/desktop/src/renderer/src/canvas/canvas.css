@@ -18,6 +18,10 @@
   background: var(--board);
   color: var(--ink);
 }
+/* Holds everything but the review, so it can all go inert at once; it draws no box of its own. */
+.canvas-behind {
+  display: contents;
+}
 .canvas-view .react-flow {
   /* React Flow puts "light dark" on itself (in its own layer); the board takes the canvas theme instead. */
   color-scheme: inherit;
@@ -1567,6 +1571,8 @@
   background: var(--panel);
   color: var(--ink);
   font: 11.5px/1.5 var(--mono, ui-monospace, monospace);
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;

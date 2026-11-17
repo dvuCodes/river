@@ -13,6 +13,7 @@ const fits: ReviewLayout = {
     { left: 470, right: 1150 },
     { left: 470, right: 1150 },
   ],
+  occluded: false,
 }
 
 describe("allInView", () => {
@@ -49,6 +50,10 @@ describe("allInView", () => {
     expect(allInView({ ...fits, visible: { ...fits.visible, left: 500 } })).toBe(false)
     expect(allInView({ ...fits, visible: { ...fits.visible, bottom: 700 } })).toBe(false)
     expect(allInView({ ...fits, visible: { ...fits.visible, top: 300 } })).toBe(false)
+  })
+
+  it("blocks Run when something is drawn over the list, even with every byte inside the window", () => {
+    expect(allInView({ ...fits, occluded: true })).toBe(false)
   })
 
   it("blocks Run when the list is too short to show one row", () => {

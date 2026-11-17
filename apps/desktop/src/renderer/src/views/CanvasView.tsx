@@ -691,7 +691,7 @@ function CanvasInner(props: CanvasProps) {
   }
 
   const onKey = (e: KeyboardEvent) => {
-    if (isTyping(e.target)) return
+    if (reviewing !== null || isTyping(e.target)) return
     const mod = e.ctrlKey || e.metaKey
     const key = e.key.toLowerCase()
     if (mod && key === "z") {
@@ -727,7 +727,7 @@ function CanvasInner(props: CanvasProps) {
   keyRef.current = onKey
   const pasteRef = useRef((_e: ClipboardEvent) => {})
   pasteRef.current = (e: ClipboardEvent) => {
-    if (isTyping(e.target)) return
+    if (reviewing !== null || isTyping(e.target)) return
     const files = imageFiles(e.clipboardData?.files)
     if (files.length === 0) return
     e.preventDefault()
@@ -778,7 +778,7 @@ function CanvasInner(props: CanvasProps) {
         ref={wrap}
         onPointerMove={(e) => (pointer.current = toFlow(e))}
         onDragOver={(e) => {
-          if (!e.dataTransfer.types.includes("Files")) return
+          if (reviewing !== null || !e.dataTransfer.types.includes("Files")) return
           e.preventDefault()
           e.dataTransfer.dropEffect = "copy"
           setDropping(true)
@@ -794,173 +794,176 @@ function CanvasInner(props: CanvasProps) {
           stageImages(files, [x - 120, y - 90])
         }}
       >
-        {(state?.errors.length ?? 0) > 0 && (
-          <div className="banner banner-warn canvas-banner">
-            Skipped {state!.errors.length} file{state!.errors.length === 1 ? "" : "s"} that did not parse: <span className="mono">{state!.errors.join(" · ")}</span>
-          </div>
-        )}
-        {actionError && (
-          <div className="banner banner-err canvas-banner" onClick={() => setActionError(null)}>
-            {actionError}
-          </div>
-        )}
-        <Actions.Provider value={actions}>
-          <AnswerNotes.Provider value={answerNotes}>
-          <ReactFlow<BoardNode, LinkEdgeType>
-            nodes={nodes}
-            edges={links}
-            nodeTypes={nodeTypes}
-            edgeTypes={edgeTypes}
-            onNodesChange={(changes) => {
-              noteSettledMoves([...changes].filter((c) => c.type === "position" && c.position && !c.dragging).map((c) => c.id))
-              // A card's height follows its content: never keep a height that a resize wrote.
-              setNodes((ns) => changes.applyTo(ns).map((n) => (n.type === "card" && n.height !== undefined ? { ...n, height: undefined } : n)))
-            }}
-            onEdgesChange={(changes) => setLinks((es) => changes.applyTo(es))}
-            onNodeDragStop={(_e, _n, moved) => persistMoves(moved)}
-            onSelectionDragStop={(_e, moved) => persistMoves(moved)}
-            onNodeDoubleClick={(_e, n) => imageOf(state?.cards[n.id]) && setLightbox(n.id)}
-            nodesConnectable={false}
-            nodesDraggable={tool === "select"}
-            elementsSelectable={tool === "select"}
-            panOnDrag={tool === "hand" ? true : [1, 2]}
-            selectionOnDrag={tool === "select"}
-            multiSelectionKeyCode={MULTI_SELECT_KEYS}
-            deleteKeyCode={null}
-            panOnScroll
-            zoomOnDoubleClick={false}
-            onlyRenderVisibleElements={CULL}
-            elevateEdgesOnSelect={false}
-            minZoom={0.05}
-            maxZoom={4}
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1.4} />
-            {draft && draft.points.length > 0 && <DraftLayer draft={draft} />}
-            {DRAW_TOOLS.has(tool) && (
-              <div
-                className={cx("draw-capture", `draw-${tool}`)}
-                onPointerDown={(e) => {
-                  if (e.button !== 0) return
-                  e.currentTarget.setPointerCapture(e.pointerId)
-                  const p = toFlow(e)
-                  if (tool === "note") return placeNote(p)
-                  const from = tool === "arrow" ? nodeAt(p) : undefined
-                  const d: Draft = { shape: tool as MarkShape, points: [p], ...(from ? { from } : {}) }
-                  drawing.current = d
-                  setDraft(d)
-                }}
-                onPointerMove={(e) => {
-                  const d = drawing.current
-                  if (!d) return
-                  const p = toFlow(e)
-                  if (d.shape === "pen") {
-                    const last = d.points[d.points.length - 1]!
-                    if (Math.hypot(p[0] - last[0], p[1] - last[1]) * flow.getZoom() < 2) return
-                    d.points = [...d.points, p]
-                  } else d.points = [d.points[0]!, p]
-                  setDraft({ ...d })
-                }}
-                onPointerUp={(e) => {
-                  const d = drawing.current
-                  drawing.current = null
-                  setDraft(null)
-                  if (!d) return
-                  if (d.shape !== "pen" && d.shape !== "pin") d.points = [d.points[0]!, toFlow(e)]
-                  finishDraft(d).catch(fail)
-                }}
+        {/* While the review is open, nothing behind it takes focus, clicks or shortcuts, so nothing opens hidden under it or on top of it. */}
+        <div className="canvas-behind" inert={reviewing !== null}>
+          {(state?.errors.length ?? 0) > 0 && (
+            <div className="banner banner-warn canvas-banner">
+              Skipped {state!.errors.length} file{state!.errors.length === 1 ? "" : "s"} that did not parse: <span className="mono">{state!.errors.join(" · ")}</span>
+            </div>
+          )}
+          {actionError && (
+            <div className="banner banner-err canvas-banner" onClick={() => setActionError(null)}>
+              {actionError}
+            </div>
+          )}
+          <Actions.Provider value={actions}>
+            <AnswerNotes.Provider value={answerNotes}>
+            <ReactFlow<BoardNode, LinkEdgeType>
+              nodes={nodes}
+              edges={links}
+              nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
+              onNodesChange={(changes) => {
+                noteSettledMoves([...changes].filter((c) => c.type === "position" && c.position && !c.dragging).map((c) => c.id))
+                // A card's height follows its content: never keep a height that a resize wrote.
+                setNodes((ns) => changes.applyTo(ns).map((n) => (n.type === "card" && n.height !== undefined ? { ...n, height: undefined } : n)))
+              }}
+              onEdgesChange={(changes) => setLinks((es) => changes.applyTo(es))}
+              onNodeDragStop={(_e, _n, moved) => persistMoves(moved)}
+              onSelectionDragStop={(_e, moved) => persistMoves(moved)}
+              onNodeDoubleClick={(_e, n) => imageOf(state?.cards[n.id]) && setLightbox(n.id)}
+              nodesConnectable={false}
+              nodesDraggable={tool === "select"}
+              elementsSelectable={tool === "select"}
+              panOnDrag={tool === "hand" ? true : [1, 2]}
+              selectionOnDrag={tool === "select"}
+              multiSelectionKeyCode={MULTI_SELECT_KEYS}
+              deleteKeyCode={null}
+              panOnScroll
+              zoomOnDoubleClick={false}
+              onlyRenderVisibleElements={CULL}
+              elevateEdgesOnSelect={false}
+              minZoom={0.05}
+              maxZoom={4}
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background variant={BackgroundVariant.Dots} gap={20} size={1.4} />
+              {draft && draft.points.length > 0 && <DraftLayer draft={draft} />}
+              {DRAW_TOOLS.has(tool) && (
+                <div
+                  className={cx("draw-capture", `draw-${tool}`)}
+                  onPointerDown={(e) => {
+                    if (e.button !== 0) return
+                    e.currentTarget.setPointerCapture(e.pointerId)
+                    const p = toFlow(e)
+                    if (tool === "note") return placeNote(p)
+                    const from = tool === "arrow" ? nodeAt(p) : undefined
+                    const d: Draft = { shape: tool as MarkShape, points: [p], ...(from ? { from } : {}) }
+                    drawing.current = d
+                    setDraft(d)
+                  }}
+                  onPointerMove={(e) => {
+                    const d = drawing.current
+                    if (!d) return
+                    const p = toFlow(e)
+                    if (d.shape === "pen") {
+                      const last = d.points[d.points.length - 1]!
+                      if (Math.hypot(p[0] - last[0], p[1] - last[1]) * flow.getZoom() < 2) return
+                      d.points = [...d.points, p]
+                    } else d.points = [d.points[0]!, p]
+                    setDraft({ ...d })
+                  }}
+                  onPointerUp={(e) => {
+                    const d = drawing.current
+                    drawing.current = null
+                    setDraft(null)
+                    if (!d) return
+                    if (d.shape !== "pen" && d.shape !== "pin") d.points = [d.points[0]!, toFlow(e)]
+                    finishDraft(d).catch(fail)
+                  }}
+                />
+              )}
+              {ask && <AskBox key={ask.markId} at={ask.at} onDone={answerAsk} />}
+              <MiniMap
+                className="canvas-minimap"
+                position="bottom-right"
+                pannable
+                zoomable
+                ariaLabel="Board overview"
+                nodeBorderRadius={2}
+                nodeStrokeWidth={0}
+                nodeColor={(n) => minimapColor(n as BoardNode)}
+                maskColor="var(--mm-mask)"
+                maskStrokeColor="var(--mm-view)"
+                maskStrokeWidth={1.5}
+                bgColor="var(--mm-bg)"
+                style={{ width: 168, height: 108 }}
               />
-            )}
-            {ask && <AskBox key={ask.markId} at={ask.at} onDone={answerAsk} />}
-            <MiniMap
-              className="canvas-minimap"
-              position="bottom-right"
-              pannable
-              zoomable
-              ariaLabel="Board overview"
-              nodeBorderRadius={2}
-              nodeStrokeWidth={0}
-              nodeColor={(n) => minimapColor(n as BoardNode)}
-              maskColor="var(--mm-mask)"
-              maskStrokeColor="var(--mm-view)"
-              maskStrokeWidth={1.5}
-              bgColor="var(--mm-bg)"
-              style={{ width: 168, height: 108 }}
+              <Panel position="bottom-right" className="zoom-panel">
+                <ZoomControls />
+              </Panel>
+            </ReactFlow>
+            </AnswerNotes.Provider>
+          </Actions.Provider>
+          <BoardPill board={board} items={cardList.length} openMarks={state?.openMarks ?? 0} onBoard={props.onBoard} theme={props.theme} onTheme={props.onTheme} />
+          {selectedNodes.length + selectedLinks.length > 0 && !soleMark && (
+            <SelectionBar
+              count={selectedNodes.length + selectedLinks.length}
+              cards={selectedNodes.filter((n) => n.type === "card").length}
+              onRow={arrangeRow}
+              onDuplicate={duplicateSelection}
+              onDelete={deleteSelection}
             />
-            <Panel position="bottom-right" className="zoom-panel">
-              <ZoomControls />
-            </Panel>
-          </ReactFlow>
-          </AnswerNotes.Provider>
-        </Actions.Provider>
-        <BoardPill board={board} items={cardList.length} openMarks={state?.openMarks ?? 0} onBoard={props.onBoard} theme={props.theme} onTheme={props.onTheme} />
-        {selectedNodes.length + selectedLinks.length > 0 && !soleMark && (
-          <SelectionBar
-            count={selectedNodes.length + selectedLinks.length}
-            cards={selectedNodes.filter((n) => n.type === "card").length}
-            onRow={arrangeRow}
-            onDuplicate={duplicateSelection}
-            onDelete={deleteSelection}
-          />
-        )}
-        {soleMark && (
-          <MarkPanel
-            mark={soleMark}
-            answers={answersTo(soleMark.id).length}
-            onShowAnswer={() => showAnswer(soleMark.id)}
-            cardTitle={cardTitle}
-            onAsk={() => window.river.jobStart(board, soleMark.id).catch(fail)}
-            onReply={(text) => reply(soleMark.id, text).catch(fail)}
-            onRevise={(jobId) => window.river.jobRevise(jobId).catch(fail)}
-            onSettle={(status, text) => settleMark(soleMark.id, status, text).catch(fail)}
-            onClose={() => setSelected(() => false)}
-            onDelete={() => deleteItems([soleMark.id])}
-          />
-        )}
-        {state && cardList.length === 0 && markList.length === 0 && <EmptyBoard />}
-        <ToolBar tool={tool} onTool={chooseTool} />
-        {ref && (
-          <RefForm
-            key={ref.image.token}
-            fileName={ref.image.fileName}
-            licence={ref.licence}
-            left={refs.length - 1}
-            onCancel={() => setRefs((q) => q.slice(1))}
-            onSubmit={async (s) => {
-              const dto = await window.river.boardAddRef(board, ref.image.token, s, { x: ref.at[0], y: ref.at[1] })
-              putCard(dto.card.id, dto)
-              history.record([{ kind: "card", id: dto.card.id, before: null, after: dto.card }])
-              setRefs((q) => q.slice(1))
-            }}
-          />
-        )}
-        {jumping && state && (
-          <QuickJump
-            items={[
-              ...cardList.map((dto): JumpItem => ({ id: dto.card.id, title: titleOf(dto), detail: [dto.card.label, dto.card.kind, dto.card.text, dto.card.source?.title].filter(Boolean).join(" · "), agent: dto.card.madeBy !== ME })),
-              ...markList.map((m): JumpItem => ({ id: m.id, title: m.thread[0]?.text ?? `${m.shape} mark`, detail: `${m.shape} mark · ${m.status}`, agent: m.madeBy !== ME })),
-            ]}
-            onPick={jumpTo}
-            onClose={() => setJumping(false)}
-          />
-        )}
-        {lightbox && images.includes(lightbox) && (
-          <Lightbox items={images.map((id) => imageOf(state?.cards[id])!)} at={images.indexOf(lightbox)} onAt={(i) => setLightbox(images[i]!)} onClose={() => setLightbox(null)} />
-        )}
-        {logOf && <TextPanel title="Job log" sub={`.river/logs/${logOf}.log`} load={loadLog} onClose={() => setLogOf(null)} />}
+          )}
+          {soleMark && (
+            <MarkPanel
+              mark={soleMark}
+              answers={answersTo(soleMark.id).length}
+              onShowAnswer={() => showAnswer(soleMark.id)}
+              cardTitle={cardTitle}
+              onAsk={() => window.river.jobStart(board, soleMark.id).catch(fail)}
+              onReply={(text) => reply(soleMark.id, text).catch(fail)}
+              onRevise={(jobId) => window.river.jobRevise(jobId).catch(fail)}
+              onSettle={(status, text) => settleMark(soleMark.id, status, text).catch(fail)}
+              onClose={() => setSelected(() => false)}
+              onDelete={() => deleteItems([soleMark.id])}
+            />
+          )}
+          {state && cardList.length === 0 && markList.length === 0 && <EmptyBoard />}
+          <ToolBar tool={tool} onTool={chooseTool} />
+          {ref && (
+            <RefForm
+              key={ref.image.token}
+              fileName={ref.image.fileName}
+              licence={ref.licence}
+              left={refs.length - 1}
+              onCancel={() => setRefs((q) => q.slice(1))}
+              onSubmit={async (s) => {
+                const dto = await window.river.boardAddRef(board, ref.image.token, s, { x: ref.at[0], y: ref.at[1] })
+                putCard(dto.card.id, dto)
+                history.record([{ kind: "card", id: dto.card.id, before: null, after: dto.card }])
+                setRefs((q) => q.slice(1))
+              }}
+            />
+          )}
+          {jumping && state && (
+            <QuickJump
+              items={[
+                ...cardList.map((dto): JumpItem => ({ id: dto.card.id, title: titleOf(dto), detail: [dto.card.label, dto.card.kind, dto.card.text, dto.card.source?.title].filter(Boolean).join(" · "), agent: dto.card.madeBy !== ME })),
+                ...markList.map((m): JumpItem => ({ id: m.id, title: m.thread[0]?.text ?? `${m.shape} mark`, detail: `${m.shape} mark · ${m.status}`, agent: m.madeBy !== ME })),
+              ]}
+              onPick={jumpTo}
+              onClose={() => setJumping(false)}
+            />
+          )}
+          {lightbox && images.includes(lightbox) && (
+            <Lightbox items={images.map((id) => imageOf(state?.cards[id])!)} at={images.indexOf(lightbox)} onAt={(i) => setLightbox(images[i]!)} onClose={() => setLightbox(null)} />
+          )}
+          {logOf && <TextPanel title="Job log" sub={`.river/logs/${logOf}.log`} load={loadLog} onClose={() => setLogOf(null)} />}
+          {dismissing && (
+            <DismissDialog
+              onCancel={() => setDismissing(null)}
+              onDismiss={async (reason) => {
+                const jobId = dismissing
+                await window.river.jobDismiss(jobId, reason || undefined)
+                // The job removes its own cards and connectors; the watcher brings that in, this is only quicker.
+                for (const d of Object.values(stateRef.current?.cards ?? {})) if (d.card.pending?.jobId === jobId) putCard(d.card.id, null)
+                setDismissing(null)
+              }}
+            />
+          )}
+        </div>
         {reviewing && <ReviewDialog key={reviewing} jobId={reviewing} onClose={() => setReviewing(null)} />}
-        {dismissing && (
-          <DismissDialog
-            onCancel={() => setDismissing(null)}
-            onDismiss={async (reason) => {
-              const jobId = dismissing
-              await window.river.jobDismiss(jobId, reason || undefined)
-              // The job removes its own cards and connectors; the watcher brings that in, this is only quicker.
-              for (const d of Object.values(stateRef.current?.cards ?? {})) if (d.card.pending?.jobId === jobId) putCard(d.card.id, null)
-              setDismissing(null)
-            }}
-          />
-        )}
       </div>
     </div>
   )
