@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
-import { userInfo } from "node:os"
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
 import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobAgentSettings, JobDeps, PermissionDecision, RunTurn } from "@river/agent"
 import { createGodotAdapter, kitFileText } from "@river/adapter-godot"
@@ -66,6 +65,8 @@ import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
 import { boardHandlers, closeRowGap, jobLogFile, jobRevisable, lookingJobs } from "./board"
 import { type ProjectWatch, noteOwnWrite, watchProject } from "./watch"
+import { PermissionWaits } from "./permissions"
+import { AgentWork } from "./work"
 
 let project: Project | null = null
 let projectError: { root: string; message: string } | null = null
@@ -190,29 +191,24 @@ function captureDTO(p: Project, c: Capture): CaptureDTO {
   return { shotId: c.shotId, rev: c.rev, at: c.at, urls: c.files.map((f) => fileUrl(p, f)) }
 }
 
-/** Resolve a river-file:// URL to an absolute path inside the project root, or null if it escapes. */
-export function resolveRiverFile(url: string): string | null {
-  if (!project) return null
-  const u = new URL(url)
-  if (u.host !== "project") return null
-  const rel = decodeURIComponent(u.pathname).replace(/^\/+/, "")
-  const abs = resolve(project.root, rel)
-  const back = relative(project.root, abs)
-  if (!back || back.startsWith("..") || isAbsolute(back)) return null
-  return abs
-}
-
-const author = () => {
-  try {
-    return userInfo().username || "you"
-  } catch {
-    return "you"
-  }
-}
-
 // ---- agent turns
+/** Review threads are committed with the game, so the person at this desk is "you", never their account name. */
+const YOU = "you"
+
 const turns = new Map<string, AbortController>()
-const pendingPermissions = new Map<string, (d: PermissionDecision) => void>()
+const permissions = new PermissionWaits()
+const work = new AgentWork()
+
+/** On quit: stop every agent turn (chat, concept drawing, look at renders) and wait for them, at most `timeoutMs`. */
+export function stopAgentWork(timeoutMs: number): Promise<void> {
+  return work.stopAll(timeoutMs)
+}
+
+/** A concept job's turns, stopped with the rest of the app's agent work when it quits. */
+const tracked =
+  (base: RunTurn): RunTurn =>
+  (req, h) =>
+    work.track(base(req, { ...h, signal: work.signal(h.signal) }))
 
 /** Last `claude auth status` result (allowlisted fields only; never written to disk). */
 let claudeCache: ClaudeCodeStatus | null = null
@@ -379,8 +375,8 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     if (p.manifest.engine !== "godot") throw new Error(`Engine "${p.manifest.engine}" has no capture adapter.`)
     return captureDTO(p, await captureShot(p, shotId, createGodotAdapter()))
   })
-  handle("review:add", (target: ReviewThread["target"], text: string) => addThread(need(), target, author(), text))
-  handle("review:reply", (threadId: string, text: string) => reply(need(), threadId, author(), text))
+  handle("review:add", (target: ReviewThread["target"], text: string) => addThread(need(), target, YOU, text))
+  handle("review:reply", (threadId: string, text: string) => reply(need(), threadId, YOU, text))
   handle("review:status", (threadId: string, status: ReviewStatus) => setStatus(need(), threadId, status))
   handle("plan:status", (planId: string, status: ChangePlan["status"]) => setPlanStatus(need(), planId, status))
 
@@ -421,26 +417,20 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     if (turn.model !== status.model) settings.setAgentPrefs({ model: turn.model })
     const ac = new AbortController()
     turns.set(turnId, ac)
+    const signal = work.signal(ac.signal)
     let ended = false
     const emit = (event: AgentEvent) => {
       if (event.type === "done" || event.type === "error") ended = true
       send("agent:event", { turnId, event })
     }
-    Promise.resolve()
+    const run = Promise.resolve()
       .then(() =>
         agent.start!(
           { ...turn, root: p.root, ...auth },
           {
             onEvent: emit,
-            onPermission: (request) =>
-              new Promise<PermissionDecision>((resolveDecision) => {
-                pendingPermissions.set(request.id, resolveDecision)
-                ac.signal.addEventListener("abort", () => {
-                  if (pendingPermissions.delete(request.id)) resolveDecision({ behavior: "deny", message: "Turn stopped." })
-                })
-                send("agent:permission", { turnId, request })
-              }),
-            signal: ac.signal,
+            onPermission: (request) => permissions.wait(request.id, signal, () => send("agent:permission", { turnId, request })),
+            signal,
           },
         ),
       )
@@ -450,12 +440,11 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
         // The renderer stops "working…" only on done/error; make sure one arrives.
         if (!ended) emit({ type: "done" })
       })
+    void work.track(run)
     return turnId
   })
   handle("agent:respond", (requestId: string, decision: PermissionDecision) => {
-    const resolveDecision = pendingPermissions.get(requestId)
-    pendingPermissions.delete(requestId)
-    resolveDecision?.(decision)
+    permissions.answer(requestId, decision)
   })
   handle("agent:abort", (turnId: string) => {
     turns.get(turnId)?.abort()
@@ -463,21 +452,24 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
   handle("agent:restore", (ref: string) => restoreCheckpoint(need().root, ref))
 
   /** Jobs run in the background; one that fails before its job file exists (bad mark, no git) is thrown here. */
-  const runJob = async (start: (jobs: JobApi, settings: JobAgentSettings) => Promise<unknown>) => {
+  const runJob = async (start: (jobs: JobApi, settings: JobAgentSettings, deps: JobDeps) => Promise<unknown>) => {
     const p = need()
     const jobs = await jobApi()
+    const agent = await loadAgent()
+    const base: RunTurn | undefined = opts.jobDeps?.runTurn ?? agent.start
+    const deps: JobDeps = { ...opts.jobDeps, ...(base ? { runTurn: tracked(base) } : {}) }
     const status = await agentStatus()
     const auth = await turnAuth(status)
     // Watch the jobs folder before the first job file appears in it.
     const jobsDir = join(p.root, ".river", "jobs")
     await mkdir(jobsDir, { recursive: true })
     projectWatch?.add(jobsDir)
-    const run = start(jobs, { model: status.model, ...auth })
+    const run = start(jobs, { model: status.model, ...auth }, deps)
     run.catch((err: unknown) => console.warn("river: concept job failed", err))
     await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
   }
-  handle("job:start", (board: string, markId: string) => runJob((jobs, settings) => jobs.startConceptJob({ workspaceRoot: need().root, board, markId, ...settings }, opts.jobDeps)))
-  handle("job:revise", (jobId: string) => runJob((jobs, settings) => jobs.reviseJob(need().root, jobId, settings, opts.jobDeps)))
+  handle("job:start", (board: string, markId: string) => runJob((jobs, settings, deps) => jobs.startConceptJob({ workspaceRoot: need().root, board, markId, ...settings }, deps)))
+  handle("job:revise", (jobId: string) => runJob((jobs, settings, deps) => jobs.reviseJob(need().root, jobId, settings, deps)))
   handle("job:get", async (jobId: string): Promise<JobDTO> => {
     const p = need()
     const job = await loadJob(p.root, jobId)
@@ -504,7 +496,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
         lookingJobs.set(jobId, stop)
         jobTouched(jobId)
         try {
-          await base(req, { ...h, signal: stop.signal })
+          await work.track(base(req, { ...h, signal: work.signal(stop.signal) }))
         } finally {
           lookingJobs.delete(jobId)
           jobTouched(jobId)

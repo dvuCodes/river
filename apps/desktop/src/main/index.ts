@@ -1,13 +1,14 @@
 import { mkdirSync } from "node:fs"
-import { access, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises"
-import { dirname, join, resolve } from "node:path"
+import { access, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises"
+import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { BrowserWindow, ClipboardItem, app, clipboard, ipcMain, nativeTheme, net, protocol } from "electron"
 import type { JobDeps } from "@river/agent"
 import { VIEWS, type ViewId } from "../shared/api"
 import { type Card, type Job, type Mark, CONCEPT_ROLE, boardJsonText, claimMark, loadBoard, loadCard, loadJob, loadMark, markFile, replyToMark, saveCard, saveEdge, saveJob, saveMark } from "@river/core"
 import { type BoardEntity, onBoardWritten } from "./board"
-import { currentProject, onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
+import { currentProject, onStoryWritten, openProject, registerIpc, stopAgentWork } from "./ipc"
+import { riverFilePath } from "./riverFile"
 import { getLastProject } from "./settings"
 import { noteOwnWrite } from "./watch"
 import { STILL_SHOT, STRIP_FRAMES, STRIP_SHOT, scenePng, seedPerfBoard, seedRichBoard, seedStripCapture } from "./smokeBoard"
@@ -56,6 +57,11 @@ function createWindow(): BrowserWindow {
     },
   })
   w.once("ready-to-show", () => w.show())
+  // River is one page: no link or script may take the window elsewhere or open another one.
+  w.webContents.on("will-navigate", (e) => {
+    if (e.url !== w.webContents.getURL()) e.preventDefault()
+  })
+  w.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
   // Scripted input goes straight to the page; a person's real pointer over the window must not mix into it.
   if (isSmoke) w.setIgnoreMouseEvents(true)
   const query = isSmoke ? { smoke: "1", ...(process.env["RIVER_SMOKE_CULL"] === "0" ? { cull: "0" } : {}) } : undefined
@@ -958,6 +964,22 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   await key(w, "Escape")
   await sleep(300)
   await shoot(w, dir, `rich-${theme}-after.png`)
+
+  const page = w.webContents.getURL()
+  const popupRefused = await w.webContents.executeJavaScript(`window.open("https://example.invalid/") === null`)
+  await w.webContents.executeJavaScript(`location.href = "https://example.invalid/"; true`)
+  await sleep(1_000)
+  check("the window stays on River's page: navigating away and window.open are refused", popupRefused === true && w.webContents.getURL() === page && BrowserWindow.getAllWindows().length === 1)
+  const outside = join(dirname(p.root), `${basename(p.root)}-outside`)
+  await mkdir(outside, { recursive: true })
+  await writeFile(join(outside, "secret.txt"), "secret")
+  await symlink(outside, join(p.root, "linked"), "junction")
+  const served = (await net.fetch("river-file://project/river.json")).status
+  const linked = (await net.fetch("river-file://project/linked/secret.txt")).status
+  await rm(join(p.root, "linked"))
+  await rm(outside, { recursive: true, force: true })
+  check(`river-file:// serves project files (${served}) and nothing through a link out of the project (${linked})`, served === 200 && linked === 404)
+
   const ok = results.every(([, r]) => r)
   console.log(`river smoke: board checks ${ok ? "PASSED" : "FAILED"} (${results.filter(([, r]) => r).length}/${results.length})`)
   return ok
@@ -1633,7 +1655,8 @@ app.whenReady().then(async () => {
   const smokeTheme = process.env["RIVER_SMOKE_THEME"]
   if (isSmoke && (smokeTheme === "light" || smokeTheme === "dark")) nativeTheme.themeSource = smokeTheme
   protocol.handle("river-file", (request) => {
-    const abs = resolveRiverFile(request.url)
+    const p = currentProject()
+    const abs = p && riverFilePath(p, request.url)
     if (!abs) return new Response("Not found", { status: 404 })
     return net.fetch(pathToFileURL(abs).toString())
   })
@@ -1656,4 +1679,15 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit()
+})
+
+/** How long quitting waits for agent turns to end once their processes are told to stop. */
+const QUIT_WAIT_MS = 6_000
+let agentWorkStopped = false
+app.on("before-quit", (e) => {
+  if (agentWorkStopped) return
+  // Agent turns run Claude processes that would otherwise outlive the app: stop them first, then quit.
+  e.preventDefault()
+  agentWorkStopped = true
+  void stopAgentWork(QUIT_WAIT_MS).finally(() => app.quit())
 })
