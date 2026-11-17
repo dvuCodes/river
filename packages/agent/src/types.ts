@@ -14,6 +14,14 @@ export type AgentMode = "story" | "plan" | "implement"
 
 export type AgentModel = "claude-opus-5-5" | "claude-sonnet-5-5"
 
+/**
+ * Who runs the model:
+ * - "api-key":     the Agent SDK with an Anthropic API key the app passes in.
+ * - "claude-code": the user's own installed `claude` CLI, signed in with their own account.
+ *                  River never sees or stores that sign-in; it only starts the CLI.
+ */
+export type AgentBackend = "api-key" | "claude-code"
+
 export interface AgentTurnRequest {
   /** Absolute path of the game repo (the folder with river.json). */
   root: string
@@ -28,8 +36,23 @@ export interface AgentTurnRequest {
   planId?: string
   /** Continue an earlier conversation. */
   sessionId?: string
-  /** ANTHROPIC_API_KEY. The app passes it in; the agent never reads it from disk. */
-  apiKey: string
+  backend: AgentBackend
+  /** ANTHROPIC_API_KEY for the "api-key" backend. The app passes it in; the agent never reads it from disk. */
+  apiKey?: string
+  /** The `claude` executable for the "claude-code" backend. Default: `claude` found on PATH. */
+  claudePath?: string
+}
+
+/** What River shows about the user's Claude Code install. Never email, org or token fields. */
+export interface ClaudeCodeStatus {
+  installed: boolean
+  version?: string
+  loggedIn: boolean
+  /** e.g. "claude.ai", "api_key", "none". */
+  authMethod?: string
+  /** e.g. "max", "pro". */
+  subscriptionType?: string
+  error?: string
 }
 
 /** A request for the user to approve one tool call. */

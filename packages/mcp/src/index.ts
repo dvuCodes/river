@@ -3,3 +3,5 @@ export type { RiverTool, RiverToolName, RiverToolResult, RiverToolsOptions } fro
 export { createServer, selectTools, SERVER_NAME, SERVER_VERSION, startServer } from "./server"
 export type { ServerOptions } from "./server"
 export { unifiedDiff } from "./diff"
+export { APPROVAL_TOOL_NAME, APPROVAL_TIMEOUT_MS, requestApproval } from "./approval"
+export type { ApprovalAnswer } from "./approval"

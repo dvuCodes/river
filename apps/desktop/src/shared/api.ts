@@ -3,9 +3,11 @@
  * runtime code from @river/core (it pulls in fs and child_process), only types.
  */
 import type {
+  AgentBackend,
   AgentEvent,
   AgentMode,
   AgentModel,
+  ClaudeCodeStatus,
   PermissionDecision,
   PermissionRequest,
 } from "@river/agent"
@@ -118,6 +120,21 @@ export interface AgentStatus {
   reason?: string
   hasKey: boolean
   encryptionAvailable: boolean
+  /** The backend turns use: the saved choice, or a default (Claude Code when it is installed and signed in). */
+  backend: AgentBackend
+  /** True when the user picked the backend (false: it is the default). */
+  backendChosen: boolean
+  model: AgentModel
+  claudePath?: string
+  /** Only installed / version / loggedIn / authMethod / subscriptionType. Null while unknown. */
+  claudeCode: ClaudeCodeStatus | null
+}
+
+export interface AgentPrefsUpdate {
+  backend?: AgentBackend
+  model?: AgentModel
+  /** Empty string clears it (use PATH). */
+  claudePath?: string
 }
 
 export interface AgentStartRequest {
@@ -170,6 +187,11 @@ export interface RiverApi {
   restoreCheckpoint(ref: string): Promise<void>
   setApiKey(key: string): Promise<AgentStatus>
   clearApiKey(): Promise<AgentStatus>
+  setAgentPrefs(p: AgentPrefsUpdate): Promise<AgentStatus>
+  /** Re-run `claude auth status` (on window focus, or the Refresh button). */
+  refreshAgentStatus(): Promise<AgentStatus>
+  /** Open a new terminal window running `claude auth login`. */
+  openClaudeSignIn(): Promise<void>
   // events from main; each returns an unsubscribe function
   onAgentEvent(cb: (e: { turnId: string; event: AgentEvent }) => void): () => void
   onAgentPermission(cb: (e: { turnId: string; request: PermissionRequest }) => void): () => void
