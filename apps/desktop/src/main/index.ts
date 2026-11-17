@@ -342,6 +342,8 @@ func draw(img: Image) -> void:
 /** What the fake look at the renders says, once the smoke lets it answer. */
 const LOOK_NOTE = "Looked at the renders: A keeps the low horizon, C warms the sky, B did not render."
 let releaseLook: (() => void) | null = null
+/** Option A's caption, at the longest a job keeps: the review must still fit it without scrolling sideways. */
+const LONG_CAPTION = "Low horizon and a soft evening sky over two quiet ridges, with the path from the gate down to the pond kept calm, warm light at the far edge, no ducks in frames"
 
 /**
  * RIVER_SMOKE_JOB: the agent turn writes three options instead of calling a model; option B does not compile, so its
@@ -363,7 +365,7 @@ const smokeJobDeps: JobDeps = {
     const dir = join(req.root, "concepts", req.conceptId ?? "missing")
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, "draw_a.gd"), SMOKE_DRAW_GD)
-    await writeFile(join(dir, "caption_a.txt"), "Low horizon, soft sky")
+    await writeFile(join(dir, "caption_a.txt"), LONG_CAPTION)
     await writeFile(join(dir, "draw_b.gd"), SMOKE_DRAW_GD.replace("img.fill(", "img.no_such_method("))
     await writeFile(join(dir, "caption_b.txt"), "Same pond, broken script")
     await writeFile(join(dir, "draw_c.gd"), SMOKE_DRAW_GD.replace("Color(0.62, 0.74, 0.80)", "Color(0.86, 0.66, 0.52)"))
@@ -418,6 +420,46 @@ async function key(w: BrowserWindow, keyCode: string, modifiers: ("shift" | "con
   w.webContents.sendInputEvent({ type: "keyUp", keyCode, modifiers })
   await sleep(150)
 }
+
+interface ReviewSeen {
+  /** Non-space script characters outside the list's visible box, measured per character apart from the dialog's own check. */
+  off: number
+  sw: number
+  cw: number
+  /** The list's visible height, and whether all of the list is inside the window. */
+  ch: number
+  onScreen: boolean
+  run: boolean
+  note: boolean
+}
+
+/** The open review as the user sees it: what is out of view, whether Run is on and whether the out-of-view note shows. */
+async function reviewSeen(w: BrowserWindow): Promise<ReviewSeen> {
+  return (await w.webContents.executeJavaScript(`(() => {
+    const list = document.querySelector(".review .review-list")
+    const lr = list.getBoundingClientRect()
+    const left = Math.max(0, lr.left + list.clientLeft)
+    const right = Math.min(document.documentElement.clientWidth, lr.left + list.clientLeft + list.clientWidth)
+    const range = document.createRange()
+    let off = 0
+    for (const code of list.querySelectorAll(".script-code")) {
+      const t = code.firstChild
+      if (!t) continue
+      for (let i = 0; i < t.length; i++) {
+        if (/\\s/.test(t.data[i])) continue
+        range.setStart(t, i)
+        range.setEnd(t, i + 1)
+        if ([...range.getClientRects()].some((r) => r.left < left - 1 || r.right > right + 1)) off++
+      }
+    }
+    const run = document.querySelector('.review [data-action="run"]')
+    const onScreen = lr.top >= -1 && lr.left >= -1 && lr.bottom <= innerHeight + 1 && lr.right <= innerWidth + 1
+    return { off, sw: list.scrollWidth, cw: list.clientWidth, ch: list.clientHeight, onScreen, run: Boolean(run && !run.disabled), note: Boolean(document.querySelector(".review .review-blocked")) }
+  })()`)) as ReviewSeen
+}
+
+/** The review's layout before this PR's fix: an implicit auto column and a header that will not wrap. */
+const UNFIX_REVIEW_CSS = ".review-list{grid-template-columns:none}.concept-script-head{flex-wrap:nowrap;white-space:nowrap}.concept-script-head>*{flex:none}"
 
 const exists = (abs: string) => access(abs).then(
   () => true,
@@ -512,6 +554,49 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   await clickEl(w, `.text-panel [data-action="close-text"]`, 2_000)
   console.log(`river smoke: the review's Kit link ${kitShown ? "shows River's kit.gd" : "does NOT show the kit"}`)
   const firstNote = (await loadJob(p.root, jobId)).summary
+
+  // At 200% the warning and legend fill the smallest window and leave the list no room, so Run goes off.
+  const [winW, winH] = w.getSize()
+  w.setSize(960, 600)
+  w.webContents.setZoomFactor(1.5)
+  await sleep(800)
+  const narrow = await reviewSeen(w)
+  await shoot(w, dir, "job-review-narrow.png")
+  w.webContents.setZoomFactor(2)
+  await sleep(800)
+  const cramped = await reviewSeen(w)
+  await shoot(w, dir, "job-review-cramped.png")
+  w.webContents.setZoomFactor(1)
+  w.setSize(winW!, winH!)
+  await sleep(800)
+  const narrowOk = narrow.off === 0 && narrow.sw <= narrow.cw + 1 && narrow.ch >= 16 && narrow.onScreen && narrow.run && !narrow.note
+  const crampedOk = cramped.off === 0 && cramped.sw <= cramped.cw + 1 && cramped.ch < 16 && !cramped.run && cramped.note
+  console.log(`river smoke: at 960x600 and 150% zoom the review ${narrowOk ? "shows every character with Run on" : `does NOT fit: ${JSON.stringify(narrow)}`}`)
+  console.log(`river smoke: at 200% zoom with no room for the list Run ${crampedOk ? "is off with the out-of-view note" : `is NOT held: ${JSON.stringify(cramped)}`}`)
+
+  await w.webContents.executeJavaScript(`document.head.append(Object.assign(document.createElement("style"), { id: "smoke-unfix", textContent: ${JSON.stringify(UNFIX_REVIEW_CSS)} }))`)
+  const blockedShown = await until(async () => {
+    const r = await reviewSeen(w)
+    return !r.run && r.note && r.sw > r.cw + 1
+  }, 3_000)
+  await shoot(w, dir, "job-review-blocked.png")
+  const blockedClicked = await clickEl(w, `.review [data-action="run"]`, 3_000)
+  const runFocused = (await w.webContents.executeJavaScript(`(() => {
+    document.activeElement?.blur()
+    const run = document.querySelector('.review [data-action="run"]')
+    run.focus()
+    return document.activeElement === run
+  })()`)) as boolean
+  await key(w, "Return")
+  await sleep(1_500)
+  const stillWaiting = (await loadJob(p.root, jobId)).status === "approval" && Boolean(await rectOf(w, ".review .review-list"))
+  await w.webContents.executeJavaScript(`document.getElementById("smoke-unfix").remove()`)
+  const runBack = await until(async () => (await reviewSeen(w)).run, 3_000)
+  const guardOk = blockedShown && blockedClicked && !runFocused && stillWaiting && runBack
+  console.log(
+    `river smoke: with the list scrolling sideways Run ${blockedShown ? "is off with the out-of-view note" : "is NOT off"}${runFocused ? " but takes focus" : ""}; a click and Enter ${stillWaiting ? "left the job awaiting approval" : "did NOT leave it waiting"}; Run ${runBack ? "came back once it fit" : "did NOT come back"}`,
+  )
+
   if (!(await clickEl(w, `.review [data-action="run"]`, 3_000))) return false
   console.log("river smoke: ran all; rendering")
   // While drawing, the answer holds one placeholder card; each option has its own card from approval on.
@@ -550,7 +635,7 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const closed = await until(async () => (await loadCard(p.root, "main", optionC.id))?.x === rowStart, 5_000)
   const markNow = (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)
   console.log(`river smoke: concepts/${job.conceptId}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}; kept card ${closed ? "moved to the row start" : "did NOT close the gap"}`)
-  const keptOk = highlighted === "b:6" && numbered === shownScripts && kitShown && looking && looked && sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
+  const keptOk = highlighted === "b:6" && numbered === shownScripts && narrowOk && crampedOk && guardOk && kitShown && looking && looked && sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
 
   await key(w, "Escape")
   await key(w, "1", ["shift"])
