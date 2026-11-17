@@ -14,8 +14,6 @@ export type BoardNode = CardNode | MarkNode
 export interface CanvasActions {
   editText(id: string, text: string): void
   resize(id: string, w: number): void
-  /** Deletes the card; a pending agent card dismisses its job instead. */
-  remove(id: string): void
   /** Read the card from disk again. */
   refresh(id: string): void
   fail(err: unknown): void
@@ -92,6 +90,15 @@ function NoteBody({ id, text }: { id: string; text: string }) {
     setEditing(false)
     if (draft !== text) actions.editText(id, draft)
   }
+  // Switching view or board, or culling, unmounts the note without a blur: save what was typed.
+  const unsaved = useRef<string | null>(null)
+  unsaved.current = editing && draft !== text ? draft : null
+  useEffect(
+    () => () => {
+      if (unsaved.current !== null) actions.editText(id, unsaved.current)
+    },
+    [actions, id],
+  )
   if (!editing) {
     return (
       <div className="note-text" onDoubleClick={() => setEditing(true)}>

@@ -280,6 +280,11 @@ async function smokeCanvas(w: BrowserWindow, dir: string, waitFor: (view: ViewId
   await rename(join(boardDir, "cards", `.${outsideId}.json.tmp`), join(boardDir, "cards", `${outsideId}.json`))
   const live = await waitRect(w, `.react-flow__node[data-id="${outsideId}"]`, 5_000)
   console.log(`river smoke: outside write ${live ? "appeared on the canvas" : "did NOT appear"}`)
+  const outsideEdge = { id: "e_outside1", from: outsideId, to: moved, madeBy: "concept-artist", createdAt: new Date().toISOString() }
+  await writeFile(join(boardDir, "edges", ".e_outside1.json.tmp"), JSON.stringify(outsideEdge, null, 2))
+  await rename(join(boardDir, "edges", ".e_outside1.json.tmp"), join(boardDir, "edges", "e_outside1.json"))
+  const liveEdge = await waitRect(w, `[data-testid="rf__edge-e_outside1"]`, 5_000)
+  console.log(`river smoke: outside connector ${liveEdge ? "appeared on the canvas" : "did NOT appear"}`)
 
   // (e) settle, screenshot, check the files.
   await sleep(1_200)
@@ -302,7 +307,8 @@ async function smokeCanvas(w: BrowserWindow, dir: string, waitFor: (view: ViewId
     m.thread[0]?.text === text &&
     Math.abs(cardJson.x - mx - 150 / zoom) < 12 &&
     Math.abs(cardJson.y - my) < 4 &&
-    live !== null
+    live !== null &&
+    liveEdge !== null
   console.log(`river smoke: canvas checks ${ok ? "PASSED" : "FAILED"}`)
   return ok
 }
@@ -486,14 +492,12 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
     "concept_c.png": await exists(join(conceptDir, "concept_c.png")),
     "draw_a.gd (not kept)": await exists(join(conceptDir, "draw_a.gd")),
   }
-  // The kept option closes up to where the row started.
   const rowStart = Math.min(...options.map((c) => c.x))
   const closed = await until(async () => (await loadCard(p.root, "main", optionC.id))?.x === rowStart, 5_000)
   const markNow = (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)
   console.log(`river smoke: concepts/${job.conceptId}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}; kept card ${closed ? "moved to the row start" : "did NOT close the gap"}`)
   const keptOk = sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
 
-  // Dismiss the second answer with a reason: the job, its cards and connectors go, and the reason joins the brief.
   await key(w, "Escape")
   await key(w, "1", ["shift"])
   await sleep(500)
@@ -501,7 +505,10 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   if (!gone) return false
   const goneJob = gone.note.pending!.jobId
   if (!(await waitRect(w, `.react-flow__node[data-id="${gone.note.id}"] [data-action="review"]`, 120_000))) return false
-  if (!(await clickEl(w, `.react-flow__node[data-id="${gone.note.id}"] [data-action="dismiss"]`, 3_000))) return false
+  const goneOption = (await answer(toDismiss.id, 5_000))?.options[0]
+  if (!goneOption || !(await clickEl(w, `.react-flow__node[data-id="${goneOption.id}"] .cnode-frame`, 3_000))) return false
+  // Delete on one option of a live answer asks to dismiss the whole answer instead of deleting the card.
+  await key(w, "Delete")
   if (!(await clickEl(w, ".ref-form input", 3_000))) return false
   await typeText(w, "too dark for a calm walk")
   if (!(await clickEl(w, `[data-action="dismiss-confirm"]`, 3_000))) return false
@@ -513,7 +520,6 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const reasoned = brief.includes("too dark for a calm walk")
   console.log(`river smoke: dismiss leg: job ${goneJob} ${dismissed ? "dismissed, cards and connectors gone" : "NOT dismissed"}; reason ${reasoned ? "is" : "is NOT"} in .river/brief.md`)
 
-  // Reply on the first mark, then revise: a new job starts from the kept answer.
   await key(w, "Escape")
   await key(w, "1", ["shift"])
   await sleep(500)
@@ -608,7 +614,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   await sleep(600)
   await shoot(w, dir, `rich-${theme}.png`)
 
-  // Clicking a mark's ink (not its box) selects it and opens its panel; Escape closes it.
   let panels = 0
   for (let i = 0; i < 3; i++) {
     const pt = (await w.webContents.executeJavaScript(`(() => {
@@ -625,7 +630,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   }
   check(`clicking a mark's ink opens its panel (${panels}/3)`, panels === 3)
 
-  // Close up: jump to option B, which brings your note, the options and the agent's note into view.
   await key(w, "K", ["control"])
   await waitRect(w, ".jump-input", 3_000)
   await typeText(w, "lanterns")
@@ -638,7 +642,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   await key(w, "1", ["shift"])
   await sleep(700)
 
-  // Arrow tool: a connector from a reference to the passage card.
   await clickEl(w, `[data-tool="arrow"]`, 3_000)
   const from = await centerOf(w, node("shadows", ".cnode-frame"))
   const to = await centerOf(w, node("passage"))
@@ -648,7 +651,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   check("arrow tool draws a connector between two cards", drawn !== null && (await until(async () => Boolean(await rectOf(w, `[data-testid="rf__edge-${drawn.id}"]`)), 3_000)))
   await key(w, "V")
 
-  // Box-select beats 3 and 4 from empty paper, then drag one: both move, as one undo step.
   const b3 = await rectOf(w, node("beat3"))
   const b4 = await rectOf(w, node("beat4"))
   const before3 = await card("beat3")
@@ -687,7 +689,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
     await until(async () => (await card("beat3"))?.x === before3.x, 4_000)
   } else check("beats 3 and 4 are on screen", false)
 
-  // Paste an image from the clipboard: the licence form opens with "own work"; Enter adds the card.
   await key(w, "Escape")
   await clipboard.write([new ClipboardItem({ "image/png": new Blob([new Uint8Array(scenePng(4242, 640, 400))], { type: "image/png" }) })])
   const pane = await rectOf(w, ".react-flow__pane")
@@ -701,7 +702,29 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   const pastedCard = await pasted
   check(`paste opens the licence form with "own work" (got ${JSON.stringify(licence)}) and adds the image`, licence === "own work" && pastedCard?.source?.licence === "own work" && (await exists(join(p.root, pastedCard.ref))))
 
-  // Zoom controls and minimap.
+  // An OS drag cannot be scripted: a drop event with a DataTransfer of File objects goes through the same handler.
+  const dropOn = (name: string, type: string) =>
+    w.webContents.executeJavaScript(`(async () => {
+      const bytes = ${JSON.stringify(name)}.endsWith(".png") ? Uint8Array.from(atob(${JSON.stringify(scenePng(5, 96, 60).toString("base64"))}), (c) => c.charCodeAt(0)) : new TextEncoder().encode("notes")
+      const dt = new DataTransfer()
+      dt.items.add(new File([bytes], ${JSON.stringify(name)}, { type: ${JSON.stringify(type)} }))
+      const wrap = document.querySelector(".canvas-wrap")
+      const r = wrap.getBoundingClientRect()
+      const at = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }
+      wrap.dispatchEvent(new DragEvent("dragover", at))
+      const drop = new DragEvent("drop", at)
+      wrap.dispatchEvent(drop)
+      return drop.defaultPrevented
+    })()`) as Promise<boolean>
+  const textPrevented = await dropOn("notes.txt", "text/plain")
+  const refused = Boolean(await waitRect(w, ".banner-err", 2_000)) && !(await rectOf(w, ".ref-form"))
+  await w.webContents.executeJavaScript(`document.querySelector(".banner-err")?.click()`)
+  const imagePrevented = await dropOn("dropped.png", "image/png")
+  const dropForm = await waitRect(w, ".ref-form", 4_000)
+  const dropLicence = dropForm ? ((await w.webContents.executeJavaScript(`[...document.querySelectorAll(".ref-form input")].pop()?.value ?? null`)) as string | null) : null
+  if (dropForm) await clickEl(w, ".ref-form .dialog-foot .btn:not(.btn-primary)", 2_000)
+  check(`a dropped image opens the licence form with "own work" and a dropped text file is refused (synthetic drop events)`, textPrevented && refused && imagePrevented && dropLicence === "own work")
+
   const pct = async () => (await w.webContents.executeJavaScript(`document.querySelector(".zoom-pct")?.textContent ?? ""`)) as string
   const pct0 = await pct()
   await clickEl(w, `[data-zoom="in"]`, 3_000)
@@ -720,7 +743,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   await key(w, "1", ["shift"])
   await sleep(600)
 
-  // Duplicate with Ctrl+D, then undo removes the copy.
   await clickEl(w, node("optD", ".cnode-frame"), 3_000)
   const dup = waitBoardWrite("card", (c) => c.kind === "concept" && c.variant === "d" && c.id !== id("optD"), 5_000)
   await key(w, "D", ["control"])
@@ -728,7 +750,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   await key(w, "Z", ["control"])
   check("Ctrl+D duplicates the card and Ctrl+Z removes the copy", copy !== null && (await until(async () => (await loadCard(p.root, "main", copy.id)) === undefined, 4_000)))
 
-  // Click a connector, Delete removes its file, Ctrl+Z brings it back.
   await key(w, "Escape")
   let edgeBack = false
   if (drawn) {
@@ -748,7 +769,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
     check("clicking a connector selects it; Delete removes it; Ctrl+Z restores it", picked && gone && edgeBack)
   }
 
-  // Delete a card that has connectors: its connectors go with it; one Ctrl+Z restores all three files.
   const beatEdges = (await loadBoard(p.root, "main")).edges.filter((e) => e.from === id("beat2") || e.to === id("beat2")).map((e) => e.id)
   await clickEl(w, node("beat2", ".cnode-frame"), 3_000)
   await key(w, "Delete")
@@ -763,7 +783,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   }, 4_000)
   check(`deleting a card removes its ${beatEdges.length} connectors and Ctrl+Z restores them`, beatEdges.length === 2 && cascade && restored)
 
-  // Shift-click two cards at different heights, then "Arrange in a row" lines them up; Ctrl+Z puts them back.
   await key(w, "Escape")
   const research0 = await card("research")
   const optA0 = await card("optA")
@@ -789,7 +808,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   await key(w, "Z", ["control"])
   await until(async () => (await card("optA"))?.y === optA0?.y, 3_000)
 
-  // Note tool: click to place a note, type, Escape saves the text; Ctrl+Z takes the text back.
   await key(w, "Escape")
   await clickEl(w, `[data-tool="note"]`, 2_000)
   const placing = waitBoardWrite("card", (c) => c.kind === "note" && c.text === "" && !Object.values(ids).includes(c.id), 4_000)
@@ -806,7 +824,21 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   const onDisk = placed ? (await loadCard(p.root, "main", placed.id))?.text : undefined
   check(`a new note takes typing inline, saves on Escape, and Ctrl+Z takes the text back (input ${input ? "shown" : "missing"}, focus "${focus}", saved ${JSON.stringify(noted?.text ?? null)}, after undo ${JSON.stringify(onDisk ?? null)})`, noted !== null && unTyped)
 
-  // Board pill: create a second board, it opens empty; switch back to main.
+  const draftNote = waitBoardWrite("card", (c) => c.kind === "note" && c.text === "" && !Object.values(ids).includes(c.id), 4_000)
+  await clickEl(w, `[data-tool="note"]`, 2_000)
+  if (pane) await click(w, pane.x + pane.w * 0.3, pane.y + pane.h * 0.62)
+  const draft = await draftNote
+  await waitRect(w, ".note-input", 2_000)
+  await typeText(w, "kept on leaving")
+  await w.webContents.executeJavaScript(`[...document.querySelectorAll(".nav-item")].find((b) => b.textContent.includes("Story map"))?.setAttribute("data-smoke", "story-map")`)
+  await clickEl(w, `.nav-item[data-smoke="story-map"]`, 2_000)
+  const flushed = draft ? await until(async () => (await loadCard(p.root, "main", draft.id))?.text === "kept on leaving", 4_000) : false
+  await w.webContents.executeJavaScript(`[...document.querySelectorAll(".nav-item")].find((b) => b.textContent.includes("Canvas"))?.setAttribute("data-smoke", "canvas")`)
+  await clickEl(w, `.nav-item[data-smoke="canvas"]`, 3_000)
+  await waitRect(w, `.react-flow__node[data-id="${id("optA")}"]`, 8_000)
+  await sleep(600)
+  check("text typed into a note is saved when the canvas closes mid-edit (switching to the story map)", flushed)
+
   await key(w, "Escape")
   await clickEl(w, ".board-pill", 2_000)
   await clickEl(w, ".board-new input", 2_000)
@@ -823,7 +855,6 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   if (!(await waitFor("canvas", 8_000))) console.warn("river smoke: canvas not ready after switching back")
   await sleep(600)
 
-  // Double-click an image: lightbox; Escape closes it.
   const img = await centerOf(w, node("optA", ".cnode-frame"))
   if (img) {
     const [x, y] = img.map(Math.round) as [number, number]
@@ -861,7 +892,7 @@ const stats = (xs: number[]) => {
  */
 async function framesDuring(w: BrowserWindow, drive: () => Promise<void>) {
   await w.webContents.executeJavaScript(`(() => {
-    const rec = { frames: [], long: [], moved: 0, run: true }
+    const rec = { frames: [], movedFrames: [], long: [], moved: 0, run: true }
     window.__riverFrames = rec
     const vp = document.querySelector(".react-flow__viewport")
     let last = performance.now()
@@ -870,7 +901,10 @@ async function framesDuring(w: BrowserWindow, drive: () => Promise<void>) {
       rec.frames.push(t - last)
       last = t
       const now = vp?.style.transform
-      if (now !== was) rec.moved++
+      if (now !== was) {
+        rec.moved++
+        rec.movedFrames.push(rec.frames[rec.frames.length - 1])
+      }
       was = now
       if (rec.run) requestAnimationFrame(tick)
     }
@@ -882,8 +916,8 @@ async function framesDuring(w: BrowserWindow, drive: () => Promise<void>) {
     const rec = window.__riverFrames
     rec.run = false
     rec.obs?.disconnect()
-    return { frames: rec.frames.slice(1), long: rec.long, moved: rec.moved, nodes: document.querySelectorAll(".react-flow__node").length, edges: document.querySelectorAll(".react-flow__edge").length, imgs: document.querySelectorAll("img.cnode-img").length }
-  })()`)) as { frames: number[]; long: number[]; moved: number; nodes: number; edges: number; imgs: number }
+    return { frames: rec.frames.slice(1), movedFrames: rec.movedFrames, long: rec.long, moved: rec.moved, nodes: document.querySelectorAll(".react-flow__node").length, edges: document.querySelectorAll(".react-flow__edge").length, imgs: document.querySelectorAll("img.cnode-img").length }
+  })()`)) as { frames: number[]; movedFrames: number[]; long: number[]; moved: number; nodes: number; edges: number; imgs: number }
 }
 
 /** Wheel-pan in circles for `ms` (one loop a second), so the board keeps moving without leaving the cards. */
@@ -979,8 +1013,8 @@ async function smokePerf(w: BrowserWindow, dir: string, waitFor: (view: ViewId, 
     imagesSettledAfterReadyMs: settled ? Math.round(imagesMs) : null,
     atLoad,
     idleFrame: stats(idle.frames),
-    fitPan: { zoom: +vpFit0.zoom.toFixed(3), framesMoved: fit.moved, frames: stats(fit.frames), over25ms: fit.frames.filter((f) => f > 25).length, longTasks: fit.long.length, longMax: Math.round(Math.max(0, ...fit.long)), dom: { nodes: fit.nodes, edges: fit.edges, imgs: fit.imgs } },
-    pan100: { zoom: +vp100a.zoom.toFixed(3), framesMoved: at100.moved, frames: stats(at100.frames), over25ms: at100.frames.filter((f) => f > 25).length, longTasks: at100.long.length, longMax: Math.round(Math.max(0, ...at100.long)), dom: { nodes: at100.nodes, edges: at100.edges, imgs: at100.imgs } },
+    fitPan: { zoom: +vpFit0.zoom.toFixed(3), framesMoved: fit.moved, frames: stats(fit.frames), movedFrames: stats(fit.movedFrames), over25ms: fit.frames.filter((f) => f > 25).length, longTasks: fit.long.length, longMax: Math.round(Math.max(0, ...fit.long)), dom: { nodes: fit.nodes, edges: fit.edges, imgs: fit.imgs } },
+    pan100: { zoom: +vp100a.zoom.toFixed(3), framesMoved: at100.moved, frames: stats(at100.frames), movedFrames: stats(at100.movedFrames), over25ms: at100.frames.filter((f) => f > 25).length, longTasks: at100.long.length, longMax: Math.round(Math.max(0, ...at100.long)), dom: { nodes: at100.nodes, edges: at100.edges, imgs: at100.imgs } },
   }
   console.log(`river perf: ${JSON.stringify(report)}`)
   return ready && report.fitPan.framesMoved > 0 && report.pan100.framesMoved > 0

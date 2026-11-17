@@ -331,16 +331,11 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
       for (const id of ids) {
         const dto = s.cards[id]
         if (dto) {
-          const v = dto.view
-          const job = v.kind === "concept" && v.job && v.job.status !== "accepted" && v.job.status !== "dismissed" ? v.job : undefined
-          if (job) {
-            // The job owns its cards and connectors; dismissing it removes them, and that is not undoable.
+          // A live answer's cards belong to its job: deleting one asks to dismiss the whole answer, which is not undoable.
+          const live = dto.card.pending && "job" in dto.view && dto.view.job && dto.view.job.status !== "accepted" && dto.view.job.status !== "dismissed"
+          if (live) {
             gone.delete(id)
-            putCard(id, null)
-            window.river.jobDismiss(job.id).catch((e: unknown) => {
-              fail(e)
-              refresh(id)
-            })
+            setDismissing(dto.card.pending!.jobId)
           } else step.push({ kind: "card", id, before: dto.card, after: null })
         }
         const m = s.marks[id]
@@ -350,7 +345,7 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
       for (const e of Object.values(s.edges)) if (edges.has(e.id) || gone.has(e.from) || gone.has(e.to)) step.push({ kind: "edge", id: e.id, before: e, after: null })
       void commit(step)
     },
-    [commit, putCard, refresh, fail],
+    [commit],
   )
 
   const actions = useMemo<CanvasActions>(
@@ -363,13 +358,12 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
         const card = stateRef.current?.cards[id]?.card
         if (card && Math.round(w) !== card.w) void commit([{ kind: "card", id, before: { w: card.w }, after: { w: Math.round(w) } }])
       },
-      remove: (id) => deleteItems([id]),
       refresh,
       fail,
       review: setReviewing,
       dismissJob: setDismissing,
     }),
-    [commit, deleteItems, refresh, fail],
+    [commit, refresh, fail],
   )
   const answerNotes = useMemo(() => new Set(cardList.flatMap((d) => (d.card.kind === "note" && d.card.pending ? [d.card.pending.jobId] : []))), [cardList])
 
@@ -713,9 +707,10 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
         onDragLeave={(e) => e.currentTarget === e.target && setDropping(false)}
         onDrop={(e) => {
           setDropping(false)
-          const files = imageFiles(e.dataTransfer.files)
-          if (files.length === 0) return
+          if (!e.dataTransfer.types.includes("Files")) return
           e.preventDefault()
+          const files = imageFiles(e.dataTransfer.files)
+          if (files.length === 0) return setActionError("Only images can be dropped on the board.")
           const [x, y] = toFlow(e)
           stageImages(files, [x - 120, y - 90])
         }}
