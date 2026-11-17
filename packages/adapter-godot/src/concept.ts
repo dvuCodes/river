@@ -11,6 +11,7 @@ import { execFile, spawn } from "node:child_process"
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { KIT_CLASS_CACHE, KIT_GD } from "./kit"
 
 /** Tokens a drawing script has no use for, each with a regex that finds it. */
 const FORBIDDEN: readonly [token: string, find: RegExp][] = [
@@ -85,7 +86,7 @@ export function lintConceptScript(text: string): string[] {
   for (const [token, find] of FORBIDDEN) {
     const at = lines.findIndex((l) => find.test(l))
     if (at !== -1) {
-      problems.push(`Line ${at + 1}: remove "${token}". A concept script only draws on the Image it is given (fill, set_pixel, fill_rect, blend_rect); this check reads comments and strings too.`)
+      problems.push(`Line ${at + 1}: remove "${token}". A concept script only draws on the Image it is given, with Kit and the Image API; this check reads comments and strings too.`)
     }
   }
   return problems
@@ -208,6 +209,9 @@ export async function renderConcept(req: RenderConceptRequest): Promise<void> {
   try {
     await writeFile(path.join(sandbox, "project.godot"), PROJECT)
     await writeFile(path.join(sandbox, "runner.gd"), RUNNER)
+    await writeFile(path.join(sandbox, "kit.gd"), KIT_GD)
+    await mkdir(path.join(sandbox, ".godot"))
+    await writeFile(path.join(sandbox, ".godot", "global_script_class_cache.cfg"), KIT_CLASS_CACHE)
     await writeFile(path.join(sandbox, "concept.gd"), req.script)
     const png = path.join(sandbox, "render.png")
     const args = ["--headless", "--path", sandbox, "-s", "res://runner.gd", "--", `--out=${png.replace(/\\/g, "/")}`, `--w=${width}`, `--h=${height}`]

@@ -4,6 +4,7 @@ import path from "node:path"
 import type { EngineAdapter, Project, ShotDef } from "@river/core"
 
 export { conceptScriptBytesProblem, lintConceptScript, renderConcept, type RenderConceptRequest } from "./concept"
+export { KIT_API } from "./kit"
 
 /** Godot settings read from manifest.adapter.godot. */
 export interface GodotSettings {
