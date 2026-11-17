@@ -74,7 +74,27 @@ export function elementRect(board: Board, id: string): Rect | undefined {
 
 /** Every card and mark on the board, except the ids in `skip` (cards about to move). */
 export function occupiedRects(board: Board, skip: ReadonlySet<string> = new Set()): Rect[] {
-  return [...board.cards.filter((c) => !skip.has(c.id)).map(cardRect), ...board.marks.filter((m) => !skip.has(m.id)).map(markRect)]
+  const rects = [...board.cards.filter((c) => !skip.has(c.id)).map(cardRect), ...board.marks.filter((m) => !skip.has(m.id)).map(markRect)]
+  // A rect River cannot measure would push every new card to Infinity; boards built in memory skip load's checks.
+  return rects.filter((r) => [r.x, r.y, r.w, r.h].every(Number.isFinite))
+}
+
+/**
+ * The answer area of a mark: the cards its edges lead to, and the cards those lead to (mark -> note -> options).
+ * A new answer goes under all of it.
+ */
+export function answerRects(board: Board, markId: string): Rect[] {
+  const first = board.edges.filter((e) => e.from === markId).map((e) => e.to)
+  const second = board.edges.filter((e) => first.includes(e.from)).map((e) => e.to)
+  const ids = new Set([...first, ...second])
+  return board.cards.filter((c) => ids.has(c.id)).map(cardRect)
+}
+
+/** Where a new answer to a mark starts: under the answers already there, or beside the mark. */
+export function answerStart(board: Board, markId: string, under: readonly Rect[] = answerRects(board, markId)): { x: number; y: number } {
+  if (under.length > 0) return { x: Math.min(...under.map((r) => r.x)), y: Math.max(...under.map((r) => r.y + r.h)) + BOARD_GAP }
+  const mark = board.marks.find((m) => m.id === markId)
+  return mark ? besideRect(markRect(mark)) : { x: 0, y: 0 }
 }
 
 /** True when a and b come closer than `gap` on both axes. */

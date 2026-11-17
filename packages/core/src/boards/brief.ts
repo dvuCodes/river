@@ -2,9 +2,10 @@
  * The project brief: .river/brief.md in the workspace, written by the user. Agents read it before they
  * answer; River adds what the user turned down (a dismiss with a reason) under one heading.
  */
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
-import { randomBytes } from "node:crypto"
+import { readFile } from "node:fs/promises"
 import path from "node:path"
+import { writeAtomic } from "./boards"
+import { briefLockFile, withLock } from "./lock"
 
 export const BRIEF_FILE = ".river/brief.md"
 export const TURNED_DOWN_HEADING = "## Things the user turned down"
@@ -35,15 +36,15 @@ export function withTurnedDown(text: string, line: string): string {
 
 /**
  * Add one bullet to the turned-down section. `key` (a job id) is written into the bullet, and a bullet
- * with that key already there makes this a no-op, so repeating a dismiss adds nothing.
+ * with that key already there makes this a no-op, so repeating a dismiss adds nothing. Appends are
+ * serialised by a lock, and the file keeps the line endings the user wrote it with.
  */
 export async function addTurnedDown(workspaceRoot: string, key: string, text: string): Promise<void> {
-  const file = briefPath(workspaceRoot)
-  const current = (await readBrief(workspaceRoot)) ?? ""
-  if (current.includes(`(${key})`)) return
-  const line = `- ${text.replace(/\s+/g, " ").trim()} (${key})`
-  await mkdir(path.dirname(file), { recursive: true })
-  const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`
-  await writeFile(tmp, withTurnedDown(current, line), "utf8")
-  await rename(tmp, file)
+  await withLock(briefLockFile(workspaceRoot), "the brief", async () => {
+    const current = (await readBrief(workspaceRoot)) ?? ""
+    if (current.includes(`(${key})`)) return
+    const line = `- ${text.replace(/\s+/g, " ").trim()} (${key})`
+    const next = withTurnedDown(current, line)
+    await writeAtomic(briefPath(workspaceRoot), current.includes("\r\n") ? next.replace(/\n/g, "\r\n") : next)
+  })
 }

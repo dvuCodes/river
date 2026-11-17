@@ -4,7 +4,9 @@ import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import {
   boardDir,
+  claimMark,
   deleteCard,
+  formatBoard,
   deleteMark,
   ensureBoard,
   listBoards,
@@ -12,6 +14,7 @@ import {
   loadBoard,
   loadJob,
   openMarks,
+  replyToMark,
   saveCard,
   saveJob,
   saveMark,
@@ -100,6 +103,61 @@ describe("boards", () => {
     for (const m of saved) expect(ids.has(m.id)).toBe(true)
     for (let i = 0; i < 50; i++) expect(ids.has("m_other" + String(i).padStart(3, "0"))).toBe(true)
     expect(readdirSync(marksDir).filter((n) => n.endsWith(".tmp"))).toEqual([])
+  })
+
+  it("keeps every message when the user and agents reply to one mark at once, from two processes", async () => {
+    await ensureBoard(root, "main")
+    const mark = await saveMark(root, "main", { ...pen(0), thread: [{ by: "you", at: "2026-01-01T00:00:00.000Z", text: "ask" }] })
+    const boards = new URL("../../src/boards/boards.ts", import.meta.url).href
+    const script = `const { replyToMark } = await import(${JSON.stringify(boards)}); for (let i = 0; i < 15; i++) await replyToMark(process.argv[1], "main", process.argv[2], "other-agent", "other " + i)`
+    const other = new Promise<void>((resolve, reject) =>
+      execFile(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, root, mark.id], (err) => (err ? reject(err) : resolve())),
+    )
+    const ours = Promise.all(Array.from({ length: 15 }, (_, i) => replyToMark(root, "main", mark.id, i % 2 ? "you" : "claude-code", `ours ${i}`)))
+    await Promise.all([ours, other])
+    const texts = (await loadBoard(root, "main")).marks[0]!.thread.map((m) => m.text)
+    expect(texts).toHaveLength(31)
+    for (let i = 0; i < 15; i++) expect(texts).toContain(`ours ${i}`)
+    for (let i = 0; i < 15; i++) expect(texts).toContain(`other ${i}`)
+    expect(readdirSync(path.join(root, ".river", "locks", "marks", "main"))).toEqual([])
+  })
+
+  it("lets exactly one of many claims win, and takes over a lock its holder left behind", async () => {
+    await ensureBoard(root, "main")
+    const mark = await saveMark(root, "main", pen(0))
+    const lock = path.join(root, ".river", "locks", "marks", "main", `${mark.id}.lock`)
+    mkdirSync(path.dirname(lock), { recursive: true })
+    writeFileSync(lock, JSON.stringify({ pid: 999999, host: (await import("node:os")).hostname(), token: "dead" }))
+    const results = await Promise.allSettled(["a", "b", "c", "d"].map((who) => claimMark(root, "main", mark.id, who)))
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1)
+  })
+
+  it("refuses cards and marks it cannot place, and skips such files when it reads a board", async () => {
+    await ensureBoard(root, "main")
+    await expect(saveCard(root, "main", { ...note, w: Number.POSITIVE_INFINITY })).rejects.toThrow(/w must be a finite number/)
+    await expect(saveCard(root, "main", { ...note, x: Number.NaN })).rejects.toThrow(/x and y must be finite/)
+    await expect(saveMark(root, "main", { ...pen(0), path: [0, Number.NaN] })).rejects.toThrow(/finite numbers/)
+    const cards = path.join(boardDir(root, "main"), "cards")
+    const marks = path.join(boardDir(root, "main"), "marks")
+    writeFileSync(path.join(cards, "c_bad1.json"), '{"id":"c_bad1","kind":"note","x":"10","y":0,"w":200,"ref":"","madeBy":"you","createdAt":"2026-01-01T00:00:00.000Z"}')
+    writeFileSync(path.join(cards, "c_bad2.json"), '{"id":"c_bad2","kind":"note","x":0,"y":0,"ref":"","madeBy":"you","createdAt":"2026-01-01T00:00:00.000Z"}')
+    writeFileSync(path.join(marks, "m_bad1.json"), '{"id":"m_bad1","shape":"pen","path":["10","x",50,50],"anchors":[],"thread":[],"status":"open","madeBy":"you","createdAt":"2026-01-01T00:00:00.000Z"}')
+    const problems: string[] = []
+    const board = await loadBoard(root, "main", (file, err) => problems.push(`${path.basename(file)}: ${(err as Error).message}`))
+    expect(board.cards).toEqual([])
+    expect(board.marks).toEqual([])
+    expect(problems.sort()).toEqual(["c_bad1.json: not a card: x and y must be finite numbers", "c_bad2.json: not a card: w must be a finite number above 0", "m_bad1.json: not a mark: path must hold finite numbers"])
+  })
+
+  it("prints what a mark is on, its box, and each card's height and image file", async () => {
+    await ensureBoard(root, "main")
+    const passage = await saveCard(root, "main", { kind: "passage", x: 0, y: 0, w: 280, ref: "stories/park_walk.twee#fetch", madeBy: "you" })
+    await saveCard(root, "main", { kind: "ref", x: 400, y: 0, w: 260, ref: "art/pond.png", source: { licence: "own work" }, madeBy: "you" })
+    await saveMark(root, "main", { shape: "circle", path: [-20, -20, 300, -20, 300, 230, -20, 230], anchors: [passage.id], thread: [{ by: "you", at: "2026-01-01T00:00:00.000Z", text: "a way out" }], madeBy: "you" })
+    const text = formatBoard(await loadBoard(root, "main"))
+    expect(text).toContain(`${passage.id}  passage at 0,0 w280 h210  stories/park_walk.twee#fetch  by you`)
+    expect(text).toContain("ref at 400,0 w260 h260  file: art/pond.png (own work)  by you")
+    expect(text).toMatch(new RegExp(`circle open  box -20,-20 320x250 on ${passage.id} \\(passage stories/park_walk\\.twee#fetch\\)`))
   })
 
   it("skips and reports files that do not parse, and ignores temp files", async () => {

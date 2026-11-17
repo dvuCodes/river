@@ -27,4 +27,14 @@ describe("project brief", () => {
     await addTurnedDown(root, "j_1", "cartoon genie")
     expect(brief()).toBe("# Game\n\nWarm palette.\n\n## Things the user turned down\n\n- neon (j_0)\n- cartoon genie (j_1)\n\n## Later\n\nkeep me\n")
   })
+
+  it("keeps the user's CRLF line endings, and loses no reason when dismisses append at once", async () => {
+    mkdirSync(path.join(root, ".river"))
+    writeFileSync(path.join(root, ".river", "brief.md"), "# Game\r\n\r\nWarm palette.\r\n")
+    await Promise.all(Array.from({ length: 8 }, (_, i) => addTurnedDown(root, `j_${i}`, `reason ${i}`)))
+    const text = brief()
+    expect(text.startsWith("# Game\r\n\r\nWarm palette.\r\n\r\n## Things the user turned down\r\n")).toBe(true)
+    expect(text.replace(/\r\n/g, "")).not.toContain("\n")
+    for (let i = 0; i < 8; i++) expect(text).toContain(`- reason ${i} (j_${i})\r\n`)
+  })
 })

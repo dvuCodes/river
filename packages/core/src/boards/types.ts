@@ -82,8 +82,22 @@ export interface Mark {
   jobId?: string
   /** An agent working the mark without a River job (mark_claim), such as "claude-code". */
   claimedBy?: string
+  /** When claimedBy took the mark, refreshed by the claimant's replies. A claim older than CLAIM_STALE_MS can be taken over. */
+  claimedAt?: string
   createdAt: string
 }
+
+/** A claim nobody refreshed for this long is abandoned: another agent may take the mark over. */
+export const CLAIM_STALE_MS = 30 * 60_000
+
+/** The status changes a reply can make: an agent answers, gives back or dismisses; the user can also accept. */
+export type MarkStatusChange = "answered" | "open" | "dismissed" | "accepted"
+
+/** The role River's concept jobs write as. */
+export const CONCEPT_ROLE = "concept-artist"
+
+/** Names an agent may not write as: the user, and River's own job role. */
+export const RESERVED_AUTHORS: readonly string[] = ["you", CONCEPT_ROLE]
 
 /**
  * A connector drawn as a curved arrow from one card or mark to another. Users draw them with the arrow tool;
