@@ -380,6 +380,53 @@ describe("the look at the renders", { timeout: 120_000 }, () => {
     expect(skipped.status).toBe("answered")
   })
 
+  /** A look that says something, then waits until its turn is stopped. `started` resolves when it begins. */
+  function stoppableLook() {
+    let begin!: () => void
+    const started = new Promise<void>((r) => (begin = r))
+    const look: RunTurn = async (_req, h) => {
+      h.onEvent({ type: "text", text: JSON.stringify({ note: "half a thought" }) })
+      begin()
+      await new Promise<void>((r) => (h.signal?.aborted ? r() : h.signal?.addEventListener("abort", () => r())))
+      h.onEvent({ type: "error", message: "stopped" })
+    }
+    return { look, started }
+  }
+
+  it("a caller's signal stops the look: the job is answered with its renders and the note as written", async () => {
+    const job = await start({ runTurn: turnWriting(THREE) })
+    const { look, started } = stoppableLook()
+    const stop = new AbortController()
+    const approving = approveJobScripts(game, job.id, await allShas(job), { render: fakeRender(), env: GODOT, runTurn: look, signal: stop.signal })
+    await started
+    stop.abort()
+    const answered = await approving
+    expect(answered).toMatchObject({ status: "answered", summary: NOTE })
+    expect(answered.scripts!.map((s) => s.render)).toEqual([{ ok: true }, { ok: true }, { ok: true }])
+    expect((await answerOf(answered)).find((c) => c.kind === "note")!.text).toBe(NOTE)
+  })
+
+  it("a dismiss during the look stops it and waits, so the late answer cannot undo the dismiss", async () => {
+    const job = await start({ runTurn: turnWriting(THREE) })
+    const { look, started } = stoppableLook()
+    const shas = await allShas(job)
+    const approving = approveJobScripts(game, job.id, shas, { render: fakeRender(), env: GODOT, runTurn: look })
+    await started
+    const dismissed = await dismissJob(game, job.id, "not this")
+    expect(dismissed.status).toBe("dismissed")
+    expect((await approving).status).toBe("answered")
+    expect((await loadJob(game, job.id)).status).toBe("dismissed")
+    expect(await answerOf(job)).toEqual([])
+    await expect(approveJobScripts(game, job.id, shas, { render: fakeRender(), env: GODOT })).rejects.toThrow(/is dismissed/)
+  })
+
+  it("an approve that starts while a dismiss runs is refused", async () => {
+    const job = await start({ runTurn: turnWriting(THREE) })
+    const dismissing = dismissJob(game, job.id)
+    await expect(approveJobScripts(game, job.id, await allShas(job), { render: fakeRender(), env: GODOT })).rejects.toThrow(/busy in this process/)
+    expect((await dismissing).status).toBe("dismissed")
+  })
+
   it("a revision gets copies of the previous renders in its worktree, and the prompt says where", async () => {
     const job = await start({ runTurn: turnWriting(THREE) })
     const parent = await approveJobScripts(game, job.id, await allShas(job), { render: fakeRender(), env: GODOT })

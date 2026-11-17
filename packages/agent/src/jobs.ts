@@ -115,6 +115,11 @@ export interface JobDeps {
    * model to look at).
    */
   selfCheck?: false | JobAgentSettings
+  /**
+   * Aborting stops the look at the renders (the job is still answered, with its renders and the note as the agent
+   * wrote it), so a caller can cancel the look without supplying its own runTurn. It does not stop the render.
+   */
+  signal?: AbortSignal
 }
 
 /** A script a job waits on, as the user must see it before approving. */
@@ -486,8 +491,24 @@ interface Ask {
   renders?: RenderCopy[]
 }
 
-/** Jobs whose agent turn runs in this process, so a dismiss can stop the turn before removing its worktree. */
+/**
+ * Jobs this process is working on: an agent turn, an approved render and its look, or a dismiss. A dismiss stops
+ * the run (abort) and waits for it before removing the worktree, and nothing starts on a job while another is live.
+ */
 const live = new Map<string, { abort: AbortController; run: Promise<Job> }>()
+
+/** Run `work` as the job's one live run in this process. In `live` before its first await, so a dismiss always sees it. */
+async function liveRun(jobId: string, work: (signal: AbortSignal) => Promise<Job>): Promise<Job> {
+  if (live.has(jobId)) throw new Error(`river: job ${jobId} is busy in this process (a run or a dismiss); try again when it ends`)
+  const abort = new AbortController()
+  const run = work(abort.signal)
+  live.set(jobId, { abort, run })
+  try {
+    return await run
+  } finally {
+    live.delete(jobId)
+  }
+}
 
 /**
  * Under the mark's lock: `check` the mark still allows the job, then record the job's owner (before the job file
@@ -518,21 +539,15 @@ async function reserveJob(root: string, queued: Job, by: string, check: (mark: M
 
 /** Reserve the job on its mark, run its turn and resolve with the job at "approval" (or "failed", or "dismissed"). */
 async function launchJob(project: Project, queued: Job, settings: JobAgentSettings, ask: Ask, deps: JobDeps, reserve: () => Promise<() => void>): Promise<Job> {
-  const abort = new AbortController()
-  // In `live` before the job file exists, so a dismiss from this process always waits for the run.
-  const run = reserve().then(async (stop) => {
+  // Live before the job file exists, so a dismiss from this process always waits for the run.
+  return liveRun(queued.id, async (signal) => {
+    const stop = await reserve()
     try {
-      return await runConceptTurn(project, settings, queued, ask, abort.signal, deps)
+      return await runConceptTurn(project, settings, queued, ask, signal, deps)
     } finally {
       stop()
     }
   })
-  live.set(queued.id, { abort, run })
-  try {
-    return await run
-  } finally {
-    live.delete(queued.id)
-  }
 }
 
 function queuedJob(mark: Mark, board: string, settings: JobAgentSettings, parentJobId?: string, jobId?: string): Job {
@@ -776,10 +791,10 @@ function parseSelfCheck(text: string): { note: string; captions: Record<string, 
  * change the scripts: River runs and applies only the approved, committed bytes. Resumes the job's session in
  * its worktree when it can. Returns the new records and note, or undefined when it is skipped or says nothing usable.
  */
-async function selfCheck(project: Project, job: Job, scripts: JobScriptRecord[], deps: JobDeps): Promise<{ scripts: JobScriptRecord[]; summary: string } | undefined> {
+async function selfCheck(project: Project, job: Job, scripts: JobScriptRecord[], deps: JobDeps, signal: AbortSignal): Promise<{ scripts: JobScriptRecord[]; summary: string } | undefined> {
   const settings = selfCheckSettings(job, deps)
   const dir = path.join(job.worktree, job.projectSub)
-  if (!settings || !existsSync(dir)) return undefined
+  if (!settings || !existsSync(dir) || signal.aborted) return undefined
   const root = project.root
   const renders = renderCopies(root, { ...job, scripts }, conceptPath(job.conceptId))
   for (const r of renders) await copyFile(r.from, path.join(dir, r.to))
@@ -799,10 +814,10 @@ async function selfCheck(project: Project, job: Job, scripts: JobScriptRecord[],
   const mark = await loadMark(root, job.board, job.markId)
   const fresh = mark ? `${await conceptPrompt(project, job.board, mark)}\n\n${ask}` : ask
   const runTurn = deps.runTurn ?? ((r, h) => startAgentTurn(r, h, { maxTurns: SELF_CHECK_TURNS, effort: "low" }))
-  const never = new AbortController().signal
-  let result = await conceptTurn(dir, job, settings, job.sessionId ? { prompt: ask, resume: job.sessionId } : { prompt: fresh }, never, deps, runTurn)
-  if (job.sessionId && result.errors.some((e) => NO_SESSION.test(e))) result = await conceptTurn(dir, job, settings, { prompt: fresh }, never, deps, runTurn)
-  const parsed = parseSelfCheck(result.texts.join("\n"))
+  let result = await conceptTurn(dir, job, settings, job.sessionId ? { prompt: ask, resume: job.sessionId } : { prompt: fresh }, signal, deps, runTurn)
+  if (job.sessionId && !signal.aborted && result.errors.some((e) => NO_SESSION.test(e))) result = await conceptTurn(dir, job, settings, { prompt: fresh }, signal, deps, runTurn)
+  // A stopped look keeps the note as written, even when the turn said something before it stopped.
+  const parsed = signal.aborted ? undefined : parseSelfCheck(result.texts.join("\n"))
   if (!parsed) return undefined
   const summary = clip(parsed.note.trim(), SUMMARY_MAX)
   const next = scripts.map((s) => {
@@ -828,6 +843,11 @@ async function selfCheck(project: Project, job: Job, scripts: JobScriptRecord[],
  * the agent looks at the renders once (JobDeps.selfCheck) and may rewrite its note and captions.
  */
 export async function approveJobScripts(workspaceRoot: string, jobId: string, shas: Readonly<Record<string, string>>, deps: JobDeps = {}): Promise<Job> {
+  return liveRun(jobId, (dismissing) => approveRun(workspaceRoot, jobId, shas, deps, dismissing))
+}
+
+/** approveJobScripts' work. `dismissing` aborts when this process dismisses the job: the renders left and the look are skipped. */
+async function approveRun(workspaceRoot: string, jobId: string, shas: Readonly<Record<string, string>>, deps: JobDeps, dismissing: AbortSignal): Promise<Job> {
   const project = await loadProject(workspaceRoot)
   const root = project.root
   let job = await loadJob(root, jobId)
@@ -850,6 +870,7 @@ export async function approveJobScripts(workspaceRoot: string, jobId: string, sh
       let headSha = job.headSha!
       const done: JobScriptRecord[] = []
       for (const { record, bytes } of scripts) {
+        if (dismissing.aborted) break
         try {
           const png = path.join(root, ".river", "jobs", job.id, jobRenderName(record.variant))
           await (deps.render ?? renderConcept)({ bin, script: bytes, outPng: png })
@@ -861,7 +882,8 @@ export async function approveJobScripts(workspaceRoot: string, jobId: string, sh
         }
       }
       if (done.some((s) => s.render?.ok)) {
-        const checked = await selfCheck(project, job, done, deps).catch((err: unknown) => {
+        const look = deps.signal ? AbortSignal.any([dismissing, deps.signal]) : dismissing
+        const checked = await selfCheck(project, job, done, deps, look).catch((err: unknown) => {
           console.warn(`river: job ${job.id}: the look at the renders failed, so the note stays as written: ${errMsg(err)}`)
           return undefined
         })
@@ -990,19 +1012,20 @@ async function dismiss(root: string, job: Job, reason?: string): Promise<Job> {
 }
 
 /**
- * Throw the job away from any non-terminal state; dismissing it again tidies up anything left. A turn
- * running in this process is stopped first (it holds the worktree open). A turn running in another
+ * Throw the job away from any non-terminal state; dismissing it again tidies up anything left. A turn, render or look
+ * running in this process is stopped first and waited for (it holds the worktree open). One running in another
  * process cannot be stopped from here. `reason`, when given, is added to the project brief under
  * "Things the user turned down", so later answers avoid it.
  */
 export async function dismissJob(workspaceRoot: string, jobId: string, reason?: string): Promise<Job> {
   const root = await projectRoot(workspaceRoot)
-  const owned = live.get(jobId)
-  if (owned) {
+  // Stop and wait for whatever this process runs on the job (a turn, a render and its look, another dismiss), then
+  // dismiss as the job's live run, so an approve that starts meanwhile is refused instead of answering after it.
+  for (let owned = live.get(jobId); owned; owned = live.get(jobId)) {
     owned.abort.abort()
     await owned.run.catch(() => undefined)
   }
-  return dismiss(root, await loadJob(root, jobId), reason)
+  return liveRun(jobId, async () => dismiss(root, await loadJob(root, jobId), reason))
 }
 
 /**
