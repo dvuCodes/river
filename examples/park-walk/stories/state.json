@@ -1,0 +1,6 @@
+{
+  "energy": { "type": "number", "min": 0, "max": 100, "initial": 80 },
+  "excitement": { "type": "number", "min": 0, "max": 100, "initial": 10 },
+  "bond": { "type": "number", "min": 0, "max": 100, "initial": 50 },
+  "treats": { "type": "int", "min": 0, "max": 10, "initial": 2 }
+}

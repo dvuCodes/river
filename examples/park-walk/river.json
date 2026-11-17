@@ -1,0 +1,9 @@
+{
+  "name": "Park Walk (example)",
+  "engine": "none",
+  "stories": "stories",
+  "state": "stories/state.json",
+  "export": "export",
+  "adapter": {},
+  "shots": []
+}

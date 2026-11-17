@@ -1,0 +1,68 @@
+:: StoryTitle
+Park Walk
+
+:: StoryData
+{
+  "ifid": "3F0B6C1E-8A2D-4E57-9C61-2B7D4A9E0F13",
+  "start": "Gate",
+  "tag-colors": {"encounter": "green", "ending": "blue"}
+}
+
+:: Gate [start]
+@id gate
+--
+The park gate creaks open. The dog pulls toward the pond.
+
+[[Go to the pond->Pond]]
+[[Take the long path->Long path]] @set energy -= 10
+
+:: Pond [encounter]
+@id pond
+@set excitement += 20
+--
+Ducks. Many ducks.
+
+[[Hold the leash tight->Calm down]] @set excitement -= 30, bond -= 5
+[[Throw a treat->Treat]] @cost treats 1 @when treats >= 1
+[[Let go->Splash]] @when excitement > 150
+
+:: Long path
+@id long_path
+--
+Trees, shade and one interesting stick.
+
+[[Pick up the stick->Fetch]]
+[[Head home->Home happy]]
+
+:: Calm down
+@id calm_down
+--
+The dog sits. It does not look happy about it.
+
+[[Head home->Home grumpy]]
+
+:: Treat
+@id treat
+@set bond += 10
+--
+The treat wins. The ducks lose.
+
+[[Head home->Home happy]]
+
+:: Fetch
+@id fetch
+@when energy >= 20
+--
+Three throws. Then a nap under a tree.
+
+:: Home happy [ending]
+@id home_happy
+@end
+--
+A good walk.
+
+:: Home grumpy [ending]
+@id home_grumpy
+@end
+--
+A walk. Technically.
