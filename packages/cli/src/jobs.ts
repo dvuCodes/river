@@ -267,9 +267,13 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
       for (const script of scripts) {
         out.line(terminalText(`${script.file}  sha256 ${script.sha256}${script.variant ? `  option ${script.variant.toUpperCase()}${script.caption ? ` "${script.caption}"` : ""}` : ""}`))
         out.line("-".repeat(60))
-        out.write(script.text.endsWith("\n") ? script.text : `${script.text}\n`)
+        // Every line after its number: a row the terminal wraps is then the only kind that starts without one.
+        const lines = script.text.split("\n")
+        const width = Math.max(3, String(lines.length).length)
+        lines.forEach((line, i) => out.line(terminalText(`${String(i + 1).padStart(width)} | ${line}`)))
         out.line("-".repeat(60))
       }
+      out.line("Each numbered row is one line of the script; a row without a number is the line above it, wrapped by the terminal.")
       out.line("Not run. Every line is the agent's code and runs on this computer with your permissions once you approve.")
       out.line("Kit.name(...) calls use River's drawing helpers, but River cannot prove that a line only draws.")
       out.line(`Read ${scripts.length === 1 ? "all of it" : `all ${scripts.length}`}; to run exactly these bytes:`)

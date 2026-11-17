@@ -435,15 +435,55 @@
   margin: 0;
   max-height: 220px;
   overflow: auto;
-  padding: 6px 8px;
-  font-size: 11px;
-  line-height: 1.45;
-  /* Wrap rather than scroll sideways: code pushed far right after a run of spaces must still be in view. */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  padding: 6px 8px 6px 0;
+  font: 11px/16px var(--mono);
   tab-size: 4;
   user-select: text;
   cursor: text;
+}
+.script-row {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: var(--ln-w, 6ch) minmax(0, 1fr);
+}
+.script-ln {
+  padding-right: 1.5ch;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+.script-row.is-read .script-ln {
+  color: var(--cond);
+  font-weight: 600;
+}
+/* Wrap rather than scroll sideways: code pushed far right after a run of spaces must still be in view. */
+.script-code {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* The rows a long line wraps onto, from its second row down: a hook in the gutter for each, a tint behind them. */
+.script-row::before,
+.script-row::after {
+  content: "";
+  position: absolute;
+  top: 16px;
+  bottom: 0;
+  pointer-events: none;
+}
+.script-row::before {
+  left: var(--ln-w, 6ch);
+  right: 0;
+  z-index: -1;
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+}
+.script-row::after {
+  left: 0;
+  width: var(--ln-w, 6ch);
+  background: var(--muted);
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='16' viewBox='0 0 12 16'%3E%3Cpath d='M3 3.5v5.5h6.5M7 6.5 9.5 9 7 11.5' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    right 4px top / 12px 16px repeat-y;
 }
 .concept-error {
   margin: 0;

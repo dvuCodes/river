@@ -229,6 +229,7 @@ describe("linesToRead", () => {
     expect(linesToRead(`${DRAW}\tvar s = "a\n\timg.fill(Color.RED)\n`)).toEqual([
       { line: 9, reason: "has a string that goes on to the next line" },
       { line: 10, reason: "starts inside the string from line 9" },
+      { line: 11, reason: "starts inside the string from line 9" },
     ])
     expect(linesToRead(`${DRAW}\tvar s = """\nOS\n"""\n`)).toEqual([
       { line: 9, reason: "has a string that goes on to the next line" },
@@ -243,6 +244,18 @@ describe("linesToRead", () => {
     ])
     expect(marked(`${DRAW}\tvar n = &"name"\n\tvar r = r"raw"\n`)).toEqual([])
     expect(linesToRead(`${DRAW}\tvar p = ^"Node/Path"\n`)).toEqual([{ line: 9, reason: "has an annotation or a node path" }])
+  })
+
+  it("marks a line of code whatever the quotes, comments and backslashes above it", () => {
+    // Whether the lines above leave it in code or inside a string, the line is marked, by its name or by the string.
+    const pieces = ['"', "'", "\\", "\n", "#", "a", " ", "\t", ".", "(", '"""', "'''", "r", "&", "^", "img"]
+    let seed = 7
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31
+    for (let n = 0; n < 20_000; n++) {
+      const above = Array.from({ length: Math.floor(next() * 30) }, () => pieces[Math.floor(next() * pieces.length)]).join("")
+      const line = above.split("\n").length + 1
+      expect(marked(`${above}\nOS.execute("x", [])\n`), JSON.stringify(above)).toContain(line)
+    }
   })
 
   it("highlights a code line disguised as the wrapped tail of a comment after a string Godot continues", () => {

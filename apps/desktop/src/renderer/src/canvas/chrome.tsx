@@ -1,10 +1,11 @@
 import { useReactFlow, useViewport, useViewportStore } from "@xyflow/react"
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react"
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react"
 import type { Mark, MarkStatus } from "@river/core"
 import type { CanvasTheme, JobDTO } from "../../../shared/api"
 import { cx, errorText, liveClaim, shortTime } from "../util"
 import type { Pt } from "./geometry"
 import { ME } from "./nodes"
+import { scriptRows } from "./scriptRows"
 
 // ---------- toolbar ----------
 
@@ -497,7 +498,8 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
         <p className="review-kit">
           <code>Kit.name(…)</code> calls use River's drawing helpers, but River cannot prove that a line only draws.{" "}
           <mark className="read-line">Highlighted</mark> lines use names beyond Kit, the Image API and plain math. The highlight is a reading aid, not
-          a check: read the other lines too.{" "}
+          a check: read the other lines too. Each numbered row is one line of the script; a row with ↳ and no number is the line
+          above, wrapped to fit.{" "}
           <button type="button" className="link-btn" data-action="view-kit" onClick={() => setKit(true)}>
             Read the Kit
           </button>
@@ -511,7 +513,7 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
                   {s.caption && <span className="review-caption"> · {s.caption}</span>}
                 </span>
                 <span className="mono" title={`${s.file} sha256 ${s.sha256}`}>
-                  {s.file.split("/").pop()} · {s.sha256.slice(0, 12)}
+                  {s.file.split("/").pop()} · {s.text.split("\n").length} lines · sha256 {s.sha256.slice(0, 12)}
                 </span>
               </header>
               <ScriptText text={s.text} toRead={s.toRead} />
@@ -535,26 +537,29 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
   )
 }
 
-/** The script exactly as its bytes read, with the lines worth a slow read highlighted. */
+/**
+ * The script exactly as its bytes read, one numbered row per line, with the lines worth a slow read highlighted. A long
+ * line wraps inside its own row, so a wrapped part never gets a number and a new line never goes without one.
+ */
 function ScriptText(props: { text: string; toRead: { line: number; reason: string }[] }) {
-  const reasons = new Map(props.toRead.map((r) => [r.line, r.reason]))
-  const lines = props.text.split("\n")
+  const rows = scriptRows(props.text, props.toRead)
   return (
-    <pre className="concept-script-text">
-      {lines.map((line, i) => {
-        const end = i < lines.length - 1 ? "\n" : ""
-        const reason = reasons.get(i + 1)
-        if (!reason) return line + end
-        return (
-          <span key={i}>
-            <mark className="read-line" data-line={i + 1} title={`Read this line: it ${reason}`}>
-              {line}
-            </mark>
-            {end}
+    <div className="concept-script-text" style={{ "--ln-w": `${String(rows.length).length + 3}ch` } as CSSProperties}>
+      {rows.map((r) => (
+        <div key={r.n} className={cx("script-row", r.reason && "is-read")}>
+          <span className="script-ln" aria-hidden="true">
+            {r.n}
           </span>
-        )
-      })}
-    </pre>
+          {r.reason ? (
+            <mark className="script-code read-line" data-line={r.n} title={`Read this line: it ${r.reason}`}>
+              {r.text}
+            </mark>
+          ) : (
+            <span className="script-code">{r.text}</span>
+          )}
+        </div>
+      ))}
+    </div>
   )
 }
 

@@ -45,27 +45,38 @@ function declaredNames(code: string): Set<string> {
   return names
 }
 
-/** Each line's code with comments dropped and string contents emptied; a line whose string does not close is flagged. */
-function codeLines(text: string): { code: string; unclosed: boolean }[] {
-  const out: { code: string; unclosed: boolean }[] = []
+interface CodeLine {
+  /** The line with comments dropped and each string's contents emptied. */
+  code: string
+  /** The line the string open at this line's start opened on, or 0 when the line starts in code. */
+  inStringFrom: number
+  /** A string this line opens is still open at its end. */
+  stringGoesOn: boolean
+}
+
+/**
+ * Splits a script into lines the way Godot's tokenizer reads strings: a string, raw (r"…"), StringName (&"…") and
+ * NodePath (^"…") ones too, ends only at its closing quote, so it runs on across newlines, escaped or not; inside it a
+ * backslash keeps the next character from closing it; a # outside strings starts a comment that runs to the line's end.
+ */
+function codeLines(text: string): CodeLine[] {
+  const out: CodeLine[] = []
+  let line = 1
   let code = ""
-  let unclosed = false
+  let inStringFrom = 0
   let quote: string | null = null
+  let openedOn = 0
   for (let i = 0; i < text.length; i++) {
     const c = text[i]!
     if (c === "\n") {
-      if (quote && quote.length === 1) {
-        unclosed = true
-        code += quote
-        quote = null
-      }
-      out.push({ code, unclosed })
+      out.push({ code, inStringFrom, stringGoesOn: quote !== null && openedOn === line })
+      line++
       code = ""
-      unclosed = false
+      inStringFrom = quote ? openedOn : 0
       continue
     }
     if (quote) {
-      // An escaped newline still ends the line here, so the marks after it keep their line numbers.
+      // The newline after a backslash stays for the branch above, which counts the line.
       if (c === "\\" && text[i + 1] !== "\n") i++
       else if (text.startsWith(quote, i)) {
         code += quote
@@ -78,29 +89,31 @@ function codeLines(text: string): { code: string; unclosed: boolean }[] {
       while (i + 1 < text.length && text[i + 1] !== "\n") i++
       continue
     }
+    if (c === "r" && /["']/.test(text[i + 1] ?? "") && !/\w/.test(text[i - 1] ?? "")) continue
     if (c === '"' || c === "'") {
       quote = text.startsWith(c.repeat(3), i) ? c.repeat(3) : c
+      openedOn = line
       code += quote
       i += quote.length - 1
       continue
     }
     code += c
   }
-  out.push({ code, unclosed: unclosed || quote !== null })
+  out.push({ code, inStringFrom, stringGoesOn: quote !== null && openedOn === line })
   return out
 }
 
 /**
- * Lines that use a name outside Kit calls, the Image API, plain math and the script's own variables, or that
- * continue onto the next line after a dot. A reading aid for the review dialog; it proves nothing about the
- * lines it leaves unmarked.
+ * Lines that use a name outside Kit calls, the Image API, plain math and the script's own variables, that continue
+ * onto the next line after a dot, or that a string spans. A reading aid for the review dialog; it proves nothing
+ * about the lines it leaves unmarked.
  */
 export function linesToRead(text: string): LineToRead[] {
   const lines = codeLines(text)
   const declared = declaredNames(lines.map((l) => l.code).join("\n"))
   const kit = new Set(KIT_FUNCTIONS)
   const marked: LineToRead[] = []
-  lines.forEach(({ code, unclosed }, i) => {
+  lines.forEach(({ code, inStringFrom, stringGoesOn }, i) => {
     const unknown: string[] = []
     for (const m of code.matchAll(/\d[\w.]*|[A-Za-z_]\w*/g)) {
       const name = m[0]
@@ -115,8 +128,9 @@ export function linesToRead(text: string): LineToRead[] {
     const reasons: string[] = []
     if (unknown.length > 0) reasons.push(`uses ${[...new Set(unknown)].join(", ")}`)
     if (/[.\\]\s*$/.test(code)) reasons.push("continues on the next line")
-    if (unclosed) reasons.push("has a string that does not close")
-    if (/[@$]/.test(code)) reasons.push("has an annotation or a node path")
+    if (inStringFrom) reasons.push(`starts inside the string from line ${inStringFrom}`)
+    if (stringGoesOn) reasons.push("has a string that goes on to the next line")
+    if (/[@$]|\^["']/.test(code)) reasons.push("has an annotation or a node path")
     if (reasons.length > 0) marked.push({ line: i + 1, reason: reasons.join("; ") })
   })
   return marked

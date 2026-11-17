@@ -5,11 +5,11 @@ import { scriptRows } from "../src/renderer/src/canvas/scriptRows"
 describe("scriptRows", () => {
   it("gives a comment that fills the row and the code line after it a numbered row each", () => {
     const comment = `\tvar pts = [Vector2(0, h), # the hill${" ".repeat(117 - 37)}`
-    const text = `extends RefCounted\n\nfunc draw(img: Image) -> void:\n${comment}\n["/tmp/out.png"].map(img.get("sa" + "ve_png"))]\n`
+    const text = `extends RefCounted\n\nfunc draw(img: Image) -> void:\n\tvar h := img.get_height()\n${comment}\n["/tmp/out.png"].map(img.get("sa" + "ve_png"))]\n`
     const rows = scriptRows(text, linesToRead(text))
-    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6])
-    expect(rows[3]).toEqual({ n: 4, text: comment })
-    expect(rows[4]).toEqual({ n: 5, text: '["/tmp/out.png"].map(img.get("sa" + "ve_png"))]', reason: "uses map, get" })
+    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7])
+    expect(rows[4]).toEqual({ n: 5, text: comment })
+    expect(rows[5]).toEqual({ n: 6, text: '["/tmp/out.png"].map(img.get("sa" + "ve_png"))]', reason: "uses map, get" })
   })
 
   it("keeps every line of the bytes, in order, with the reading aid's reason on its line", () => {

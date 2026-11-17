@@ -3,7 +3,7 @@ import { access, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from
 import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { BrowserWindow, ClipboardItem, app, clipboard, ipcMain, nativeTheme, net, protocol } from "electron"
-import type { JobDeps } from "@river/agent"
+import { type JobDeps, readJobScripts } from "@river/agent"
 import { VIEWS, type ViewId } from "../shared/api"
 import { type Card, type Job, type Mark, CONCEPT_ROLE, boardJsonText, claimMark, loadBoard, loadCard, loadJob, loadMark, markFile, replyToMark, saveCard, saveEdge, saveJob, saveMark } from "@river/core"
 import { type BoardEntity, onBoardWritten } from "./board"
@@ -499,6 +499,12 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
     `[...document.querySelectorAll(".review .review-script .concept-script-text .read-line")].map((m) => m.closest(".review-script").dataset.variant + ":" + m.dataset.line).join(" ")`,
   )) as string
   console.log(`river smoke: the review highlights ${highlighted === "b:6" ? "option B's unknown call" : `"${highlighted}", not just option B's unknown call`}`)
+  // Each script line is its own row, numbered 1 to n in the gutter, matching the bytes the job holds.
+  const shownScripts = (await readJobScripts(p.root, jobId)).map((s) => s.text.split("\n").length).join(",")
+  const numbered = (await w.webContents.executeJavaScript(
+    `[...document.querySelectorAll(".review .review-script")].map((s) => { const n = [...s.querySelectorAll(".script-row .script-ln")].map((l) => Number(l.textContent)); return n.every((v, i) => v === i + 1) ? n.length : -1 }).join(",")`,
+  )) as string
+  console.log(`river smoke: the review numbers ${numbered === shownScripts ? "every line of each script" : `rows ${numbered}, not lines ${shownScripts}`}`)
   await shoot(w, dir, "job-review.png")
   const kitShown =
     (await clickEl(w, `.review [data-action="view-kit"]`, 3_000)) &&
@@ -544,7 +550,7 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const closed = await until(async () => (await loadCard(p.root, "main", optionC.id))?.x === rowStart, 5_000)
   const markNow = (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)
   console.log(`river smoke: concepts/${job.conceptId}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}; kept card ${closed ? "moved to the row start" : "did NOT close the gap"}`)
-  const keptOk = highlighted === "b:6" && kitShown && looking && looked && sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
+  const keptOk = highlighted === "b:6" && numbered === shownScripts && kitShown && looking && looked && sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
 
   await key(w, "Escape")
   await key(w, "1", ["shift"])
