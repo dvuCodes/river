@@ -1,6 +1,6 @@
-import { formatCond } from "../story/cond"
+import { applyEffects, evalCond, formatCond } from "../story/cond"
 import { contentPassages, resolveTarget } from "../story/model"
-import type { Cond, Diagnostic, Effect, Passage, SourceSpan, StateSchema, Story } from "../story/types"
+import type { Choice, Cond, Diagnostic, Effect, Passage, SourceSpan, StateSchema, Story } from "../story/types"
 import { satisfiable } from "./sat"
 
 /** Type problems in one condition. Empty when it is well typed. */
@@ -68,9 +68,78 @@ function checkEffects(effects: Effect[], schema: StateSchema): { code: string; m
   return out
 }
 
+const TRUE: Cond = { kind: "and", terms: [] }
+const FALSE: Cond = { kind: "or", terms: [] }
+const isConst = (c: Cond, value: boolean) => c.kind === (value ? "and" : "or") && c.terms.length === 0
+
+function join(kind: "and" | "or", terms: Cond[]): Cond {
+  const unit = kind === "and"
+  if (terms.some((t) => isConst(t, !unit))) return unit ? FALSE : TRUE
+  const kept = terms.filter((t) => !isConst(t, unit))
+  return kept.length === 1 ? kept[0]! : { kind, terms: kept }
+}
+
+const cmp = (a: number, op: "<" | "<=" | ">" | ">=", b: number) => (op === "<" ? a < b : op === "<=" ? a <= b : op === ">" ? a > b : a >= b)
+
+/**
+ * `cond` as a condition on the state before `effect` runs, with the effect's clamping to the schema range;
+ * undefined when that cannot be written as a condition River checks.
+ */
+function beforeEffect(cond: Cond, effect: Effect, schema: StateSchema): Cond | undefined {
+  if (cond.kind === "and" || cond.kind === "or") {
+    const terms = cond.terms.map((t) => beforeEffect(t, effect, schema))
+    return terms.every((t): t is Cond => t !== undefined) ? join(cond.kind, terms) : undefined
+  }
+  if (cond.kind === "not") {
+    const term = beforeEffect(cond.term, effect, schema)
+    return term && (isConst(term, true) ? FALSE : isConst(term, false) ? TRUE : { kind: "not", term })
+  }
+  if (cond.variable !== effect.variable) return cond
+  const decl = schema[effect.variable]
+  if (effect.op === "set") return evalCond(cond, applyEffects({}, [effect], schema)) ? TRUE : FALSE
+  if (!decl || (decl.type !== "number" && decl.type !== "int") || typeof effect.amount !== "number" || typeof cond.value !== "number") return undefined
+  const lo = decl.min ?? -Infinity
+  const hi = decl.max ?? Infinity
+  const x = cond.value
+  const shifted: Cond = { ...cond, value: x - effect.amount }
+  switch (cond.op) {
+    case ">":
+    case ">=":
+      return cmp(lo, cond.op, x) ? TRUE : !cmp(hi, cond.op, x) ? FALSE : shifted
+    case "<":
+    case "<=":
+      return cmp(hi, cond.op, x) ? TRUE : !cmp(lo, cond.op, x) ? FALSE : shifted
+    default:
+      return lo < x && x < hi ? shifted : undefined
+  }
+}
+
+/**
+ * A choice shows when its @when holds, but its target can be entered only when the target's @when holds on
+ * the state after the choice's @cost and @set. The message for a state that allows the first and not the second.
+ */
+function blockedChoice(p: Passage, choice: Choice, target: Passage, schema: StateSchema): string | undefined {
+  if (!target.when || checkCond(target.when, schema).length > 0 || (choice.when && checkCond(choice.when, schema).length > 0)) return undefined
+  let needed: Cond | undefined = target.when
+  for (const e of [...choice.cost, ...choice.set].reverse()) needed = needed && beforeEffect(needed, e, schema)
+  if (!needed) return undefined
+  const shows = choice.when ? [choice.when] : []
+  if (!satisfiable(shows, schema) || !satisfiable([...shows, { kind: "not", term: needed }], schema)) return undefined
+  const effects = choice.cost.length + choice.set.length > 0 ? " after the choice's @cost and @set" : ""
+  const where = `${p.name} → ${choice.target}`
+  if (!satisfiable([...shows, needed], schema)) {
+    return `${where}: ${target.name} has @when ${formatCond(target.when)}, which is never true${effects} when this choice shows, so the move always fails. Loosen one of the two conditions.`
+  }
+  return (
+    `${where}: the choice can show while ${target.name} cannot be entered (its @when ${formatCond(target.when)} is false${effects}). ` +
+    `Give the choice @when ${formatCond(choice.when ? join("and", [choice.when, needed]) : needed)}, or loosen ${target.name}'s @when.`
+  )
+}
+
 /**
  * Rules: broken-link (error), unknown-var (error), type-mismatch (error), duplicate-name (error),
  * duplicate-id (error), never-true (warn: a condition no value in the schema ranges satisfies),
+ * blocked-choice (warn: a choice can show while its target's @when keeps the player out),
  * dead-end (warn: no choices and no @end), unreachable (warn: no route from the start).
  */
 export function lint(story: Story, schema: StateSchema): Diagnostic[] {
@@ -110,8 +179,11 @@ export function lint(story: Story, schema: StateSchema): Diagnostic[] {
     effectRule(p, p.onEnter, p.name, p.span)
     for (const c of p.choices) {
       const where = `${p.name} → ${c.target}`
-      if (!resolveTarget(story, c.target)) add("error", "broken-link", `${where}: no passage has this name`, p, c.span)
+      const target = resolveTarget(story, c.target)
+      if (!target) add("error", "broken-link", `${where}: no passage has this name`, p, c.span)
       if (c.when) condRule(p, c.when, where, c.span)
+      const blocked = target && blockedChoice(p, c, target, schema)
+      if (blocked) add("warn", "blocked-choice", blocked, p, c.span)
       effectRule(p, c.cost, where, c.span)
       effectRule(p, c.set, where, c.span)
     }

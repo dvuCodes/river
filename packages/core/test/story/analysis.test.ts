@@ -15,17 +15,47 @@ import type { StateSchema } from "../../src/story/types"
 import { exampleRoot, loadExample } from "./helpers"
 
 describe("lint", () => {
-  it("finds exactly the three planted problems in the example", () => {
+  it("finds exactly the planted problems in the example", () => {
     const { story, schema, diagnostics } = loadExample()
     expect(diagnostics).toEqual([])
     const found = lint(story, schema)
     expect(found.map((d) => [d.severity, d.code, d.passageId])).toEqual([
       ["error", "broken-link", "pond"],
       ["warn", "never-true", "pond"],
+      ["warn", "blocked-choice", "long_path"],
       ["warn", "dead-end", "fetch"],
     ])
     expect(found[0]!.message).toBe("Pond → Splash: no passage has this name")
     expect(found[0]!.span?.line).toBe(27)
+  })
+
+  it("warns when a choice can show while its target cannot be entered, counting the choice's own costs and clamping", () => {
+    const schema: StateSchema = { energy: { type: "number", min: 0, max: 100, initial: 80 } }
+    const src = [
+      ":: Gate",
+      "--",
+      "[[Throw->Fetch]] @cost energy 10 @when energy >= 10",
+      "[[Rest->Fetch]] @set energy = 50",
+      "[[Ready->Fetch]] @cost energy 10 @when energy >= 30",
+      "[[Tired->Fetch]] @set energy = 5",
+      "[[Full->Low]] @set energy += 50",
+      "",
+      ":: Fetch",
+      "@when energy >= 20",
+      "@end",
+      "--",
+      "",
+      ":: Low",
+      "@when energy <= 100",
+      "@end",
+      "--",
+    ].join("\n")
+    const found = lint(parseTwee3(src, "t.twee").story, schema).filter((d) => d.code === "blocked-choice")
+    expect(found.map((d) => d.message)).toEqual([
+      "Gate → Fetch: the choice can show while Fetch cannot be entered (its @when energy >= 20 is false after the choice's @cost and @set). Give the choice @when energy >= 10 and energy >= 30, or loosen Fetch's @when.",
+      "Gate → Fetch: Fetch has @when energy >= 20, which is never true after the choice's @cost and @set when this choice shows, so the move always fails. Loosen one of the two conditions.",
+    ])
+    expect(found.map((d) => d.span?.line)).toEqual([3, 6])
   })
 
   it("checks variables, types, duplicates and reachability", () => {

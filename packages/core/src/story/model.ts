@@ -66,10 +66,31 @@ export function setPassagePositions(story: Story, positions: Record<string, [num
   return changed ? { ...story, passages } : story
 }
 
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i]
+    for (let j = 1; j <= b.length; j++) row[j] = Math.min(prev[j]! + 1, row[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1))
+    prev = row
+  }
+  return prev[b.length]!
+}
+
+/** "no passage with id", naming the passages the caller probably meant: a name given for an id, a case or spelling slip. */
+export function noPassageError(story: Story, passageId: string): Error {
+  const want = passageId.trim().toLowerCase()
+  const close = story.passages.filter((p) => {
+    const id = p.id.toLowerCase()
+    return id === want || p.name.toLowerCase() === want || slugify(passageId) === p.id || editDistance(id, want) <= 2
+  })
+  const hint = close.length > 0 ? ` Did you mean ${close.slice(0, 3).map((p) => `"${p.id}" (passage ${p.name})`).join(" or ")}? Ids come from story_read.` : ""
+  return new Error(`no passage with id "${passageId}".${hint}`)
+}
+
 /** Replace one passage raw text and re-parse it. Returns a new Story; the input is not changed. */
 export function updatePassageText(story: Story, passageId: string, rawText: string): Story {
   const target = passageById(story, passageId)
-  if (!target) throw new Error(`no passage with id "${passageId}"`)
+  if (!target) throw noPassageError(story, passageId)
   return { ...story, passages: story.passages.map((p) => (p === target ? reparse(p, rawText) : p)) }
 }
 
@@ -92,7 +113,7 @@ function withIdRule(rawText: string, id: string): string {
  */
 export function renamePassage(story: Story, passageId: string, newName: string): Story {
   const target = passageById(story, passageId)
-  if (!target) throw new Error(`no passage with id "${passageId}"`)
+  if (!target) throw noPassageError(story, passageId)
   if (story.passages.some((p) => p !== target && p.name === newName)) {
     throw new Error(`a passage named "${newName}" already exists`)
   }
