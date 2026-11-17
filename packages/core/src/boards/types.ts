@@ -82,12 +82,49 @@ export interface Board {
 }
 
 /**
+ * queued     created, worktree not ready yet
+ * running    the agent turn is running in the worktree
+ * approval   the agent wrote a script; nothing runs it until the user approves its exact bytes (sha256)
+ * rendering  River runs the approved bytes in a sandbox Godot project
+ * answered   the render is on the canvas as a faded card
+ * accepted   the job's files are applied to the user's checkout (terminal)
+ * dismissed  thrown away (terminal)
+ * failed     something broke; `error` says what. Can still be dismissed.
+ */
+export type JobStatus = "queued" | "running" | "approval" | "rendering" | "answered" | "accepted" | "dismissed" | "failed"
+
+/** Legal moves. Dismiss is allowed from every non-terminal state, so a stuck job never leaves an undismissable card. */
+export const JOB_NEXT: Record<JobStatus, readonly JobStatus[]> = {
+  queued: ["running", "failed", "dismissed"],
+  running: ["approval", "failed", "dismissed"],
+  approval: ["rendering", "failed", "dismissed"],
+  rendering: ["answered", "failed", "dismissed"],
+  answered: ["accepted", "dismissed", "failed"],
+  failed: ["dismissed"],
+  accepted: [],
+  dismissed: [],
+}
+
+/** The mark's status while its job is in each state. */
+export const MARK_STATUS_FOR_JOB: Record<JobStatus, MarkStatus> = {
+  queued: "working",
+  running: "working",
+  approval: "working",
+  rendering: "working",
+  answered: "answered",
+  accepted: "accepted",
+  dismissed: "dismissed",
+  failed: "open",
+}
+
+/**
  * A job: one agent working on one mark, on its own branch, in its own worktree.
- * Stored in the workspace at .river/jobs/<id>.json.
+ * Stored in the workspace at .river/jobs/<id>.json; its render at .river/jobs/<id>/render.png.
  *
- * The job's base is a checkpoint commit of the user's working tree (so uncommitted
- * edits are included). Accept applies the diff base..head onto the user's working
- * tree with a three-way apply, so a dirty tree is fine; conflicts send the job back.
+ * The job's base is a checkpoint commit of the user's working tree, so uncommitted edits are
+ * included. The worktree lives in the git common dir (<.git>/river/worktrees/<id>), outside the
+ * game folder, so neither Godot nor `git add` sees it. The job only ever commits, diffs and applies
+ * `concepts/<conceptId>/`, so stale board or job files in the checkpoint never travel back at Accept.
  */
 export interface Job {
   id: string
@@ -96,15 +133,23 @@ export interface Job {
   role: string
   model: string
   backend: "api-key" | "claude-code"
-  status: "queued" | "running" | "answered" | "accepted" | "dismissed" | "failed"
+  status: JobStatus
+  /** Folder name under concepts/ that this job owns. */
+  conceptId: string
   /** Commit the worktree started from (a checkpoint of the user's tree). */
   baseSha: string
+  /** Last commit on the job branch (set once the agent's files are committed). */
+  headSha?: string
   branch: string
-  /** Absolute path of the worktree (under .river/worktrees/, excluded from git). */
+  /** Absolute path of the worktree's top level. */
   worktree: string
+  /** Project root inside the worktree, relative to the git top level ("" when river.json is at the top). */
+  projectSub: string
   /** Agent session, for revisions. */
   sessionId?: string
-  /** Scripts the job wants to run (e.g. concepts/<id>/draw.gd) and whether the user approved their current content. */
+  /** The agent's closing message, shown on the card. */
+  summary?: string
+  /** The script the job wants to run and whether the user approved exactly these bytes. */
   scripts?: { file: string; sha256: string; approved: boolean }[]
   error?: string
   createdAt: string

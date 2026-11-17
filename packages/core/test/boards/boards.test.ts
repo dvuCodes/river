@@ -139,9 +139,11 @@ describe("jobs", () => {
       model: "claude-opus-5-5",
       backend: "claude-code",
       status: "queued",
+      conceptId: "concept_aaaaaaaa",
       baseSha: "abc1234",
-      branch: "river/job",
-      worktree: path.join(root, ".river", "worktrees", "x"),
+      branch: "river/job/x",
+      worktree: path.join(root, ".git", "river", "worktrees", "x"),
+      projectSub: "",
       createdAt: "2026-01-02T00:00:00.000Z",
       updatedAt: "2026-01-02T00:00:00.000Z",
     }
