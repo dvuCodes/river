@@ -1,0 +1,500 @@
+/* Storyboard canvas. Colours come from the theme variables in styles.css (light first, dark via prefers-color-scheme). */
+
+.canvas-board-name {
+  font-weight: 600;
+}
+.open-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.open-marks-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line);
+}
+.open-marks.has-open {
+  color: var(--pen);
+  font-weight: 600;
+}
+.open-marks.has-open .open-marks-dot {
+  background: var(--pen);
+}
+.canvas-wrap {
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.canvas-view .react-flow {
+  --xy-background-color: var(--board);
+  --xy-background-pattern-color: var(--board-dot);
+  --xy-selection-background-color: color-mix(in srgb, var(--accent) 8%, transparent);
+  --xy-selection-border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.canvas-wrap.tool-hand .react-flow__pane {
+  cursor: grab;
+}
+.canvas-banner {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 12;
+  max-width: 80%;
+}
+.canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  z-index: 1;
+}
+.canvas-empty p {
+  max-width: 360px;
+  text-align: center;
+  color: var(--muted);
+}
+
+/* ---- cards ---- */
+.cnode {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  box-shadow: 0 1px 1px rgb(40 35 20 / 0.04), 0 3px 10px rgb(40 35 20 / 0.05);
+  padding: 8px;
+}
+.cnode.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent), var(--shadow);
+}
+.cnode.is-pending {
+  opacity: 0.55;
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--agent) 55%, var(--line));
+}
+.cnode-head {
+  margin: -2px 0 6px;
+}
+.cnode-maker {
+  font-size: 11px;
+  color: var(--agent);
+  font-weight: 600;
+}
+.cnode-maker .star {
+  font-size: 12px;
+}
+.cnode-pending {
+  font-weight: 400;
+  color: var(--muted);
+}
+.cnode-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 2px;
+  background: var(--panel-2);
+}
+.cnode-img-missing,
+.cnode-concept {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 10;
+  border: 1px dashed var(--line);
+  border-radius: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  background: var(--panel);
+}
+.cnode-cap {
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--muted);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cnode-cap .mono {
+  font-size: 10px;
+}
+.cnode-passage {
+  padding: 0;
+}
+.cnode-title {
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.cnode-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.cnode-line {
+  margin: 0 0 4px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.cnode-missing {
+  margin: 4px 0 0;
+  color: var(--danger);
+  font-size: 11px;
+}
+.cnode-note {
+  background: var(--note);
+  border-color: var(--note-line);
+}
+.cnode-note-text {
+  display: block;
+  width: 100%;
+  resize: none;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow: hidden;
+  cursor: text;
+}
+.cnode-del {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+.cnode-del:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.react-flow__resize-control.line.cnode-resize {
+  border-color: transparent;
+  border-right-width: 6px;
+}
+.react-flow__resize-control.line.cnode-resize:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* ---- marks ---- */
+.marks-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 5;
+}
+.mark-ink {
+  fill: none;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.mark.by-you .mark-ink {
+  stroke: var(--pen);
+}
+.mark.by-agent .mark-ink {
+  stroke: var(--agent);
+}
+.mark-halo {
+  fill: none;
+  stroke: color-mix(in srgb, var(--pen) 22%, transparent);
+  stroke-width: 10;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.mark.by-agent .mark-halo {
+  stroke: color-mix(in srgb, var(--agent) 22%, transparent);
+}
+.mark-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.mark-pin {
+  stroke: var(--card);
+  stroke-width: 1.2;
+}
+.mark.by-you .mark-pin {
+  fill: var(--pen);
+}
+.mark.by-agent .mark-pin {
+  fill: var(--agent);
+}
+.mark-pin-dot {
+  fill: var(--card);
+}
+.mark-dot {
+  stroke: var(--board);
+  stroke-width: 1.5;
+}
+.mark-dot-static {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+.mark-dot.ms-open {
+  fill: var(--pen);
+}
+.mark-dot.ms-working {
+  fill: var(--cond);
+}
+.mark-dot.ms-answered {
+  fill: var(--agent);
+}
+.mark-dot.ms-accepted {
+  fill: var(--ok);
+}
+.mark-dot.ms-dismissed {
+  fill: var(--muted);
+}
+.mark-dot-static.ms-open {
+  background: var(--pen);
+}
+.mark-dot-static.ms-working {
+  background: var(--cond);
+}
+.mark-dot-static.ms-answered {
+  background: var(--agent);
+}
+.mark-dot-static.ms-accepted {
+  background: var(--ok);
+}
+.mark-dot-static.ms-dismissed {
+  background: var(--muted);
+}
+.draw-capture {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  cursor: crosshair;
+  touch-action: none;
+}
+.draw-capture.draw-note {
+  cursor: copy;
+}
+.ask-box {
+  position: absolute;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ask-input {
+  width: 230px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--pen) 55%, var(--line));
+  border-radius: 15px;
+  background: var(--panel);
+  color: var(--text);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pen) 12%, transparent), var(--shadow);
+  font-size: 13px;
+}
+.ask-input::placeholder {
+  color: color-mix(in srgb, var(--pen) 65%, var(--muted));
+}
+.ask-hint {
+  padding-left: 12px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.mark-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 11;
+  width: 280px;
+  max-height: calc(100% - 90px);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 10px 12px;
+}
+.mark-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mark-panel-title {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.mark-panel-anchors {
+  margin: 6px 0 0;
+  color: var(--text-2);
+}
+.mark-thread {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.mark-thread p {
+  margin: 2px 0 0;
+}
+.mark-thread .msg-who {
+  font-weight: 600;
+  color: var(--pen);
+  margin-right: 6px;
+}
+.mark-thread .msg-who.is-agent {
+  color: var(--agent);
+}
+.mark-thread .msg-at {
+  color: var(--muted);
+  font-size: 11px;
+}
+.mark-thread-empty {
+  color: var(--muted);
+}
+.mark-panel-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---- bottom toolbar ---- */
+.canvas-tools {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.canvas-tool-wrap {
+  display: contents;
+}
+.canvas-tool-sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: var(--line);
+}
+.canvas-tool {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.canvas-tool svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.canvas-tool:hover {
+  background: var(--panel-2);
+}
+.canvas-tool.is-on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.canvas-tool[data-tool="pen"].is-on,
+.canvas-tool[data-tool="circle"].is-on,
+.canvas-tool[data-tool="arrow"].is-on,
+.canvas-tool[data-tool="pin"].is-on {
+  background: var(--pen-soft);
+  color: var(--pen);
+}
+
+/* ---- reference image form ---- */
+.canvas-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+.ref-form {
+  width: 380px;
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.ref-form .field {
+  display: grid;
+  gap: 4px;
+}
+.ref-form .field > span {
+  font-size: 11px;
+  color: var(--muted);
+}
+.ref-form input {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--card);
+}
+.ref-form .req {
+  color: var(--pen);
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+/* pin buttons in other views */
+.insp-pin {
+  margin-left: auto;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+.shot-pin {
+  margin: 2px 0 6px 10px;
+  font-size: 11px;
+}

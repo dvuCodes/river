@@ -1,9 +1,11 @@
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { BrowserWindow, app, ipcMain, nativeTheme, net, protocol } from "electron"
 import { VIEWS, type ViewId } from "../shared/api"
-import { onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
+import type { Card, Mark } from "@river/core"
+import { onBoardWritten } from "./board"
+import { currentProject, onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
 import { getLastProject } from "./settings"
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -96,6 +98,209 @@ async function smokeDrag(w: BrowserWindow): Promise<boolean> {
   return true
 }
 
+type Rect = { x: number; y: number; w: number; h: number }
+
+/** Wait until River writes a card or mark matching `pred`. */
+function waitBoardWrite<T extends Card | Mark>(kind: "card" | "mark", pred: (v: T) => boolean, ms: number): Promise<T | null> {
+  return new Promise((done) => {
+    const off = onBoardWritten((k, v) => {
+      if (k !== kind || !pred(v as T)) return
+      clearTimeout(t)
+      off()
+      done(v as T)
+    })
+    const t = setTimeout(() => {
+      off()
+      done(null)
+    }, ms)
+  })
+}
+
+async function rectOf(w: BrowserWindow, selector: string): Promise<Rect | null> {
+  return (await w.webContents.executeJavaScript(`(() => {
+    const el = document.querySelector(${JSON.stringify(selector)})
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { x: r.left, y: r.top, w: r.width, h: r.height }
+  })()`)) as Rect | null
+}
+
+async function waitRect(w: BrowserWindow, selector: string, ms: number): Promise<Rect | null> {
+  const until = Date.now() + ms
+  while (Date.now() < until) {
+    const r = await rectOf(w, selector)
+    if (r && r.w > 0) return r
+    await sleep(100)
+  }
+  return null
+}
+
+async function click(w: BrowserWindow, x: number, y: number): Promise<void> {
+  const [cx, cy] = [Math.round(x), Math.round(y)]
+  w.webContents.sendInputEvent({ type: "mouseMove", x: cx, y: cy })
+  await sleep(30)
+  w.webContents.sendInputEvent({ type: "mouseDown", x: cx, y: cy, button: "left", clickCount: 1 })
+  await sleep(30)
+  w.webContents.sendInputEvent({ type: "mouseUp", x: cx, y: cy, button: "left", clickCount: 1 })
+  await sleep(120)
+}
+
+async function drag(w: BrowserWindow, from: [number, number], to: [number, number], steps = 16): Promise<void> {
+  const x0 = Math.round(from[0])
+  const y0 = Math.round(from[1])
+  const x1 = Math.round(to[0])
+  const y1 = Math.round(to[1])
+  w.webContents.sendInputEvent({ type: "mouseMove", x: x0, y: y0 })
+  await sleep(30)
+  w.webContents.sendInputEvent({ type: "mouseDown", x: x0, y: y0, button: "left", clickCount: 1 })
+  for (let i = 1; i <= steps; i++) {
+    await sleep(16)
+    const x = Math.round(x0 + ((x1 - x0) * i) / steps)
+    const y = Math.round(y0 + ((y1 - y0) * i) / steps)
+    w.webContents.sendInputEvent({ type: "mouseMove", x, y, button: "left", modifiers: ["leftbuttondown"] })
+  }
+  await sleep(30)
+  w.webContents.sendInputEvent({ type: "mouseUp", x: x1, y: y1, button: "left", clickCount: 1 })
+}
+
+/**
+ * RIVER_SMOKE_CANVAS=1: pin two passages through IPC, open the canvas, circle one card with the circle tool,
+ * type a request into the mark's box and press Enter, drag the other card ~150 px, then screenshot and check
+ * the files on disk. Pointer and keyboard steps use real input events (sendInputEvent).
+ */
+async function smokeCanvas(w: BrowserWindow, dir: string, waitFor: (view: ViewId, ms: number) => Promise<boolean>): Promise<boolean> {
+  const p = currentProject()
+  if (!p) {
+    console.error("river smoke: no project")
+    return false
+  }
+  const refs = (await w.webContents.executeJavaScript(`(async () => {
+    const info = await window.river.getProject()
+    const rel = info.stories[0]
+    const story = await window.river.loadStory(rel)
+    return story.passages.slice(0, 2).map((x) => rel + "#" + x.id)
+  })()`)) as string[]
+  const ids: string[] = []
+  const at: Record<string, [number, number]> = {}
+  for (const ref of refs) {
+    const dto = (await w.webContents.executeJavaScript(`window.river.boardPin("main", { kind: "passage", ref: ${JSON.stringify(ref)} })`)) as { card: Card }
+    ids.push(dto.card.id)
+    at[dto.card.id] = [dto.card.x, dto.card.y]
+    console.log(`river smoke: pinned ${ref} as ${dto.card.id} at ${dto.card.x},${dto.card.y}`)
+  }
+  const [circled, moved] = ids as [string, string]
+  w.webContents.send("smoke:navigate", "canvas")
+  if (!(await waitFor("canvas", 15_000))) console.warn("river smoke: canvas did not report ready")
+  const a = await waitRect(w, `.react-flow__node[data-id="${circled}"]`, 8_000)
+  const b0 = await waitRect(w, `.react-flow__node[data-id="${moved}"]`, 8_000)
+  if (!a || !b0) {
+    console.error("river smoke: pinned cards are not on the canvas")
+    return false
+  }
+  w.focus()
+  w.webContents.focus()
+  await sleep(300)
+
+  // (c) circle tool; drag a circle around the first card; type the request; Enter.
+  const tool = await waitRect(w, `[data-tool="circle"]`, 3_000)
+  if (!tool) return false
+  await click(w, tool.x + tool.w / 2, tool.y + tool.h / 2)
+  const markSaved = waitBoardWrite<Mark>("mark", (m) => m.shape === "circle", 8_000)
+  await drag(w, [a.x - 30, a.y - 30], [a.x + a.w + 30, a.y + a.h + 30], 20)
+  const mark = await markSaved
+  if (!mark) {
+    console.error("river smoke: the circle was not saved")
+    return false
+  }
+  console.log(`river smoke: circle saved as ${mark.id}, anchors ${JSON.stringify(mark.anchors)}`)
+  if (!(await waitRect(w, ".ask-input", 3_000))) {
+    console.error("river smoke: no ask box")
+    return false
+  }
+  await sleep(250)
+  const text = "make this calmer"
+  for (const ch of text) {
+    w.webContents.sendInputEvent({ type: "char", keyCode: ch === " " ? "Space" : ch })
+    await sleep(12)
+  }
+  await sleep(150)
+  const typed = (await w.webContents.executeJavaScript(`document.querySelector(".ask-input")?.value ?? null`)) as string | null
+  console.log(`river smoke: ask box holds ${JSON.stringify(typed)}`)
+  const threadSaved = waitBoardWrite<Mark>("mark", (m) => m.id === mark.id && m.thread.length > 0, 8_000)
+  w.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" })
+  w.webContents.sendInputEvent({ type: "char", keyCode: "Enter" })
+  w.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" })
+  const withThread = await threadSaved
+  if (!withThread) {
+    console.error("river smoke: the request text was not saved")
+    return false
+  }
+  await sleep(300)
+
+  // (d) select tool; drag the other card ~150 px right by its title.
+  const sel = await rectOf(w, `[data-tool="select"]`)
+  if (!sel) return false
+  await click(w, sel.x + sel.w / 2, sel.y + sel.h / 2)
+  await sleep(200)
+  const b = (await rectOf(w, `.react-flow__node[data-id="${moved}"] .cnode-title`)) ?? b0
+  const zoom = (await w.webContents.executeJavaScript(`(() => {
+    const t = getComputedStyle(document.querySelector(".react-flow__viewport")).transform
+    return new DOMMatrix(t).a
+  })()`)) as number
+  const cardSaved = waitBoardWrite<Card>("card", (c) => c.id === moved, 8_000)
+  await drag(w, [b.x + 20, b.y + b.h / 2], [b.x + 20 + 150, b.y + b.h / 2], 15)
+  const card = await cardSaved
+  if (!card) {
+    console.error("river smoke: the drag was not saved")
+    return false
+  }
+
+  // (f) an outside writer (as an agent's river-mcp would be) adds a pending agent note: it must appear live.
+  const boardDir = join(p.root, ".river", "boards", "main")
+  const outsideId = "c_outside1"
+  const outside: Card = {
+    id: outsideId,
+    kind: "note",
+    x: at[circled]![0],
+    y: 300,
+    w: 240,
+    ref: "",
+    text: "Softer light, fewer ducks in frame?",
+    madeBy: "concept-artist",
+    pending: { markId: mark.id, jobId: "j_smoke000" },
+    createdAt: new Date().toISOString(),
+  }
+  await writeFile(join(boardDir, "cards", `.${outsideId}.json.tmp`), JSON.stringify(outside, null, 2))
+  await rename(join(boardDir, "cards", `.${outsideId}.json.tmp`), join(boardDir, "cards", `${outsideId}.json`))
+  const live = await waitRect(w, `.react-flow__node[data-id="${outsideId}"]`, 5_000)
+  console.log(`river smoke: outside write ${live ? "appeared on the canvas" : "did NOT appear"}`)
+
+  // (e) settle, screenshot, check the files.
+  await sleep(1_200)
+  const out = join(dir, "canvas.png")
+  await writeFile(out, (await w.webContents.capturePage()).toPNG())
+  console.log(`river smoke: wrote ${out}`)
+  for (const sub of ["", "cards", "marks"]) {
+    const names = await readdir(join(boardDir, sub))
+    console.log(`river smoke: ${sub || "."}/ ${names.join(" ")}`)
+  }
+  const markJson = await readFile(join(boardDir, "marks", `${mark.id}.json`), "utf8")
+  const cardJson = JSON.parse(await readFile(join(boardDir, "cards", `${moved}.json`), "utf8")) as Card
+  const [mx, my] = at[moved]!
+  console.log(`river smoke: mark file ${mark.id}.json:\n${markJson}`)
+  console.log(`river smoke: zoom ${zoom.toFixed(3)}; moved card ${moved} from ${mx},${my} to ${cardJson.x},${cardJson.y}`)
+  const m = JSON.parse(markJson) as Mark
+  const ok =
+    m.anchors.length === 1 &&
+    m.anchors[0] === circled &&
+    m.thread[0]?.text === text &&
+    Math.abs(cardJson.x - mx - 150 / zoom) < 12 &&
+    Math.abs(cardJson.y - my) < 4 &&
+    live !== null
+  console.log(`river smoke: canvas checks ${ok ? "PASSED" : "FAILED"}`)
+  return ok
+}
+
 async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
   const hardStop = setTimeout(() => {
     console.error("river smoke: timed out after 120s")
@@ -124,6 +329,17 @@ async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
     })
 
   await mkdir(dir, { recursive: true })
+  if (process.env["RIVER_SMOKE_CANVAS"] === "1") {
+    const ready = await waitFor("story-map", 30_000)
+    if (!ready) console.warn("river smoke: story map did not report ready")
+    const ok = await smokeCanvas(w, dir, waitFor).catch((err: unknown) => {
+      console.error("river smoke: canvas run threw", err)
+      return false
+    })
+    clearTimeout(hardStop)
+    app.exit(ok ? 0 : 1)
+    return
+  }
   let failed = false
   for (const view of VIEWS) {
     let ok: boolean
@@ -162,6 +378,9 @@ async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  // Smoke runs can pin the theme so both themes can be checked: RIVER_SMOKE_THEME=light|dark.
+  const smokeTheme = process.env["RIVER_SMOKE_THEME"]
+  if (isSmoke && (smokeTheme === "light" || smokeTheme === "dark")) nativeTheme.themeSource = smokeTheme
   protocol.handle("river-file", (request) => {
     const abs = resolveRiverFile(request.url)
     if (!abs) return new Response("Not found", { status: 404 })

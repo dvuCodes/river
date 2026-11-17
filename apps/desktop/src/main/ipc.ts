@@ -57,11 +57,12 @@ import type {
 import { loadAgent } from "./agent"
 import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
-import { noteOwnWrite, watchProject } from "./watch"
+import { boardHandlers } from "./board"
+import { type ProjectWatch, noteOwnWrite, watchProject } from "./watch"
 
 let project: Project | null = null
 let projectError: { root: string; message: string } | null = null
-let stopWatch: (() => Promise<void>) | null = null
+let projectWatch: ProjectWatch | null = null
 let getWindow: () => BrowserWindow | null = () => null
 
 export function currentProject(): Project | null {
@@ -81,13 +82,13 @@ function need(): Project {
 /** Open a project folder (the one with river.json). Remembers it unless `remember` is false. */
 export async function openProject(root: string, remember = true): Promise<void> {
   const abs = resolve(root)
-  await stopWatch?.()
-  stopWatch = null
+  await projectWatch?.stop()
+  projectWatch = null
   try {
     project = await loadProject(abs)
     projectError = null
     if (remember) settings.setLastProject(project.root)
-    stopWatch = watchProject(project, (changes) => send("fs:change", changes))
+    projectWatch = watchProject(project, (changes) => send("fs:change", changes))
   } catch (err) {
     project = null
     projectError = { root: abs, message: err instanceof Error ? err.message : String(err) }
@@ -326,6 +327,10 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
   handle("review:reply", (threadId: string, text: string) => reply(need(), threadId, author(), text))
   handle("review:status", (threadId: string, status: ReviewStatus) => setStatus(need(), threadId, status))
   handle("plan:status", (planId: string, status: ChangePlan["status"]) => setPlanStatus(need(), planId, status))
+
+  for (const [channel, fn] of Object.entries(boardHandlers(need, (dir) => projectWatch?.add(dir), getWindow))) {
+    handle(channel, fn as (...args: unknown[]) => Promise<unknown>)
+  }
 
   handle("agent:status", () => agentStatus())
   handle("agent:refreshStatus", () => agentStatus(true))

@@ -99,6 +99,14 @@ function Inspector(props: {
       setBusy(false)
     }
   }
+  const pin = async () => {
+    try {
+      await window.river.boardPin("main", { kind: "passage", ref: `${storyRel}#${passage.id}` })
+      setStatus({ kind: "ok", text: "Pinned to the canvas." })
+    } catch (err) {
+      setStatus({ kind: "err", text: errorText(err) })
+    }
+  }
   const save = () => run(() => window.river.savePassage(storyRel, passage.id, draft), "Saved to the story file.")
   const rename = () => run(() => window.river.renamePassage(storyRel, passage.id, name), "Renamed, and links to it updated.")
 
@@ -107,6 +115,9 @@ function Inspector(props: {
       <header className="insp-head">
         <span className="insp-kicker">Passage</span>
         <span className="insp-id mono">@id {passage.id}</span>
+        <button className="btn insp-pin" data-pin-passage={passage.id} onClick={() => void pin()} title="Add this passage to the storyboard canvas">
+          Pin to canvas
+        </button>
         <button className="icon-btn" onClick={onClose} title="Close inspector" aria-label="Close inspector">
           ×
         </button>

@@ -12,7 +12,9 @@ import type {
   PermissionRequest,
 } from "@river/agent"
 import type {
+  Card,
   ChangePlan,
+  Mark,
   Diagnostic,
   GameState,
   ReviewStatus,
@@ -21,8 +23,8 @@ import type {
   StateSchema,
 } from "@river/core"
 
-export type ViewId = "story-map" | "paths" | "playtest" | "frames" | "agent"
-export const VIEWS: readonly ViewId[] = ["story-map", "paths", "playtest", "frames", "agent"]
+export type ViewId = "story-map" | "paths" | "playtest" | "canvas" | "frames" | "agent"
+export const VIEWS: readonly ViewId[] = ["story-map", "paths", "playtest", "canvas", "frames", "agent"]
 
 export interface ProjectInfo {
   root: string
@@ -149,7 +151,33 @@ export interface AgentStartRequest {
   sessionId?: string
 }
 
-export type FsChangeKind = "story" | "state" | "manifest" | "review" | "plans"
+/** What a card shows, resolved by main (the renderer cannot read stories or captures itself). */
+export type CardView =
+  | { kind: "frame"; shotId: string; rev?: string; url?: string; missing?: string }
+  | { kind: "passage"; story: string; passageId: string; title: string; tags: string[]; lines: string[]; missing?: string }
+  | { kind: "ref"; url: string }
+  | { kind: "concept"; id: string }
+  | { kind: "note" }
+
+export interface CardDTO {
+  card: Card
+  view: CardView
+}
+
+export interface BoardDTO {
+  name: string
+  cards: CardDTO[]
+  marks: Mark[]
+  /** Count of marks with status "open" (core openMarks). */
+  openMarks: number
+  /** Files that did not parse, as "<path>: <message>". */
+  errors: string[]
+}
+
+export type NewCard = Omit<Card, "id" | "createdAt"> & Partial<Pick<Card, "id" | "createdAt">>
+export type NewMark = Omit<Mark, "id" | "createdAt" | "status"> & Partial<Pick<Mark, "id" | "createdAt" | "status">>
+
+export type FsChangeKind = "story" | "state" | "manifest" | "review" | "plans" | "board"
 export interface FsChange {
   kind: FsChangeKind
   /** Path relative to the project root, forward slashes. */
@@ -180,6 +208,24 @@ export interface RiverApi {
   reply(threadId: string, text: string): Promise<ReviewThread>
   setThreadStatus(threadId: string, status: ReviewStatus): Promise<ReviewThread>
   setPlanStatus(planId: string, status: ChangePlan["status"]): Promise<ChangePlan>
+  // storyboard canvas
+  /** Open (and on first use create) a board; its folder is watched from then on. */
+  boardOpen(name: string): Promise<BoardDTO>
+  /** One card or mark as it is on disk now; null when it was deleted. */
+  boardCard(name: string, cardId: string): Promise<CardDTO | null>
+  boardMark(name: string, markId: string): Promise<Mark | null>
+  boardSaveCard(name: string, card: NewCard): Promise<CardDTO>
+  boardDeleteCard(name: string, cardId: string): Promise<void>
+  /** Saves the mark; returns it with the board's open mark count. */
+  boardSaveMark(name: string, mark: NewMark): Promise<{ mark: Mark; openMarks: number }>
+  boardDeleteMark(name: string, markId: string): Promise<number>
+  boardOpenCount(name: string): Promise<number>
+  /** Add a passage ("<story>#<id>") or frame (shot id) card at the next free spot. */
+  boardPin(name: string, pin: { kind: "passage" | "frame"; ref: string; rev?: string }): Promise<CardDTO>
+  /** Pick an image file to import; null when cancelled. */
+  boardPickImage(): Promise<{ token: string; fileName: string } | null>
+  /** Copy the picked image into .river/refs/<hash>.<ext> and add a ref card. */
+  boardAddRef(name: string, token: string, source: { title?: string; url?: string; licence: string }, at: { x: number; y: number }): Promise<CardDTO>
   // agent
   agentStatus(): Promise<AgentStatus>
   agentStart(req: AgentStartRequest): Promise<string>

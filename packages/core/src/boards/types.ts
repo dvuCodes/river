@@ -58,6 +58,11 @@ export interface Mark {
   shape: MarkShape
   /** Points in board units: [x1, y1, x2, y2, ...]. A circle is its outline stroke; a pin is one point. */
   path: number[]
+  /**
+   * Pen marks made of several strokes (the pen lifted in between): the point index in `path`
+   * where each stroke after the first starts. Absent or empty means one continuous stroke.
+   */
+  breaks?: number[]
   /** Ids of the cards under or next to the mark. */
   anchors: string[]
   /** The request text (a note's text, or text written next to a pen stroke). */

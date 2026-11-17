@@ -37,12 +37,18 @@ async function isOwnWrite(abs: string): Promise<boolean> {
   }
 }
 
+export interface ProjectWatch {
+  /** Start watching one more folder (e.g. a board folder River just created). */
+  add(abs: string): void
+  stop(): Promise<void>
+}
+
 /**
  * Watch the parts of a project the app shows: the stories folder, river.json,
- * .river/review and .river/plans. Changes are batched and handed to `emit`.
+ * .river/review and .river/plans, plus board folders added with `add`. Changes are batched and handed to `emit`.
  * Nothing is created on disk; missing folders are simply not watched until they exist.
  */
-export function watchProject(project: Project, emit: (changes: FsChange[]) => void): () => Promise<void> {
+export function watchProject(project: Project, emit: (changes: FsChange[]) => void): ProjectWatch {
   const root = project.root
   const targets = [
     join(root, project.manifest.stories),
@@ -57,6 +63,8 @@ export function watchProject(project: Project, emit: (changes: FsChange[]) => vo
     if (rel === "river.json") return "manifest"
     if (rel.startsWith(".river/review/")) return "review"
     if (rel.startsWith(".river/plans/")) return "plans"
+    // One file per card or mark; temp files of atomic writes start with a dot.
+    if (/^\.river\/boards\/[a-z0-9_-]{1,64}\/(cards|marks)\/[^./][^/]*\.json$/.test(rel)) return "board"
     if (rel === stateRel) return "state"
     if (/\.(twee|tw)$/i.test(rel)) return "story"
     return undefined
@@ -89,8 +97,17 @@ export function watchProject(project: Project, emit: (changes: FsChange[]) => vo
     })()
   })
   watcher.on("error", (err) => console.warn("river: watcher error", err))
-  return async () => {
-    clearTimeout(timer)
-    await watcher.close()
+  const added = new Set<string>()
+  return {
+    add(abs) {
+      const key = keyOf(abs)
+      if (added.has(key)) return
+      added.add(key)
+      watcher.add(abs)
+    },
+    async stop() {
+      clearTimeout(timer)
+      await watcher.close()
+    },
   }
 }
