@@ -174,7 +174,7 @@ export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error">
 /** A job and, while it waits for approval, the exact script bytes it wants to run. */
 export interface JobDTO {
   job: Job
-  /** sha256 of `text` as read just now: approving sends this back, so only the shown bytes can run. */
+  /** sha256 of exactly these bytes: approving sends it back, so only the shown script can run. */
   script?: { file: string; sha256: string; text: string }
 }
 

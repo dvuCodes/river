@@ -1,9 +1,9 @@
-import { createHash, randomUUID } from "node:crypto"
-import { mkdir, readFile } from "node:fs/promises"
+import { randomUUID } from "node:crypto"
+import { mkdir } from "node:fs/promises"
 import { userInfo } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
-import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, PermissionDecision } from "@river/agent"
+import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobDeps, PermissionDecision } from "@river/agent"
 import { createGodotAdapter } from "@river/adapter-godot"
 import {
   type Capture,
@@ -262,7 +262,7 @@ async function jobApi(): Promise<JobApi> {
 }
 
 /** `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn). */
-export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: object } = {}): void {
+export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: JobDeps } = {}): void {
   getWindow = windowGetter
   const handle = <A extends unknown[], R>(channel: string, fn: (...args: A) => Promise<R> | R) =>
     ipcMain.handle(channel, (_e, ...args) => fn(...(args as A)))
@@ -444,12 +444,11 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
   })
   handle("job:get", async (jobId: string): Promise<JobDTO> => {
-    const job = await loadJob(need().root, jobId)
-    const s = job.status === "approval" ? job.scripts?.[0] : undefined
-    if (!s) return { job }
-    // The worktree is outside the project root, so the script is read here, never served over river-file://.
-    const bytes = await readFile(join(job.worktree, job.projectSub, s.file))
-    return { job, script: { file: s.file, sha256: createHash("sha256").update(bytes).digest("hex"), text: bytes.toString("utf8") } }
+    const p = need()
+    const job = await loadJob(p.root, jobId)
+    if (job.status !== "approval") return { job }
+    // The committed bytes, hashed as read: the only bytes approveJobScript will run.
+    return { job, script: await (await jobApi()).readJobScript(p.root, jobId) }
   })
   handle("job:approve", async (jobId: string, sha256: string) => {
     await (await jobApi()).approveJobScript(need().root, jobId, sha256)

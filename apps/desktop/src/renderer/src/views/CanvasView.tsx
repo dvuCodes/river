@@ -147,7 +147,9 @@ function ConceptBody({ cardId, jobId, view }: { cardId: string; jobId: string | 
             {script && (
               <div className="concept-script">
                 <div className="concept-script-head">
-                  <span className="mono">{script.file}</span>
+                  <span className="mono" title={script.file}>
+                    {script.file.split("/").pop()}
+                  </span>
                   <span className="mono" title={script.sha256}>
                     sha256 {script.sha256.slice(0, 12)}
                   </span>

@@ -1,29 +1,12 @@
-import type { AgentBackend, AgentModel, AgentTurnHandlers, AgentTurnRequest, ClaudeCodeStatus } from "@river/agent"
-import type { Job } from "@river/core"
+import type * as Agent from "@river/agent"
+import type { AgentTurnHandlers, AgentTurnRequest, ClaudeCodeStatus } from "@river/agent"
 
 type StartAgentTurn = (req: AgentTurnRequest, handlers: AgentTurnHandlers) => unknown
 type GetClaudeCodeStatus = (claudePath?: string) => Promise<ClaudeCodeStatus>
 type OpenClaudeSignIn = (claudePath?: string) => Promise<void>
 
-export interface ConceptJobRequest {
-  workspaceRoot: string
-  board: string
-  markId: string
-  model: AgentModel
-  backend: AgentBackend
-  apiKey?: string
-  claudePath?: string
-}
-
-/** The concept-job half of @river/agent, typed here because it is written in parallel with the app. */
-export interface JobApi {
-  startConceptJob(req: ConceptJobRequest, deps?: object): Promise<Job>
-  approveJobScript(workspaceRoot: string, jobId: string, sha256: string): Promise<unknown>
-  acceptJob(workspaceRoot: string, jobId: string): Promise<unknown>
-  dismissJob(workspaceRoot: string, jobId: string): Promise<unknown>
-  recoverJobs(workspaceRoot: string): Promise<unknown>
-}
-const JOB_FNS = ["startConceptJob", "approveJobScript", "acceptJob", "dismissJob", "recoverJobs"] as const
+const JOB_FNS = ["startConceptJob", "readJobScript", "approveJobScript", "acceptJob", "dismissJob", "recoverJobs"] as const
+export type JobApi = Pick<typeof Agent, (typeof JOB_FNS)[number]>
 
 export interface LoadedAgent {
   start?: StartAgentTurn

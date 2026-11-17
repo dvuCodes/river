@@ -2,6 +2,7 @@ import { access, mkdir, readFile, readdir, rename, writeFile } from "node:fs/pro
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { BrowserWindow, app, ipcMain, nativeTheme, net, protocol } from "electron"
+import type { JobDeps } from "@river/agent"
 import { VIEWS, type ViewId } from "../shared/api"
 import { type Card, type Mark, loadBoard, loadJob } from "@river/core"
 import { onBoardWritten } from "./board"
@@ -301,6 +302,28 @@ async function smokeCanvas(w: BrowserWindow, dir: string, waitFor: (view: ViewId
   return ok
 }
 
+const SMOKE_DRAW_GD = `extends RefCounted
+
+func draw(img: Image) -> void:
+	var w := img.get_width()
+	var h := img.get_height()
+	img.fill(Color(0.62, 0.74, 0.80))
+	img.fill_rect(Rect2i(0, h * 6 / 10, w, h * 4 / 10), Color(0.45, 0.60, 0.42))
+	img.fill_rect(Rect2i(w / 10, h * 3 / 10, w / 8, h * 3 / 10), Color(0.36, 0.30, 0.24))
+	img.fill_rect(Rect2i(w * 6 / 10, h * 7 / 10, w * 3 / 10, h / 10), Color(0.40, 0.56, 0.70))
+	img.fill_rect(Rect2i(w * 7 / 10, h / 10, w / 10, w / 10), Color(0.98, 0.90, 0.62))
+`
+
+/** RIVER_SMOKE_JOB: the agent turn writes a fixed draw.gd instead of calling a model. */
+const smokeJobDeps: JobDeps = {
+  runTurn: async (req, h) => {
+    const dir = join(req.root, "concepts", req.conceptId ?? "missing")
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, "draw.gd"), SMOKE_DRAW_GD)
+    h.onEvent({ type: "text", text: "Calmer: a low horizon, soft sky, one still pond." })
+  },
+}
+
 /** Click the middle of `selector`, after checking nothing (a panel, another card) covers that point. */
 async function clickEl(w: BrowserWindow, selector: string, ms: number): Promise<boolean> {
   const r = await waitRect(w, selector, ms)
@@ -316,6 +339,8 @@ async function clickEl(w: BrowserWindow, selector: string, ms: number): Promise<
   })()`)) as boolean
   if (!onTarget) {
     console.error(`river smoke: ${selector} is covered at ${x},${y}`)
+    const dir = process.env["RIVER_SMOKE_DIR"]
+    if (dir) await writeFile(join(dir, "covered.png"), (await w.webContents.capturePage()).toPNG())
     return false
   }
   await click(w, x, y)
@@ -385,6 +410,10 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   }
   const shown = (await w.webContents.executeJavaScript(`document.querySelector(".concept-script-text").textContent`)) as string
   console.log(`river smoke: reviewing script (${shown.split("\n").length} lines)`)
+  await sleep(300)
+  const review = join(dir, "job-review.png")
+  await writeFile(review, (await w.webContents.capturePage()).toPNG())
+  console.log(`river smoke: wrote ${review}`)
   if (!(await clickEl(w, `.concept[data-job-status="approval"] [data-action="run"]`, 3_000))) return false
   console.log("river smoke: approved; rendering")
   if (!(await waitImage(w, `.concept[data-job-status="answered"] img.cnode-img`, 120_000))) {
@@ -519,7 +548,7 @@ app.whenReady().then(async () => {
     if (!abs) return new Response("Not found", { status: 404 })
     return net.fetch(pathToFileURL(abs).toString())
   })
-  registerIpc(() => win)
+  registerIpc(() => win, isSmoke && process.env["RIVER_SMOKE_JOB"] === "1" ? { jobDeps: smokeJobDeps } : {})
 
   const initial = isSmoke ? process.env["RIVER_PROJECT"] : (argProject() ?? process.env["RIVER_PROJECT"] ?? getLastProject())
   if (initial) await openProject(resolve(initial), !isSmoke)

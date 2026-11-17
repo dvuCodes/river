@@ -157,6 +157,8 @@
 }
 .concept {
   display: grid;
+  /* minmax(0, ...) so the unwrapped script lines scroll inside the card instead of widening it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 .concept-line {
@@ -197,6 +199,15 @@
   border-bottom: 1px solid var(--line-soft);
   font-size: 10.5px;
   color: var(--muted);
+  white-space: nowrap;
+}
+.concept-script-head > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.concept-script-head > :last-child {
+  flex: none;
 }
 .concept-script-text {
   margin: 0;
