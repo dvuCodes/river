@@ -201,8 +201,8 @@ function PlanCard(props: { plan: ChangePlan; onAgent(i: AgentIntent): void; onCh
   )
 }
 
-export function FramesView(props: { tick: number; onAgent(i: AgentIntent): void }) {
-  const { tick, onAgent } = props
+export function FramesView(props: { tick: number; board: string; onAgent(i: AgentIntent): void }) {
+  const { tick, board, onAgent } = props
   const [data, setData] = useState<FramesDTO | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [shotId, setShotId] = useState<string | undefined>()
@@ -316,7 +316,7 @@ export function FramesView(props: { tick: number; onAgent(i: AgentIntent): void 
                     className="link-btn shot-pin"
                     title="Add this shot's newest frame to the storyboard canvas"
                     onClick={() => {
-                      window.river.boardPin("main", { kind: "frame", ref: s.id }).then(
+                      window.river.boardPin(board, { kind: "frame", ref: s.id }).then(
                         () => setPinned(s.id),
                         (e) => setError(errorText(e)),
                       )

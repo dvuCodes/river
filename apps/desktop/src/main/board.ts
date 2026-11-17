@@ -1,17 +1,21 @@
 import { createHash, randomUUID } from "node:crypto"
-import { copyFile, mkdir, readFile, stat } from "node:fs/promises"
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import { basename, extname, join, relative, sep } from "node:path"
 import { type BrowserWindow, dialog } from "electron"
 import {
   type Card,
+  type Edge,
   type Mark,
   type Project,
   type Story,
   boardJsonText,
   cardFile,
   deleteCard,
+  deleteEdge,
   deleteMark,
+  edgeFile,
   ensureBoard,
+  listBoards,
   listCaptures,
   loadBoard,
   loadCard,
@@ -22,9 +26,11 @@ import {
   newBoardId,
   openMarks,
   saveCard,
+  saveEdge,
   saveMark,
 } from "@river/core"
-import type { BoardDTO, CardDTO, CardView, NewCard, NewMark } from "../shared/api"
+import type { BoardDTO, CardDTO, CardView, ImageSize, NewCard, NewEdge, NewMark, StagedImage } from "../shared/api"
+import { imageSize } from "./imageSize"
 import { noteOwnWrite } from "./watch"
 
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp"])
@@ -33,32 +39,42 @@ export function riverFileUrl(p: Project, abs: string): string {
   return "river-file://project/" + relative(p.root, abs).split(sep).map(encodeURIComponent).join("/")
 }
 
-const boardWritten = new Set<(kind: "card" | "mark", value: Card | Mark) => void>()
-/** Call `cb` after River writes a card or mark (smoke mode waits on it). Returns an unsubscribe function. */
-export function onBoardWritten(cb: (kind: "card" | "mark", value: Card | Mark) => void): () => void {
+export type BoardEntity = { kind: "card"; value: Card } | { kind: "mark"; value: Mark } | { kind: "edge"; value: Edge }
+const boardWritten = new Set<(written: BoardEntity) => void>()
+/** Call `cb` after River writes a card, mark or edge (smoke mode waits on it). Returns an unsubscribe function. */
+export function onBoardWritten(cb: (written: BoardEntity) => void): () => void {
   boardWritten.add(cb)
   return () => boardWritten.delete(cb)
 }
 
-/** river-file:// URL of an image, versioned by its mtime so a new render replaces the cached one; undefined while it does not exist. */
-async function imageUrl(p: Project, abs: string): Promise<string | undefined> {
+/** An image's river-file:// URL, versioned by its mtime so a new render replaces the cached one, and its size. Empty while it does not exist. */
+async function imageAt(p: Project, abs: string): Promise<{ url?: string; size?: ImageSize }> {
   try {
-    return `${riverFileUrl(p, abs)}?v=${Math.round((await stat(abs)).mtimeMs)}`
+    const mtime = Math.round((await stat(abs)).mtimeMs)
+    const size = await imageSize(abs)
+    return { url: `${riverFileUrl(p, abs)}?v=${mtime}`, ...(size ? { size } : {}) }
   } catch {
-    return undefined
+    return {}
   }
 }
 
-/** A concept card: the job's render while pending, the applied concepts/<id>/concept.png once accepted. */
+/** Card files are written by agents too, and the variant becomes part of a file name. */
+const VARIANT = /^[a-e]$/
+
+/** A concept card: the job's render while pending, the applied concepts/<id>/concept[_<variant>].png once accepted. */
 async function conceptView(p: Project, card: Card): Promise<CardView> {
-  if (!card.pending) return { kind: "concept", id: card.ref, url: await imageUrl(p, join(p.root, "concepts", card.ref, "concept.png")) }
+  if (card.variant !== undefined && !VARIANT.test(card.variant)) {
+    return { kind: "concept", id: card.ref, missing: `Unknown variant ${JSON.stringify(card.variant)} (a to e).` }
+  }
+  const suffix = card.variant ? `_${card.variant}` : ""
+  if (!card.pending) return { kind: "concept", id: card.ref, ...(await imageAt(p, join(p.root, "concepts", card.ref, `concept${suffix}.png`))) }
   const { jobId } = card.pending
-  const url = await imageUrl(p, join(p.root, ".river", "jobs", jobId, "render.png"))
+  const image = await imageAt(p, join(p.root, ".river", "jobs", jobId, `render${suffix}.png`))
   try {
     const { id, status, summary, error } = await loadJob(p.root, jobId)
-    return { kind: "concept", id: card.ref, url, job: { id, status, summary, error } }
+    return { kind: "concept", id: card.ref, ...image, job: { id, status, summary, error } }
   } catch (e) {
-    return { kind: "concept", id: card.ref, url, missing: e instanceof Error ? e.message : String(e) }
+    return { kind: "concept", id: card.ref, ...image, missing: e instanceof Error ? e.message : String(e) }
   }
 }
 
@@ -110,14 +126,17 @@ export function cardResolver(p: Project) {
         }
         const cap = card.rev ? caps.find((c) => c.rev === card.rev) : caps[0]
         const file = cap?.files[0]
+        const size = file ? await imageSize(file) : undefined
         view = file
-          ? { kind: "frame", shotId: card.ref, rev: cap.rev, url: riverFileUrl(p, file) }
+          ? { kind: "frame", shotId: card.ref, rev: cap.rev, url: riverFileUrl(p, file), ...(size ? { size } : {}) }
           : { kind: "frame", shotId: card.ref, ...(card.rev ? { rev: card.rev } : {}), missing: err ?? "No capture yet" }
         break
       }
-      case "ref":
-        view = { kind: "ref", url: "river-file://project/" + card.ref.split(/[\\/]/).map(encodeURIComponent).join("/") }
+      case "ref": {
+        const size = await imageSize(join(p.root, card.ref))
+        view = { kind: "ref", url: "river-file://project/" + card.ref.split(/[\\/]/).map(encodeURIComponent).join("/"), ...(size ? { size } : {}) }
         break
+      }
       case "concept":
         view = await conceptView(p, card)
         break
@@ -133,8 +152,17 @@ async function writeCard(p: Project, board: string, card: NewCard): Promise<Card
   // Tell the watcher first: the content is known before the write, so the echo is dropped.
   noteOwnWrite(cardFile(p.root, board, full.id), boardJsonText(full))
   const saved = await saveCard(p.root, board, full)
-  for (const cb of boardWritten) cb("card", saved)
+  for (const cb of boardWritten) cb({ kind: "card", value: saved })
   return saved
+}
+
+async function loadEdge(p: Project, board: string, id: string): Promise<Edge | null> {
+  try {
+    return JSON.parse(await readFile(edgeFile(p.root, board, id), "utf8")) as Edge
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw err
+  }
 }
 
 async function countOpen(p: Project, board: string): Promise<number> {
@@ -152,7 +180,15 @@ async function nextSpot(p: Project, board: string): Promise<{ x: number; y: numb
   }
 }
 
-const picked = new Map<string, string>()
+const IMAGE_BYTES_MAX = 64 * 1024 * 1024
+/** Images waiting for their licence form: a picked file's path, or the bytes of a pasted or dropped image. */
+const staged = new Map<string, { file: string } | { bytes: Buffer; fileName: string }>()
+
+function stage(image: { file: string } | { bytes: Buffer; fileName: string }): StagedImage {
+  const token = randomUUID()
+  staged.set(token, image)
+  return { token, fileName: "file" in image ? basename(image.file) : image.fileName }
+}
 
 export function boardHandlers(need: () => Project, onOpen: (dir: string) => void, getWindow: () => BrowserWindow | null) {
   const resolveAll = async (cards: Card[]) => {
@@ -160,19 +196,30 @@ export function boardHandlers(need: () => Project, onOpen: (dir: string) => void
     return Promise.all(cards.map(resolve))
   }
   return {
+    "board:list": () => listBoards(need().root),
     "board:open": async (name: string): Promise<BoardDTO> => {
       const p = need()
       const dir = await ensureBoard(p.root, name)
       onOpen(dir)
       const errors: string[] = []
       const board = await loadBoard(p.root, name, (file, err) => errors.push(`${relative(p.root, file).split(sep).join("/")}: ${err instanceof Error ? err.message : String(err)}`))
-      return { name, cards: await resolveAll(board.cards), marks: board.marks, openMarks: openMarks(board).length, errors }
+      return { name, cards: await resolveAll(board.cards), marks: board.marks, edges: board.edges, openMarks: openMarks(board).length, errors }
     },
     "board:card": async (name: string, id: string): Promise<CardDTO | null> => {
       const card = await loadCard(need().root, name, id)
       return card ? cardResolver(need())(card) : null
     },
     "board:mark": async (name: string, id: string): Promise<Mark | null> => (await loadMark(need().root, name, id)) ?? null,
+    "board:edge": (name: string, id: string) => loadEdge(need(), name, id),
+    "board:saveEdge": async (name: string, edge: NewEdge): Promise<Edge> => {
+      const p = need()
+      const full: Edge = { ...edge, id: edge.id ?? newBoardId("e_"), createdAt: edge.createdAt ?? new Date().toISOString() }
+      noteOwnWrite(edgeFile(p.root, name, full.id), boardJsonText(full))
+      const saved = await saveEdge(p.root, name, full)
+      for (const cb of boardWritten) cb({ kind: "edge", value: saved })
+      return saved
+    },
+    "board:deleteEdge": (name: string, id: string) => deleteEdge(need().root, name, id),
     "board:saveCard": async (name: string, card: NewCard): Promise<CardDTO> => cardResolver(need())(await writeCard(need(), name, card)),
     "board:deleteCard": (name: string, id: string) => deleteCard(need().root, name, id),
     "board:saveMark": async (name: string, mark: NewMark): Promise<{ mark: Mark; openMarks: number }> => {
@@ -180,7 +227,7 @@ export function boardHandlers(need: () => Project, onOpen: (dir: string) => void
       const full: Mark = { ...mark, id: mark.id ?? newBoardId("m_"), createdAt: mark.createdAt ?? new Date().toISOString(), status: mark.status ?? "open" }
       noteOwnWrite(markFile(p.root, name, full.id), boardJsonText(full))
       const saved = await saveMark(p.root, name, full)
-      for (const cb of boardWritten) cb("mark", saved)
+      for (const cb of boardWritten) cb({ kind: "mark", value: saved })
       return { mark: saved, openMarks: await countOpen(p, name) }
     },
     "board:deleteMark": async (name: string, id: string): Promise<number> => {
@@ -196,7 +243,7 @@ export function boardHandlers(need: () => Project, onOpen: (dir: string) => void
       const card = await writeCard(p, name, { kind: pin.kind, ref: pin.ref, ...(pin.rev ? { rev: pin.rev } : {}), ...at, w: 260, madeBy: "you" })
       return cardResolver(p)(card)
     },
-    "board:pickImage": async (): Promise<{ token: string; fileName: string } | null> => {
+    "board:pickImage": async (): Promise<StagedImage | null> => {
       const win = getWindow()
       const opts = {
         title: "Add a reference image",
@@ -206,22 +253,28 @@ export function boardHandlers(need: () => Project, onOpen: (dir: string) => void
       const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
       const file = res.filePaths[0]
       if (res.canceled || !file) return null
-      const token = randomUUID()
-      picked.set(token, file)
-      return { token, fileName: basename(file) }
+      return stage({ file })
+    },
+    "board:stageImage": (bytes: Uint8Array, fileName: string): StagedImage => {
+      if (!(bytes instanceof Uint8Array) || bytes.length === 0) throw new Error("The image is empty.")
+      if (bytes.length > IMAGE_BYTES_MAX) throw new Error("The image is larger than 64 MB.")
+      if (!IMAGE_EXT.has(extname(String(fileName)).toLowerCase())) throw new Error(`Not an image file: ${String(fileName)}`)
+      return stage({ bytes: Buffer.from(bytes), fileName: basename(String(fileName)) })
     },
     "board:addRef": async (name: string, token: string, source: { title?: string; url?: string; licence: string }, at: { x: number; y: number }): Promise<CardDTO> => {
       const p = need()
-      const file = picked.get(token)
-      if (!file) throw new Error("Pick the image again.")
+      const image = staged.get(token)
+      if (!image) throw new Error("Add the image again.")
       if (!source?.licence?.trim()) throw new Error("A reference image needs a licence.")
-      const ext = extname(file).toLowerCase()
-      if (!IMAGE_EXT.has(ext)) throw new Error(`Not an image file: ${basename(file)}`)
-      const hash = createHash("sha256").update(await readFile(file)).digest("hex").slice(0, 16)
+      const fileName = "file" in image ? image.file : image.fileName
+      const ext = extname(fileName).toLowerCase()
+      if (!IMAGE_EXT.has(ext)) throw new Error(`Not an image file: ${basename(fileName)}`)
+      const bytes = "file" in image ? await readFile(image.file) : image.bytes
+      const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 16)
       const refs = join(p.root, ".river", "refs")
       await mkdir(refs, { recursive: true })
-      await copyFile(file, join(refs, `${hash}${ext}`))
-      picked.delete(token)
+      await writeFile(join(refs, `${hash}${ext}`), bytes)
+      staged.delete(token)
       const src = {
         licence: source.licence.trim(),
         ...(source.title?.trim() ? { title: source.title.trim() } : {}),

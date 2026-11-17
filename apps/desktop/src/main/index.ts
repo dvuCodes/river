@@ -5,7 +5,7 @@ import { BrowserWindow, app, ipcMain, nativeTheme, net, protocol } from "electro
 import type { JobDeps } from "@river/agent"
 import { VIEWS, type ViewId } from "../shared/api"
 import { type Card, type Mark, loadBoard, loadJob } from "@river/core"
-import { onBoardWritten } from "./board"
+import { type BoardEntity, onBoardWritten } from "./board"
 import { currentProject, onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
 import { getLastProject } from "./settings"
 
@@ -42,12 +42,16 @@ function createWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Smoke runs measure frames and drive input while other windows may cover this one.
+      backgroundThrottling: !isSmoke,
     },
   })
   w.once("ready-to-show", () => w.show())
+  // Scripted input goes straight to the page; a person's real pointer over the window must not mix into it.
+  if (isSmoke) w.setIgnoreMouseEvents(true)
   const query = isSmoke ? { smoke: "1" } : undefined
   const devUrl = process.env["ELECTRON_RENDERER_URL"]
-  if (devUrl) void w.loadURL(devUrl + (query ? "?smoke=1" : ""))
+  if (devUrl) void w.loadURL(devUrl + (query ? `?${new URLSearchParams(query)}` : ""))
   else void w.loadFile(join(here, "../renderer/index.html"), query ? { query } : undefined)
   return w
 }
@@ -101,10 +105,10 @@ async function smokeDrag(w: BrowserWindow): Promise<boolean> {
 
 type Rect = { x: number; y: number; w: number; h: number }
 
-/** Wait until River writes a card or mark matching `pred`. */
-function waitBoardWrite<T extends Card | Mark>(kind: "card" | "mark", pred: (v: T) => boolean, ms: number): Promise<T | null> {
+/** Wait until River writes a card, mark or edge matching `pred`. */
+function waitBoardWrite<K extends BoardEntity["kind"], T = Extract<BoardEntity, { kind: K }>["value"]>(kind: K, pred: (v: T) => boolean, ms: number): Promise<T | null> {
   return new Promise((done) => {
-    const off = onBoardWritten((k, v) => {
+    const off = onBoardWritten(({ kind: k, value: v }) => {
       if (k !== kind || !pred(v as T)) return
       clearTimeout(t)
       off()
@@ -206,7 +210,7 @@ async function smokeCanvas(w: BrowserWindow, dir: string, waitFor: (view: ViewId
   const tool = await waitRect(w, `[data-tool="circle"]`, 3_000)
   if (!tool) return false
   await click(w, tool.x + tool.w / 2, tool.y + tool.h / 2)
-  const markSaved = waitBoardWrite<Mark>("mark", (m) => m.shape === "circle", 8_000)
+  const markSaved = waitBoardWrite("mark", (m) => m.shape === "circle", 8_000)
   await drag(w, [a.x - 30, a.y - 30], [a.x + a.w + 30, a.y + a.h + 30], 20)
   const mark = await markSaved
   if (!mark) {
@@ -227,7 +231,7 @@ async function smokeCanvas(w: BrowserWindow, dir: string, waitFor: (view: ViewId
   await sleep(150)
   const typed = (await w.webContents.executeJavaScript(`document.querySelector(".ask-input")?.value ?? null`)) as string | null
   console.log(`river smoke: ask box holds ${JSON.stringify(typed)}`)
-  const threadSaved = waitBoardWrite<Mark>("mark", (m) => m.id === mark.id && m.thread.length > 0, 8_000)
+  const threadSaved = waitBoardWrite("mark", (m) => m.id === mark.id && m.thread.length > 0, 8_000)
   w.webContents.sendInputEvent({ type: "keyDown", keyCode: "Enter" })
   w.webContents.sendInputEvent({ type: "char", keyCode: "Enter" })
   w.webContents.sendInputEvent({ type: "keyUp", keyCode: "Enter" })
@@ -248,7 +252,7 @@ async function smokeCanvas(w: BrowserWindow, dir: string, waitFor: (view: ViewId
     const t = getComputedStyle(document.querySelector(".react-flow__viewport")).transform
     return new DOMMatrix(t).a
   })()`)) as number
-  const cardSaved = waitBoardWrite<Card>("card", (c) => c.id === moved, 8_000)
+  const cardSaved = waitBoardWrite("card", (c) => c.id === moved, 8_000)
   await drag(w, [b.x + 20, b.y + b.h / 2], [b.x + 20 + 150, b.y + b.h / 2], 15)
   const card = await cardSaved
   if (!card) {
@@ -329,6 +333,8 @@ async function clickEl(w: BrowserWindow, selector: string, ms: number): Promise<
   const r = await waitRect(w, selector, ms)
   if (!r) {
     console.error(`river smoke: no ${selector}`)
+    const dir = process.env["RIVER_SMOKE_DIR"]
+    if (dir) await writeFile(join(dir, "missing.png"), (await w.webContents.capturePage()).toPNG())
     return false
   }
   const [x, y] = [Math.round(r.x + r.w / 2), Math.round(r.y + r.h / 2)]
@@ -359,6 +365,14 @@ async function waitImage(w: BrowserWindow, selector: string, ms: number): Promis
     await sleep(200)
   }
   return false
+}
+
+async function key(w: BrowserWindow, keyCode: string, modifiers: ("shift" | "control")[] = []): Promise<void> {
+  w.webContents.sendInputEvent({ type: "keyDown", keyCode, modifiers })
+  // A form submits on the Enter key press (char), not on keydown.
+  if (keyCode === "Return") w.webContents.sendInputEvent({ type: "char", keyCode: "Enter", modifiers })
+  w.webContents.sendInputEvent({ type: "keyUp", keyCode, modifiers })
+  await sleep(150)
 }
 
 const exists = (abs: string) => access(abs).then(
@@ -408,6 +422,8 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   if (!(await clickEl(w, `[data-mark="${mark.id}"] .mark-pin`, 8_000))) return false
   if (!(await clickEl(w, `[data-action="ask-concept"]`, 3_000))) return false
   console.log("river smoke: asked the concept artist")
+  // Agents place their answer beside the mark, maybe off screen: the mark panel brings it into view.
+  if (!(await clickEl(w, `[data-action="show-answer"]`, 120_000))) return false
   if (!(await clickEl(w, `.concept[data-job-status="approval"] [data-action="review"]`, 120_000))) return false
   if (!(await waitRect(w, ".concept-script-text", 5_000))) {
     console.error("river smoke: the script did not show")
@@ -453,8 +469,12 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const markNow = (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)
   console.log(`river smoke: concepts/${concept.ref}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}`)
 
+  await key(w, "Escape")
+  await key(w, "1", ["shift"])
+  await sleep(500)
   if (!(await clickEl(w, `[data-mark="${toDismiss.id}"] .mark-pin`, 3_000))) return false
   if (!(await clickEl(w, `[data-action="ask-concept"]`, 3_000))) return false
+  if (!(await clickEl(w, `[data-action="show-answer"]`, 120_000))) return false
   if (!(await clickEl(w, `.concept[data-job-status="approval"] [data-action="dismiss"]`, 120_000))) return false
   const until = Date.now() + 10_000
   let dismissedJob: string | undefined

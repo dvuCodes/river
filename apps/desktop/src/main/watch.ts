@@ -64,8 +64,8 @@ export function watchProject(project: Project, emit: (changes: FsChange[]) => vo
     if (rel === "river.json") return "manifest"
     if (rel.startsWith(".river/review/")) return "review"
     if (rel.startsWith(".river/plans/")) return "plans"
-    // One file per card or mark; temp files of atomic writes start with a dot.
-    if (/^\.river\/boards\/[a-z0-9_-]{1,64}\/(cards|marks)\/[^./][^/]*\.json$/.test(rel)) return "board"
+    // One file per card, mark or edge; temp files of atomic writes start with a dot.
+    if (/^\.river\/boards\/[a-z0-9_-]{1,64}\/(cards|marks|edges)\/[^./][^/]*\.json$/.test(rel)) return "board"
     if (/^\.river\/jobs\/[^./][^/]*\.json$/.test(rel)) return "job"
     if (rel === stateRel) return "state"
     if (/\.(twee|tw)$/i.test(rel)) return "story"

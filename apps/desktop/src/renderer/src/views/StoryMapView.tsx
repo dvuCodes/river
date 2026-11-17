@@ -67,10 +67,11 @@ export function StoryToolbar(props: {
 function Inspector(props: {
   passage: PassageDTO
   storyRel: string
+  board: string
   onSaved(story: StoryDTO): void
   onClose(): void
 }) {
-  const { passage, storyRel, onSaved, onClose } = props
+  const { passage, storyRel, board, onSaved, onClose } = props
   const [draft, setDraft] = useState(passage.rawText)
   const [name, setName] = useState(passage.name)
   const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null)
@@ -101,8 +102,8 @@ function Inspector(props: {
   }
   const pin = async () => {
     try {
-      await window.river.boardPin("main", { kind: "passage", ref: `${storyRel}#${passage.id}` })
-      setStatus({ kind: "ok", text: "Pinned to the canvas." })
+      await window.river.boardPin(board, { kind: "passage", ref: `${storyRel}#${passage.id}` })
+      setStatus({ kind: "ok", text: `Pinned to the ${board} board.` })
     } catch (err) {
       setStatus({ kind: "err", text: errorText(err) })
     }
@@ -236,8 +237,10 @@ export function StoryMapView(props: {
   onSelect(id: string | undefined): void
   onStoryChanged(story: StoryDTO): void
   onPlayFrom(name: string): void
+  /** The canvas board that pins go to. */
+  board: string
 }) {
-  const { stories, storyRel, onStory, story, storyError, selectedId, onSelect, onStoryChanged, onPlayFrom } = props
+  const { stories, storyRel, onStory, story, storyError, selectedId, onSelect, onStoryChanged, onPlayFrom, board } = props
   const [focus, setFocus] = useState<{ id: string; nonce: number }>()
   const [mapReady, setMapReady] = useState(false)
   const saveTimer = useRef<number | undefined>(undefined)
@@ -298,7 +301,7 @@ export function StoryMapView(props: {
             </div>
             <LintPanel diagnostics={story.diagnostics} story={story} onPick={goto} />
           </div>
-          {selected && <Inspector key={selected.id} passage={selected} storyRel={storyRel} onSaved={onStoryChanged} onClose={() => onSelect(undefined)} />}
+          {selected && <Inspector key={selected.id} passage={selected} storyRel={storyRel} board={board} onSaved={onStoryChanged} onClose={() => onSelect(undefined)} />}
         </div>
       )}
     </div>

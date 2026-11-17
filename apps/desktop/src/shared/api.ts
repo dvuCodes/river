@@ -14,6 +14,7 @@ import type {
 import type {
   Card,
   ChangePlan,
+  Edge,
   Job,
   Mark,
   Diagnostic,
@@ -152,16 +153,26 @@ export interface AgentStartRequest {
   sessionId?: string
 }
 
+/** Pixel size of an image, read from its header so the card has its final height before the image loads. */
+export interface ImageSize {
+  w: number
+  h: number
+}
+
 /** What a card shows, resolved by main (the renderer cannot read stories or captures itself). */
 export type CardView =
-  | { kind: "frame"; shotId: string; rev?: string; url?: string; missing?: string }
+  | { kind: "frame"; shotId: string; rev?: string; url?: string; size?: ImageSize; missing?: string }
   | { kind: "passage"; story: string; passageId: string; title: string; tags: string[]; lines: string[]; missing?: string }
-  | { kind: "ref"; url: string }
+  | { kind: "ref"; url: string; size?: ImageSize }
   | {
       kind: "concept"
       id: string
-      /** Pending card: the job's render. Accepted card: concepts/<id>/concept.png. Absent until the file exists. */
+      /**
+       * Pending card: the job's render (.river/jobs/<job>/render_<variant>.png, or render.png without a variant).
+       * Accepted card: concepts/<id>/concept_<variant>.png (or concept.png). Absent until the file exists.
+       */
       url?: string
+      size?: ImageSize
       /** Only on a pending card. */
       job?: ConceptJob
       /** The pending card's job file could not be read. */
@@ -187,6 +198,7 @@ export interface BoardDTO {
   name: string
   cards: CardDTO[]
   marks: Mark[]
+  edges: Edge[]
   /** Count of marks with status "open" (core openMarks). */
   openMarks: number
   /** Files that did not parse, as "<path>: <message>". */
@@ -195,6 +207,13 @@ export interface BoardDTO {
 
 export type NewCard = Omit<Card, "id" | "createdAt"> & Partial<Pick<Card, "id" | "createdAt">>
 export type NewMark = Omit<Mark, "id" | "createdAt" | "status"> & Partial<Pick<Mark, "id" | "createdAt" | "status">>
+export type NewEdge = Omit<Edge, "id" | "createdAt"> & Partial<Pick<Edge, "id" | "createdAt">>
+
+/** An image the user picked, pasted or dropped, held by main until the licence form adds it as a card. */
+export interface StagedImage {
+  token: string
+  fileName: string
+}
 
 export type FsChangeKind = "story" | "state" | "manifest" | "review" | "plans" | "board" | "job"
 export interface FsChange {
@@ -228,11 +247,16 @@ export interface RiverApi {
   setThreadStatus(threadId: string, status: ReviewStatus): Promise<ReviewThread>
   setPlanStatus(planId: string, status: ChangePlan["status"]): Promise<ChangePlan>
   // storyboard canvas
+  /** Board folder names under .river/boards. */
+  boardList(): Promise<string[]>
   /** Open (and on first use create) a board; its folder is watched from then on. */
   boardOpen(name: string): Promise<BoardDTO>
-  /** One card or mark as it is on disk now; null when it was deleted. */
+  /** One card, mark or edge as it is on disk now; null when it was deleted. */
   boardCard(name: string, cardId: string): Promise<CardDTO | null>
   boardMark(name: string, markId: string): Promise<Mark | null>
+  boardEdge(name: string, edgeId: string): Promise<Edge | null>
+  boardSaveEdge(name: string, edge: NewEdge): Promise<Edge>
+  boardDeleteEdge(name: string, edgeId: string): Promise<void>
   boardSaveCard(name: string, card: NewCard): Promise<CardDTO>
   boardDeleteCard(name: string, cardId: string): Promise<void>
   /** Saves the mark; returns it with the board's open mark count. */
@@ -242,8 +266,10 @@ export interface RiverApi {
   /** Add a passage ("<story>#<id>") or frame (shot id) card at the next free spot. */
   boardPin(name: string, pin: { kind: "passage" | "frame"; ref: string; rev?: string }): Promise<CardDTO>
   /** Pick an image file to import; null when cancelled. */
-  boardPickImage(): Promise<{ token: string; fileName: string } | null>
-  /** Copy the picked image into .river/refs/<hash>.<ext> and add a ref card. */
+  boardPickImage(): Promise<StagedImage | null>
+  /** Hold a pasted or dropped image's bytes for boardAddRef. `fileName` gives the type (its extension). */
+  boardStageImage(bytes: Uint8Array, fileName: string): Promise<StagedImage>
+  /** Copy the staged image into .river/refs/<hash>.<ext> and add a ref card. */
   boardAddRef(name: string, token: string, source: { title?: string; url?: string; licence: string }, at: { x: number; y: number }): Promise<CardDTO>
   // concept jobs
   /** Ask the concept artist about a mark. Runs in the background; progress shows on the mark and its concept card. */

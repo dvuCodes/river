@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from "react"
 import type { AgentStatus, PlaySnapshot, ProjectInfo, StoryDTO, ViewId } from "../../shared/api"
 import { SettingsDialog } from "./components/SettingsDialog"
 import { cx, errorText, isSmoke } from "./util"
-import { CanvasView } from "./views/CanvasView"
+import { CanvasView, DEFAULT_BOARD } from "./views/CanvasView"
 import { type AgentContext, AgentView, useAgentSession } from "./views/AgentView"
 import { type AgentIntent, FramesView } from "./views/FramesView"
 import { PathsView } from "./views/PathsView"
@@ -128,6 +128,7 @@ export function App() {
   const [agentCtx, setAgentCtx] = useState<AgentContext>({ mode: "story" })
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [board, setBoard] = useState(DEFAULT_BOARD)
   const agent = useAgentSession()
   const storyRelRef = useRef(storyRel)
   storyRelRef.current = storyRel
@@ -266,6 +267,7 @@ export function App() {
           </div>
         ) : view === "story-map" ? (
           <StoryMapView
+            board={board}
             stories={project.stories}
             storyRel={storyRel}
             onStory={setStoryRel}
@@ -301,9 +303,9 @@ export function App() {
             storyStale={storyStale && playSnap !== null}
           />
         ) : view === "canvas" ? (
-          <CanvasView storyTick={storyTick} />
+          <CanvasView board={board} onBoard={setBoard} storyTick={storyTick} />
         ) : view === "frames" ? (
-          <FramesView tick={framesTick} onAgent={onAgentIntent} />
+          <FramesView tick={framesTick} board={board} onAgent={onAgentIntent} />
         ) : (
           <AgentView session={agent} status={agentStatus} onStatus={setAgentStatus} ctx={agentCtx} setCtx={setAgentCtx} storyRel={storyRel || undefined} onSettings={() => setSettingsOpen(true)} />
         )}

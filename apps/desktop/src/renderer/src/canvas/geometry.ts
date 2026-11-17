@@ -123,3 +123,51 @@ export function arrowPath(path: number[], head = 14): string {
   const f = (n: number) => Math.round(n * 10) / 10
   return `M${f(x0)} ${f(y0)}L${f(x1)} ${f(y1)}M${f(h1[0])} ${f(h1[1])}L${f(x1)} ${f(y1)}L${f(h2[0])} ${f(h2[1])}`
 }
+
+export type Side = "left" | "right" | "top" | "bottom"
+
+/**
+ * Where a connector between two boxes starts and ends. Boxes stacked one above the other (even far apart sideways)
+ * join bottom to top, so a note fans out to a row of options below it; boxes that share some height, like a row of
+ * frames, join side to side. The end stops `gap` short of the target so the arrowhead does not touch it.
+ */
+export function linkEnds(a: Rect, b: Rect, gap = 3): { from: Pt; fromSide: Side; to: Pt; toSide: Side } {
+  const ac: Pt = [a.x + a.w / 2, a.y + a.h / 2]
+  const bc: Pt = [b.x + b.w / 2, b.y + b.h / 2]
+  const xApart = Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w))
+  const yApart = Math.max(b.y - (a.y + a.h), a.y - (b.y + b.h))
+  if (yApart <= 0 && xApart > yApart) {
+    const right = bc[0] >= ac[0]
+    return right
+      ? { from: [a.x + a.w, ac[1]], fromSide: "right", to: [b.x - gap, bc[1]], toSide: "left" }
+      : { from: [a.x, ac[1]], fromSide: "left", to: [b.x + b.w + gap, bc[1]], toSide: "right" }
+  }
+  const down = bc[1] >= ac[1]
+  return down
+    ? { from: [ac[0], a.y + a.h], fromSide: "bottom", to: [bc[0], b.y - gap], toSide: "top" }
+    : { from: [ac[0], a.y], fromSide: "top", to: [bc[0], b.y + b.h + gap], toSide: "bottom" }
+}
+
+/** A filled arrowhead with its tip at `tip`, pointing into the box side `side`. */
+export function arrowHead(tip: Pt, side: Side, length = 8, half = 3.6): string {
+  const [dx, dy] = side === "left" ? [1, 0] : side === "right" ? [-1, 0] : side === "top" ? [0, 1] : [0, -1]
+  const [x, y] = tip
+  const bx = x - dx * length
+  const by = y - dy * length
+  const f = (n: number) => Math.round(n * 10) / 10
+  return `M${f(x)} ${f(y)}L${f(bx - dy * half)} ${f(by + dx * half)}L${f(bx + dy * half)} ${f(by - dx * half)}Z`
+}
+
+/** The box a mark occupies on the board, with room for its stroke, halo and status dot. A pin is a fixed glyph. */
+export function markBox(shape: string, path: number[]): Rect {
+  if (shape === "pin") {
+    const [x, y] = [path[0] ?? 0, path[1] ?? 0]
+    return { x: x - 10, y: y - 30, w: 22, h: 32 }
+  }
+  const b = grow(bounds(path), 9)
+  return { x: Math.floor(b.x), y: Math.floor(b.y), w: Math.ceil(b.w) + 1, h: Math.ceil(b.h) + 1 }
+}
+
+export function translatePath(path: number[], dx: number, dy: number): number[] {
+  return path.map((v, i) => Math.round((v + (i % 2 === 0 ? dx : dy)) * 10) / 10)
+}
