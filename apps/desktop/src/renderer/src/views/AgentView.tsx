@@ -13,8 +13,11 @@ export type ChatItem =
   | { kind: "note"; text: string }
   | { kind: "error"; text: string }
 
+/** Concept turns run as jobs from the canvas, never in this chat. */
+type ChatMode = Exclude<AgentMode, "concept">
+
 export interface AgentContext {
-  mode: AgentMode
+  mode: ChatMode
   threadId?: string | undefined
   planId?: string | undefined
 }
@@ -138,7 +141,7 @@ export function useAgentSession() {
 
 export type AgentSession = ReturnType<typeof useAgentSession>
 
-const MODE_INFO: Record<AgentMode, { label: string; blurb: string }> = {
+const MODE_INFO: Record<ChatMode, { label: string; blurb: string }> = {
   story: { label: "Story", blurb: "Drafts and edits passages. Every write asks you first, and the turn starts with a git checkpoint." },
   plan: { label: "Plan", blurb: "Read-only on game files. Answers a review thread with a draft change plan for you to approve." },
   implement: { label: "Implement", blurb: "Runs an approved plan. It may edit only the files the plan names, then recaptures its shots." },
@@ -223,7 +226,7 @@ export function AgentView(props: {
       <div className="toolbar">
         <span className="tb-label">Agent</span>
         <div className="seg" role="tablist" aria-label="Mode">
-          {(Object.keys(MODE_INFO) as AgentMode[]).map((m) => (
+          {(Object.keys(MODE_INFO) as ChatMode[]).map((m) => (
             <button key={m} role="tab" aria-selected={ctx.mode === m} className={cx("seg-btn", ctx.mode === m && "is-on")} onClick={() => setCtx({ mode: m, threadId: m === "plan" ? ctx.threadId : undefined, planId: m === "implement" ? ctx.planId : undefined })}>
               {MODE_INFO[m].label}
             </button>
@@ -276,7 +279,7 @@ export function AgentView(props: {
                 <h2>{MODE_INFO[ctx.mode].label} mode</h2>
                 <p>{MODE_INFO[ctx.mode].blurb}</p>
                 <ul className="mode-cards">
-                  {(Object.keys(MODE_INFO) as AgentMode[]).map((m) => (
+                  {(Object.keys(MODE_INFO) as ChatMode[]).map((m) => (
                     <li key={m} className={cx(ctx.mode === m && "is-on")}>
                       <b>{MODE_INFO[m].label}</b>
                       <span>{MODE_INFO[m].blurb}</span>

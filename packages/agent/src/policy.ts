@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises"
 import path from "node:path"
 import type { CanUseTool, PermissionResult } from "@anthropic-ai/claude-agent-sdk"
 import {
+  assertConceptFile,
   assertEditAllowed,
   loadStory,
   parseTwee3,
@@ -34,6 +35,8 @@ export interface PolicyContext {
   project: Project
   /** The approved plan (mode "implement"). */
   plan?: ChangePlan
+  /** The job's concept folder (mode "concept"). */
+  conceptId?: string
   onPermission(request: PermissionRequest): Promise<PermissionDecision>
 }
 
@@ -90,6 +93,8 @@ export function summarizeToolCall(tool: string, input: Record<string, unknown>):
       return `Mark plan ${str(input, "planId", "id") ?? "?"} implemented`
     case "frames_capture":
       return `Capture shot ${str(input, "shotId", "shot", "id") ?? "?"}`
+    case "concept_write":
+      return `Write ${file ?? "?"}`
     default:
       return `${tool}${file ? ` ${file}` : ""}`
   }
@@ -206,6 +211,15 @@ export async function decideToolCall(ctx: PolicyContext, toolName: string, input
   const tool = riverToolName(toolName)
   if (!tool) return deny(`${toolName} is not available in River`)
   if (!allowedInMode.has(tool)) return deny(`${tool} is not available in ${ctx.mode} mode`)
+  // Above the auto-allow below: river-mcp guards concept_write too, this is the second check.
+  if (tool === "concept_write") {
+    if (!ctx.conceptId) return deny("concept_write needs a concept job")
+    try {
+      assertConceptFile(ctx.conceptId, str(input, "file") ?? "")
+    } catch (err) {
+      return deny((err as Error).message)
+    }
+  }
   if ((READ_TOOLS as readonly string[]).includes(tool) || AUTO_ALLOWED_WRITES.includes(tool)) {
     return { behavior: "allow", updatedInput: input }
   }

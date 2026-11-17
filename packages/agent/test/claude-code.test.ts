@@ -90,6 +90,16 @@ describe("claude-code arguments", () => {
     expect(river.env.ANTHROPIC_API_KEY).toBe("")
   })
 
+  it("starts river-mcp for a concept turn with --concept and pre-allows concept_write", () => {
+    const args = buildClaudeCodeArgs(req({ mode: "concept", conceptId: "k_cli00001" }), opts)
+    const cfg = JSON.parse(String(flag(args, "--mcp-config"))) as { mcpServers: { river: { args: string[] } } }
+    const river = cfg.mcpServers.river.args
+    expect(river.slice(river.indexOf("--concept"), river.indexOf("--concept") + 2)).toEqual(["--concept", "k_cli00001"])
+    expect(river[river.indexOf("--tools") + 1]!.split(",")).toContain("concept_write")
+    expect(String(flag(args, "--allowedTools")).split(",")).toContain("mcp__river__concept_write")
+    expect(flag(args, "--append-system-prompt")).toBe(SYSTEM_PROMPTS.concept)
+  })
+
   it("resumes a session", () => {
     expect(flag(buildClaudeCodeArgs(req({ sessionId: "abc-123" }), opts), "--resume")).toBe("abc-123")
   })
