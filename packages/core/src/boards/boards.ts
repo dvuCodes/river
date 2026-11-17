@@ -369,15 +369,15 @@ export function cardImageFile(card: Card): string | undefined {
   return card.kind === "ref" ? card.ref : undefined
 }
 
-/** What a card shows, in a few words. */
-function cardWhat(card: Card, noteMax = 400): string {
+/** What a card shows, in a few words. `frameFile` is the PNG a frame card shows, when the caller looked it up. */
+function cardWhat(card: Card, noteMax = 400, frameFile?: string): string {
   switch (card.kind) {
     case "note":
       return JSON.stringify(clipText(card.text ?? "", noteMax))
     case "concept":
       return `concepts/${card.ref}/${card.variant ? ` option ${card.variant}` : ""}  file: ${cardImageFile(card)}`
     case "frame":
-      return `shot ${card.ref}${card.rev ? ` rev ${card.rev}` : ""}`
+      return `shot ${card.ref}${card.rev ? ` rev ${card.rev}` : ""} frame ${(card.frame ?? 0) + 1}${frameFile ? `  file: ${frameFile}` : ""}`
     case "ref":
       return `file: ${card.ref}${card.source ? ` (${[card.source.title, card.source.licence].filter(Boolean).join(", ")})` : ""}`
     case "passage":
@@ -404,18 +404,21 @@ export function formatMark(mark: Mark, indent = "", board?: Board, threadMax = 6
 }
 
 /** One card as formatBoard prints it. */
-export function formatCard(c: Card, noteMax = 400): string {
+export function formatCard(c: Card, noteMax = 400, frameFile?: string): string {
   const label = c.label ? ` [${c.label}]` : ""
   const caption = c.caption ? ` "${clipText(c.caption, 200)}"` : ""
   const pending = c.pending ? ` (pending, job ${c.pending.jobId})` : ""
-  return `${c.id}  ${c.kind} at ${round(c.x)},${round(c.y)} w${round(c.w)} h${round(cardHeight(c))}${label}${caption}  ${cardWhat(c, noteMax)}${pending}  by ${c.madeBy}`
+  return `${c.id}  ${c.kind} at ${round(c.x)},${round(c.y)} w${round(c.w)} h${round(cardHeight(c))}${label}${caption}  ${cardWhat(c, noteMax, frameFile)}${pending}  by ${c.madeBy}`
 }
 
-/** A board as compact text for agents and `river board show`: one line per card, a few per mark, one per edge. */
-export function formatBoard(board: Board): string {
+/**
+ * A board as compact text for agents and `river board show`: one line per card, a few per mark, one per edge.
+ * `frameFiles` (frameCardFiles) adds the PNG each frame card shows.
+ */
+export function formatBoard(board: Board, frameFiles: Record<string, string> = {}): string {
   const lines = [`board ${board.name}: ${board.cards.length} cards, ${board.marks.length} marks, ${board.edges.length} edges`]
   if (board.cards.length > 0) lines.push("cards:")
-  for (const c of board.cards) lines.push(`  ${formatCard(c)}`)
+  for (const c of board.cards) lines.push(`  ${formatCard(c, 400, frameFiles[c.id])}`)
   if (board.marks.length > 0) lines.push("marks:")
   for (const m of board.marks) lines.push(...formatMark(m, "  ", board))
   if (board.edges.length > 0) lines.push("edges:")

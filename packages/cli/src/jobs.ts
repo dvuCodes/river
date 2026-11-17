@@ -6,6 +6,7 @@ import {
   DEFAULT_BOARD,
   ensureBoard,
   formatBoard,
+  frameCardFiles,
   IMAGE_CARD_W,
   jobRenderName,
   listBoards,
@@ -298,7 +299,7 @@ export async function cmdBoard(sub: string | undefined, o: { root: string; board
     return 1
   }
   const board = await loadBoard(root, o.board)
-  out.line(formatBoard(board))
+  out.line(formatBoard(board, await frameCardFiles(root, board)))
   if (board.cards.length + board.marks.length === 0) for (const l of START_HINT) out.line(l)
   return 0
 }

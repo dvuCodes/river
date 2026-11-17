@@ -1,4 +1,4 @@
-import { afterChoice, openChoices, type ChoiceState } from "../story/choice"
+import { afterChoice, formatClosed, openChoices, type ChoiceState } from "../story/choice"
 import { applyEffects, evalCond, formatCond, initialState } from "../story/cond"
 import { choiceTarget, contentPassages, isInterrupt, resolveTarget, startPassage } from "../story/model"
 import type { GameState, Passage, StateSchema, Story } from "../story/types"
@@ -21,7 +21,7 @@ export interface Playtest {
    * interrupt started from, without running that passage's rules again. Throws if the choice is closed or broken.
    */
   choose(index: number): void
-  /** The interrupt passages, and whether each can start now: its @when holds and no interrupt is already running. */
+  /** The interrupt passages, and whether each can start now: its @when holds, no interrupt is running, and the story has not ended. */
   interrupts(): { passage: Passage; open: boolean }[]
   /** Start an interrupt passage (by name or id) from the current passage. */
   interrupt(name: string): void
@@ -52,7 +52,7 @@ export function createPlaytest(story: Story, schema: StateSchema, opts?: { from?
   const current = () => byId.get(top().passageId) ?? first
   const push = (passageId: string, state: GameState, returnTo: string | undefined) =>
     steps.push(returnTo === undefined ? { passageId, state } : { passageId, state, returnTo })
-  const interruptOpen = (p: Passage) => top().returnTo === undefined && (!p.when || evalCond(p.when, top().state))
+  const interruptOpen = (p: Passage) => top().returnTo === undefined && !current().isEnding && (!p.when || evalCond(p.when, top().state))
 
   return {
     current,
@@ -62,11 +62,7 @@ export function createPlaytest(story: Story, schema: StateSchema, opts?: { from?
       const entry = openChoices(current(), top().state, ctx)[index]
       if (!entry) throw new Error(`no choice ${index}`)
       const { choice } = entry
-      if (entry.closed) {
-        const c = entry.closed
-        const why = c.by === "target" ? `${c.target.name} needs ${formatCond(c.cond)} on arrival` : c.by === "cost" ? `its @cost needs ${formatCond(c.cond)}` : `its @when ${formatCond(c.cond)} is false`
-        throw new Error(`choice "${choice.label}" is closed: ${why}`)
-      }
+      if (entry.closed) throw new Error(`choice "${choice.label}" is closed: ${formatClosed(entry.closed)}`)
       const to = choiceTarget(story, choice.target)
       const s = afterChoice(top().state, choice, schema)
       if (to.kind === "return") {
@@ -83,6 +79,7 @@ export function createPlaytest(story: Story, schema: StateSchema, opts?: { from?
       const p = resolveTarget(story, name)
       if (!p || !isInterrupt(p)) throw new Error(`no interrupt passage named "${name}"`)
       if (top().returnTo !== undefined) throw new Error(`an interrupt is already running; take its @return choice first`)
+      if (current().isEnding) throw new Error(`the story has ended at ${current().name}`)
       if (!interruptOpen(p)) throw new Error(`${p.name} cannot start: its @when ${formatCond(p.when!)} is false`)
       push(p.id, applyEffects(top().state, p.onEnter, schema), current().id)
     },

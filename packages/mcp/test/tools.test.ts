@@ -89,7 +89,7 @@ describe("read tools", () => {
 
   it("story_paths formats routes like the CLI", async () => {
     const r = await call("story_paths", { file: STORY })
-    expect(r.text).toContain("2  Gate → Pond → Treat → Home happy   [treats >= 1]")
+    expect(r.text).toContain("2  Gate [Go to the pond] → Pond [Throw a treat] → Treat [Head home] → Home happy   when treats >= 1")
   })
 
   it("playtest_run plays choices and shows state", async () => {

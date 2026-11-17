@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process"
+import { execFile, type ExecFileException } from "node:child_process"
 import { mkdir, readdir } from "node:fs/promises"
 import path from "node:path"
 import type { EngineAdapter, Project, ShotDef } from "@river/core"
@@ -18,7 +18,6 @@ export interface GodotSettings {
   framesScript: string
 }
 
-const CAPTURE_TIMEOUT_MS = 60_000
 const FRAME_FILE = /^frame_(\d+)\.png$/i
 
 /** Replace "$VAR" and "${VAR}" with values from `env`. Throws when a referenced variable is unset. */
@@ -46,6 +45,11 @@ export function godotSettings(project: Project, env: NodeJS.ProcessEnv = process
   }
 }
 
+/** How long one capture may run: the shot's timeoutS, else 60 s plus half a second per frame. */
+export function captureTimeoutMs(shot: ShotDef): number {
+  return (shot.timeoutS ?? 60 + 0.5 * shot.count) * 1000
+}
+
 /** Godot takes "/" in OS paths on every platform. */
 const godotPath = (p: string) => p.replace(/\\/g, "/")
 
@@ -58,7 +62,7 @@ export function buildCaptureCommand(project: Project, shot: ShotDef, outDir: str
     throw new Error(`river: shot ${shot.id} has count ${shot.count}; it must be a whole number of at least 1`)
   }
   if (shot.count === 1) {
-    const args = ["--path", projectDir, "-s", s.screenshotScript, "--", `--scene=${shot.scene}`, `--out=${out}/frame_00.png`]
+    const args = ["--path", projectDir, "--disable-vsync", "-s", s.screenshotScript, "--", `--scene=${shot.scene}`, `--out=${out}/frame_00.png`]
     if (shot.setup) args.push(`--setup=${shot.setup}`)
     return { bin: s.bin, args }
   }
@@ -75,9 +79,9 @@ export function buildCaptureCommand(project: Project, shot: ShotDef, outDir: str
   }
 }
 
-function run(bin: string, args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string; error?: Error }> {
+function run(bin: string, args: string[], timeout: number): Promise<{ ok: boolean; stdout: string; stderr: string; error?: ExecFileException }> {
   return new Promise((resolve) => {
-    execFile(bin, args, { timeout: CAPTURE_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (err, stdout, stderr) => {
+    execFile(bin, args, { timeout, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (err, stdout, stderr) => {
       resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), ...(err ? { error: err } : {}) })
     })
   })
@@ -99,10 +103,11 @@ export function createGodotAdapter(): EngineAdapter {
       const { bin, args } = buildCaptureCommand(project, shot, outDir)
       await mkdir(outDir, { recursive: true })
       // Godot cannot render under --headless, so this opens a window for a moment.
-      const result = await run(bin, args)
+      const timeout = captureTimeoutMs(shot)
+      const result = await run(bin, args, timeout)
       const files = await framesIn(outDir)
       const report = () =>
-        [`command: ${bin} ${args.join(" ")}`, result.error ? `error: ${result.error.message}` : "", `stderr:\n${tail(result.stderr)}`, `stdout:\n${tail(result.stdout)}`]
+        [`command: ${bin} ${args.join(" ")}`, result.error ? `error: ${result.error.message}${result.error.killed ? ` (stopped after ${timeout / 1000} s; set "timeoutS" on the shot for more)` : ""}` : "", `stderr:\n${tail(result.stderr)}`, `stdout:\n${tail(result.stdout)}`]
           .filter(Boolean)
           .join("\n")
       if (!result.ok) throw new Error(`river: Godot capture of shot ${shot.id} failed\n${report()}`)

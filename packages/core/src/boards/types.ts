@@ -34,6 +34,10 @@ export interface Card {
    */
   ref: string
   rev?: string
+  /** Frame cards: the capture shown, by its time (Capture.at). Absent: the newest capture (at `rev`, when set). */
+  capture?: string
+  /** Frame cards: which frame of the capture, from 0. Absent: the first. */
+  frame?: number
   /** A note's text. */
   text?: string
   /** One or two lines shown under an image card ("storage jar (Met, PD)", "B - Stand: wrapped in the shadow"). */

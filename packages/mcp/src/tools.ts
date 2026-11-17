@@ -26,6 +26,12 @@ import {
   deleteEdge,
   elementRect,
   formatBoard,
+  formatClosed,
+  formatPathList,
+  interruptPaths,
+  summarizePaths,
+  frameCardFiles,
+  captureForCard,
   formatCard,
   formatMark,
   IMAGE_CARD_W,
@@ -379,37 +385,32 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
 
     define({
       name: "story_paths",
-      description: "List every route from the start (or from a passage) to an ending, dead end or loop, with the conditions along it.",
+      description:
+        "List every route from the start (or from a passage) to an ending, dead end or loop: each passage with the choice label taken there, then the conditions along it. Routes through [interrupt] passages follow the others. A route is \"never true\" when no state lets a player take it, following @set and @cost along the way. summary: true gives counts by ending instead.",
       inputSchema: {
         file: storyFile,
         from: z.string().optional().describe("Passage name (or id) to start from. Default: the story start"),
         maxPaths: z.number().int().min(1).max(5000).optional().describe("Stop after this many routes. Default 500"),
+        summary: z.boolean().optional().describe("Route counts by ending and distinct passage sequences instead of every route"),
       },
       mutating: false,
-      async run({ file, from, maxPaths }) {
+      async run({ file, from, maxPaths, summary }) {
         const rel = await storyRel(file)
         const schema = await loadSchema(project)
         const { story } = await loadStory(project, rel)
-        const routes = paths(story, schema, { ...(from !== undefined ? { from } : {}), ...(maxPaths !== undefined ? { maxPaths } : {}) })
-        const width = String(routes.length).length + 2
-        const lines = routes.map((r, i) => {
-          const names = r.steps.map((s) => passageById(story, s.passageId)?.name ?? s.passageId)
-          let line = `${String(i + 1).padEnd(width)}${names.join(" → ")}`
-          if (r.end === "dead-end") line += " (dead end)"
-          if (r.end === "loop") line += " (loop)"
-          if (r.conditions.length > 0) line += `   [${r.conditions.map(formatCond).join(" and ")}]`
-          if (!r.satisfiable) line += "   never true"
-          return line
-        })
+        const max = maxPaths !== undefined ? { maxPaths } : {}
+        const routes = paths(story, schema, { ...(from !== undefined ? { from } : {}), ...max })
+        const detours = from === undefined ? interruptPaths(story, schema, max) : []
+        const lines = summary ? summarizePaths(story, routes, detours) : formatPathList(story, routes, detours)
         if (routes.length === 0) lines.push(from !== undefined ? `no routes (no passage "${from}")` : "no routes (the start passage is missing)")
-        return { text: lines.join("\n"), data: routes }
+        return { text: lines.join("\n"), data: { routes, interrupts: detours } }
       },
     }),
 
     define({
       name: "playtest_run",
       description:
-        "Play a story without the engine. Takes a list of choice indexes (0-based, as story_read lists them) and returns the transcript: each passage, its choices and the state after each step.",
+        "Play a story without the engine. Takes a list of choice indexes (0-based, as story_read lists them) and returns the transcript: each passage, its choices (a closed one says why) and the state after each step. A choice is open when its @when holds, its @cost can be paid, and its target's @when holds after the cost and set.",
       inputSchema: {
         file: storyFile,
         from: z.string().optional().describe("Passage name (or id) to start from. Default: the story start"),
@@ -429,7 +430,9 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
           lines.push(`== ${p.name} == (id ${p.id})`)
           const prose = proseText(p.text)
           if (prose) lines.push(prose)
-          for (const c of play.choices()) lines.push(`  ${c.index}: ${c.choice.label} -> ${c.choice.target}${c.open ? "" : `  [closed: ${c.choice.when ? formatCond(c.choice.when) : ""}]`}`)
+          for (const c of play.choices()) {
+            lines.push(`  ${c.index}: ${c.choice.label} -> ${c.choice.target}${c.choice.hint ? `  (${c.choice.hint})` : ""}${c.closed ? `  [closed: ${formatClosed(c.closed)}]` : ""}`)
+          }
           const st = play.state()
           lines.push(`  state: ${Object.entries(st).map(([k, v]) => `${k}=${String(v)}`).join(", ")}`)
           if (play.isOver()) lines.push(p.isEnding ? "  -- the end --" : "  -- no open choices --")
@@ -796,13 +799,13 @@ function boardTools(project: Project, author: string): RiverTool[] {
    * concept only when a job backs it: an accepted job's kept render beside its script, or a rendered job's
    * pending render in .river/jobs/<job>/. Anything else, under concepts/ too, is a reference that needs a licence.
    */
-  async function imageCard(rel: string): Promise<Pick<Card, "kind" | "ref" | "rev" | "variant" | "pending">> {
+  async function imageCard(rel: string): Promise<Pick<Card, "kind" | "ref" | "rev" | "capture" | "frame" | "variant" | "pending">> {
     const capture = /^\.river\/captures\/([^/]+)\/[^/]+\/[^/]+$/.exec(rel)
     if (capture) {
       const abs = path.resolve(safePath(project, rel))
       const found = (await listCaptures(project, capture[1]!)).find((c) => c.files.some((f) => path.resolve(f) === abs))
       if (!found) throw new Error(`${rel} is not a frame of a capture River knows (frames_list lists them)`)
-      return { kind: "frame", ref: found.shotId, rev: found.rev }
+      return { kind: "frame", ref: found.shotId, rev: found.rev, capture: found.at, frame: found.files.findIndex((f) => path.resolve(f) === abs) }
     }
     const variantOf = (v: string | undefined) => (v ? { variant: v } : {})
     const pending = /^\.river\/jobs\/(j_[A-Za-z0-9_-]+)\/render(?:_([a-e]))?\.png$/.exec(rel)
@@ -826,10 +829,10 @@ function boardTools(project: Project, author: string): RiverTool[] {
   /** The image files a card shows, relative to the root: one for a concept or reference, a capture's frames for a frame card. */
   async function imageFiles(card: Card): Promise<string[]> {
     if (card.kind === "frame") {
-      const captures = await listCaptures(project, card.ref)
-      const capture = card.rev ? captures.find((c) => c.rev === card.rev) : captures[0]
-      if (!capture) throw new Error(`shot ${card.ref} has no capture${card.rev ? ` at rev ${card.rev}` : ""} yet`)
-      return capture.files.map((f) => path.relative(root, f).split(path.sep).join("/"))
+      const capture = captureForCard(await listCaptures(project, card.ref), card)
+      if (!capture) throw new Error(`shot ${card.ref} has no capture${card.capture ? ` from ${card.capture}` : card.rev ? ` at rev ${card.rev}` : ""}${card.capture || card.rev ? " any more" : " yet"}`)
+      const files = card.frame !== undefined ? capture.files.slice(card.frame, card.frame + 1) : capture.files
+      return files.map((f) => path.relative(root, f).split(path.sep).join("/"))
     }
     const file = cardImageFile(card)
     if (!file) throw new Error(`${card.id} is a ${card.kind} card, not an image; card_read shows its text`)
@@ -856,7 +859,7 @@ function boardTools(project: Project, author: string): RiverTool[] {
       mutating: false,
       async run({ board: name }) {
         const b = await board(name)
-        return { text: formatBoard(b), data: b }
+        return { text: formatBoard(b, await frameCardFiles(root, b)), data: b }
       },
     }),
 

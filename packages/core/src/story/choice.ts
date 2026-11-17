@@ -5,7 +5,7 @@
  * 3. the target passage's @when holds on that state;
  * 4. the target's own @set runs.
  */
-import { applyEffects, evalCond } from "./cond"
+import { applyEffects, evalCond, formatCond } from "./cond"
 import { choiceTarget } from "./model"
 import type { Choice, Cond, GameState, Passage, StateSchema, Story } from "./types"
 
@@ -34,6 +34,15 @@ export function afterChoice(state: GameState, choice: Choice, schema: StateSchem
 
 /** Why a choice is closed: its own @when, a @cost the player cannot pay, or the target's @when on arrival. */
 export type ClosedBy = { by: "when"; cond: Cond } | { by: "cost"; cond: Cond } | { by: "target"; cond: Cond; target: Passage }
+
+/** "coins >= 5", "@cost needs coins >= 5", "Vault needs coins >= 5 on arrival". */
+export function formatClosed(c: ClosedBy): string {
+  switch (c.by) {
+    case "when": return formatCond(c.cond)
+    case "cost": return `@cost needs ${formatCond(c.cond)}`
+    case "target": return `${c.target.name} needs ${formatCond(c.cond)} on arrival`
+  }
+}
 
 export interface ChoiceState {
   choice: Choice

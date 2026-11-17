@@ -43,7 +43,7 @@ describe("@cost gates its choice", () => {
   it("play refuses a purchase the player cannot pay, instead of clamping it to free", () => {
     const play = createPlaytest(src.story, schema)
     expect(play.choices()[0]).toMatchObject({ open: false, closed: { by: "cost" } })
-    expect(() => play.choose(0)).toThrow("its @cost needs coins >= 5")
+    expect(() => play.choose(0)).toThrow("@cost needs coins >= 5")
     play.setVar("coins", 7)
     play.choose(0)
     expect(play.state().coins).toBe(2)

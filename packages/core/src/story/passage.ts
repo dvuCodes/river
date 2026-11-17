@@ -134,12 +134,12 @@ function parseHint(body: string): string {
 
 /**
  * The line index of the `--` that ends a passage's rule block, or undefined when the text has none.
- * A rule block is one or more lines starting with `@` at the very top, then `--` (trailing spaces allowed).
+ * A rule block is the lines starting with `@` at the very top (there may be none), then `--` (trailing spaces allowed).
  */
 export function ruleBlockEnd(lines: string[]): number | undefined {
   let i = 0
   while (i < lines.length && lines[i]!.startsWith("@")) i++
-  return i > 0 && i < lines.length && lines[i]!.trimEnd() === "--" ? i : undefined
+  return i < lines.length && lines[i]!.trimEnd() === "--" ? i : undefined
 }
 
 function andCond(a: Cond | undefined, b: Cond): Cond {
