@@ -368,7 +368,8 @@ const exists = (abs: string) => access(abs).then(
 
 /**
  * RIVER_SMOKE_JOB=1: pin a passage and put a pin mark with a request beside it (IPC), then with real clicks:
- * open the mark, ask the concept artist, review and run its script, Accept. The agent turn is the fake from
+ * open the mark, ask the concept artist, review and run its script, Accept; then ask on a second mark and
+ * Dismiss it while it waits for approval. The agent turn is the fake from
  * smokeJobDeps; the render is real Godot. Screenshots the answered card and the accepted card.
  */
 async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, ms: number) => Promise<boolean>): Promise<boolean> {
@@ -392,8 +393,12 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
     thread: [{ by: "you", at: new Date().toISOString(), text: "make this calmer" }],
     madeBy: "you",
   }
-  const { mark } = (await w.webContents.executeJavaScript(`window.river.boardSaveMark("main", ${JSON.stringify(markReq)})`)) as { mark: Mark }
-  console.log(`river smoke: pinned ${card.ref} as ${card.id}; mark ${mark.id}`)
+  const saveMark = async (req: object) =>
+    ((await w.webContents.executeJavaScript(`window.river.boardSaveMark("main", ${JSON.stringify(req)})`)) as { mark: Mark }).mark
+  const mark = await saveMark(markReq)
+  // The second mark's card lands left of the passage, clear of the first one's.
+  const toDismiss = await saveMark({ ...markReq, path: [card.x - 330, card.y + 40], thread: [{ by: "you", at: new Date().toISOString(), text: "try it at dusk" }] })
+  console.log(`river smoke: pinned ${card.ref} as ${card.id}; marks ${mark.id} (accept) and ${toDismiss.id} (dismiss)`)
   w.webContents.send("smoke:navigate", "canvas")
   if (!(await waitFor("canvas", 15_000))) console.warn("river smoke: canvas did not report ready")
   w.focus()
@@ -447,7 +452,25 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const job = await loadJob(p.root, jobId)
   const markNow = (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)
   console.log(`river smoke: concepts/${concept.ref}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}`)
-  const ok = files["draw.gd"] && files["concept.png"] && job.status === "accepted"
+
+  if (!(await clickEl(w, `[data-mark="${toDismiss.id}"] .mark-pin`, 3_000))) return false
+  if (!(await clickEl(w, `[data-action="ask-concept"]`, 3_000))) return false
+  if (!(await clickEl(w, `.concept[data-job-status="approval"] [data-action="dismiss"]`, 120_000))) return false
+  const until = Date.now() + 10_000
+  let dismissedJob: string | undefined
+  let leftover: Card[] = []
+  while (Date.now() < until) {
+    const board = await loadBoard(p.root, "main")
+    dismissedJob = board.marks.find((m) => m.id === toDismiss.id)?.jobId
+    leftover = board.cards.filter((c) => c.pending?.markId === toDismiss.id)
+    const status = dismissedJob ? (await loadJob(p.root, dismissedJob)).status : undefined
+    const onCanvas = (await w.webContents.executeJavaScript(`document.querySelectorAll(".concept[data-job-status]").length`)) as number
+    if (status === "dismissed" && leftover.length === 0 && onCanvas === 0) break
+    await sleep(200)
+  }
+  const dismissed = dismissedJob ? (await loadJob(p.root, dismissedJob)).status === "dismissed" && leftover.length === 0 : false
+  console.log(`river smoke: dismiss leg: job ${dismissedJob} ${dismissed ? "dismissed, card gone" : "NOT dismissed"}`)
+  const ok = files["draw.gd"] && files["concept.png"] && job.status === "accepted" && dismissed
   console.log(`river smoke: job checks ${ok ? "PASSED" : "FAILED"}`)
   return ok
 }

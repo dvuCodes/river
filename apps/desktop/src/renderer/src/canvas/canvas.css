@@ -220,6 +220,15 @@
   user-select: text;
   cursor: text;
 }
+.concept-error {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: text;
+  user-select: text;
+}
 .concept-actions {
   display: flex;
   gap: 6px;

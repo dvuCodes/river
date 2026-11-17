@@ -66,6 +66,7 @@ import { type ProjectWatch, noteOwnWrite, watchProject } from "./watch"
 let project: Project | null = null
 let projectError: { root: string; message: string } | null = null
 let projectWatch: ProjectWatch | null = null
+const recovered = new Set<string>()
 let getWindow: () => BrowserWindow | null = () => null
 
 export function currentProject(): Project | null {
@@ -92,10 +93,14 @@ export async function openProject(root: string, remember = true): Promise<void> 
     projectError = null
     if (remember) settings.setLastProject(project.root)
     projectWatch = watchProject(project, (changes) => send("fs:change", changes))
-    const root = project.root
-    void loadAgent()
-      .then((a) => a.jobs?.recoverJobs(root))
-      .catch((err: unknown) => console.warn("river: could not recover jobs", err))
+    const opened = project.root
+    // Only jobs a previous process left behind: re-opening a project mid-job must not fail this process's live jobs.
+    if (!recovered.has(opened)) {
+      recovered.add(opened)
+      void loadAgent()
+        .then((a) => a.jobs?.recoverJobs(opened))
+        .catch((err: unknown) => console.warn("river: could not recover jobs", err))
+    }
   } catch (err) {
     project = null
     projectError = { root: abs, message: err instanceof Error ? err.message : String(err) }

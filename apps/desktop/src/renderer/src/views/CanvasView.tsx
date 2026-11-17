@@ -164,7 +164,7 @@ function ConceptBody({ cardId, jobId, view }: { cardId: string; jobId: string | 
         content = <p className="concept-line is-working">Running the approved script in Godot…</p>
         break
       case "failed":
-        content = <p className="cnode-missing">{view.job?.error ?? "The job failed."}</p>
+        content = <p className="cnode-missing concept-error nodrag nowheel">{view.job?.error ?? "The job failed."}</p>
         break
       default:
         content = (
@@ -195,7 +195,7 @@ function ConceptBody({ cardId, jobId, view }: { cardId: string; jobId: string | 
               Accept
             </button>
           )}
-          <button className="btn nodrag" data-action="dismiss" disabled={busy} onClick={() => act(() => window.river.jobDismiss(jobId))}>
+          <button className="btn nodrag" data-action="dismiss" disabled={busy} onClick={() => actions.remove(cardId)}>
             Dismiss
           </button>
         </div>
@@ -772,8 +772,9 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
     [board, putCard],
   )
 
-  const actions = useMemo<CanvasActions>(
-    () => ({
+  const actions = useMemo<CanvasActions>(() => {
+    const refresh = (id: string) => void window.river.boardCard(board, id).then((d) => putCard(id, d), fail)
+    return {
       saveText: (id, text) => {
         const dto = stateRef.current?.cards[id]
         if (dto) saveCard(dto, { text })
@@ -783,15 +784,19 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
         if (dto) saveCard(dto, { w: Math.round(w) })
       },
       remove: (id) => {
-        const jobId = stateRef.current?.cards[id]?.card.pending?.jobId
+        const v = stateRef.current?.cards[id]?.view
+        // A live job owns its card (and worktree): dismissing it removes both. Any other card is just deleted.
+        const job = v?.kind === "concept" && v.job && v.job.status !== "accepted" && v.job.status !== "dismissed" ? v.job : undefined
         putCard(id, null)
-        ;(jobId ? window.river.jobDismiss(jobId) : window.river.boardDeleteCard(board, id)).catch(fail)
+        ;(job ? window.river.jobDismiss(job.id) : window.river.boardDeleteCard(board, id)).catch((e: unknown) => {
+          fail(e)
+          refresh(id)
+        })
       },
-      refresh: (id) => void window.river.boardCard(board, id).then((d) => putCard(id, d), fail),
+      refresh,
       fail,
-    }),
-    [board, saveCard, putCard],
-  )
+    }
+  }, [board, saveCard, putCard])
 
   const onDragStop: OnNodeDrag = useCallback(
     (_e, _n, dragged) => {
