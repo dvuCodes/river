@@ -55,6 +55,11 @@ export async function commitPaths(worktree: string, paths: string[], message: st
   return sha
 }
 
+/** The bytes of `file` (relative to the git top level) in commit `sha`, exactly as stored. Works from any checkout of the repo. */
+export async function readCommittedFile(dir: string, sha: string, file: string): Promise<Buffer> {
+  return gitBytes(dir, ["cat-file", "blob", `${sha}:${file}`])
+}
+
 /** True when every file already has headSha's content in the working tree (an earlier apply finished). */
 async function alreadyApplied(top: string, headSha: string, files: string[]): Promise<boolean> {
   for (const f of files) {
