@@ -7,8 +7,9 @@
 import { spawn } from "node:child_process"
 import { existsSync, openSync, closeSync } from "node:fs"
 import { mkdir, readFile } from "node:fs/promises"
+import { createRequire } from "node:module"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
 export interface JobLaunch {
   root: string
@@ -27,10 +28,13 @@ export type JobLauncher = (launch: JobLaunch) => Promise<{ log: string }>
 
 const START_WAIT_MS = 45_000
 
-/** packages/cli/src/main.ts, found from this file, run with this Node and the loader this server runs with (tsx). */
+/** packages/cli/src/main.ts, found from this file, run with this Node and the tsx loader. */
 export function cliEntryPath(): string {
   return fileURLToPath(new URL("../../cli/src/main.ts", import.meta.url))
 }
+
+/** The tsx loader as a file URL found from this file: the runner's cwd is the game folder, where a bare "tsx" does not resolve. */
+const tsxLoader = () => pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href
 
 const jobFile = (root: string, jobId: string) => path.join(root, ".river", "jobs", `${jobId}.json`)
 
@@ -39,7 +43,9 @@ export async function launchConceptJob(l: JobLaunch): Promise<{ log: string }> {
   const log = path.join(l.root, ".river", "logs", `${l.jobId}.log`)
   await mkdir(path.dirname(log), { recursive: true })
   const out = openSync(log, "a")
-  const args = [...process.execArgv, cliEntryPath(), "job", "start", "--root", l.root, "--board", l.board, "--mark", l.markId, "--job", l.jobId, "--by", l.by, "--backend", l.backend, "--model", l.model]
+  // --name=value throughout: a board or mark id may start with "-", which the runner's strict parseArgs would refuse as a flag.
+  const values = { root: l.root, board: l.board, mark: l.markId, job: l.jobId, by: l.by, backend: l.backend, model: l.model }
+  const args = ["--import", tsxLoader(), cliEntryPath(), "job", "start", ...Object.entries(values).map(([name, value]) => `--${name}=${value}`)]
   const child = spawn(process.execPath, args, { cwd: l.root, detached: true, stdio: ["ignore", out, out], windowsHide: true })
   closeSync(out)
   const exited = new Promise<number | null>((resolve) => {
