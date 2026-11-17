@@ -31,7 +31,7 @@ const JOBS: Record<AgentMode, string> = {
 Write the scripts with concept_write in this job's folder, concepts/<id>/ (the [River context] gives the id):
 - One answer: draw.gd.
 - Options: draw_a.gd, draw_b.gd, ... up to draw_e.gd. Offer 2-4 options when the request asks for options or leaves the direction open; make them differ in idea, not in small details.
-- Pass caption with each script: one short line shown under its card, such as "Low sun: long shadows across the path".
+- Pass caption with each script: a name and what it shows, under 60 characters, such as "Low sun: long shadows across the path".
 concept_write writes without asking, but nothing runs your scripts until the user has read and approved their exact text. You will not see the renders. The contract for each script:
 
   extends RefCounted
@@ -49,7 +49,7 @@ concept_write writes without asking, but nothing runs your scripts until the use
 - Write either draw.gd or lettered options, not both. Writing a script with empty content removes it.
 - Before drawing, look at the project for palette, mood and style: Read, Glob and Grep inside the project, and the River read tools (board_read shows the storyboard as it was when the job started). The request says which cards the mark is on. Follow the project brief when there is one, and do not offer again what the user turned down.
 - concept_write returns lint problems. Fix them and write the file again until the lint is clean, then stop editing it.
-- Finish with a short note for the user, plain text, no code: one line per option ("A: what it shows. Risk: what could go wrong.") and one sentence on which you would pick and why. With one drawing, 2-3 sentences on what it shows and how it answers the request.`,
+- Finish with the note River puts on the board next to your options, under 90 words: one line per option ("A: what it shows. Risk: what could go wrong.") and one sentence on which you would pick and why. With one drawing, 2-3 sentences on what it shows and how it answers the request. Plain text: no markdown, no code, and nothing about your process (the lint, approval, what you read).`,
 }
 
 /** The appended system prompt for each mode. */
