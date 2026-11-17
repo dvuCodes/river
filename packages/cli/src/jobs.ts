@@ -147,7 +147,17 @@ export async function cmdMark(
 
 const indent = (text: string, by: string) => text.split("\n").join(`\n${by}`)
 
-function printJob(root: string, job: Job, out: Out): void {
+/**
+ * Agent text as it may be printed: escape sequences, bidi controls and control characters other than tab and
+ * newline removed, so a model's words cannot move the cursor, retitle the terminal or hide a line.
+ */
+export function terminalText(text: string): string {
+  return text.replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|[@-Z\\-_])|[\u0000-\u0008\u000b-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]/g, "")
+}
+
+/** Every line goes through terminalText: the job file and the text in it may be the agent's. */
+function printJob(root: string, job: Job, sink: Out): void {
+  const out = { line: (s: string) => sink.line(terminalText(s)) }
   out.line(`job ${job.id}  ${job.status}`)
   out.line(`  mark ${job.markId} on board ${job.board}, concept concepts/${job.conceptId}/${job.parentJobId ? `, revises ${job.parentJobId}` : ""}`)
   if (job.summary) out.line(`  summary: ${indent(job.summary, "           ")}`)
@@ -178,7 +188,8 @@ function shaMap(job: Job, values: string[]): Record<string, string> | string {
 const shaArgs = (scripts: { variant?: string; sha256: string }[]) => scripts.map((s) => `--sha256 ${s.variant ? `${s.variant}=` : ""}${s.sha256}`).join(" ")
 
 /** Turn progress on stderr. Sums the cost of each turn's "done" event into `spent`. */
-function progress(e: AgentEvent, err: Out, spent: { usd: number }): void {
+function progress(e: AgentEvent, sink: Out, spent: { usd: number }): void {
+  const err = { line: (s: string) => sink.line(terminalText(s)) }
   if (e.type === "done" && e.costUsd !== undefined) spent.usd += e.costUsd
   if (e.type === "text") err.line(`agent: ${e.text.trim()}`)
   else if (e.type === "tool") err.line(`  > ${e.tool}: ${e.summary}`)
@@ -254,7 +265,7 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
       }
       const scripts = await agent.readJobScripts(root, a.job)
       for (const script of scripts) {
-        out.line(`${script.file}  sha256 ${script.sha256}${script.variant ? `  option ${script.variant.toUpperCase()}${script.caption ? ` "${script.caption}"` : ""}` : ""}`)
+        out.line(terminalText(`${script.file}  sha256 ${script.sha256}${script.variant ? `  option ${script.variant.toUpperCase()}${script.caption ? ` "${script.caption}"` : ""}` : ""}`))
         out.line("-".repeat(60))
         out.write(script.text.endsWith("\n") ? script.text : `${script.text}\n`)
         out.line("-".repeat(60))
@@ -299,7 +310,7 @@ export async function cmdBoard(sub: string | undefined, o: { root: string; board
     return 1
   }
   const board = await loadBoard(root, o.board)
-  out.line(formatBoard(board, await frameCardFiles(root, board)))
+  out.line(terminalText(formatBoard(board, await frameCardFiles(root, board))))
   if (board.cards.length + board.marks.length === 0) for (const l of START_HINT) out.line(l)
   return 0
 }

@@ -6,7 +6,7 @@ import { Writable } from "node:stream"
 import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { startConceptJob, type RunTurn } from "@river/agent"
-import { cardRect, claimMark, loadBoard, loadJob, markRect, overlaps, replyToMark, saveCard } from "@river/core"
+import { cardRect, claimMark, loadBoard, loadJob, markRect, overlaps, replyToMark, saveCard, saveJob } from "@river/core"
 import { run } from "../src/index"
 
 const example = fileURLToPath(new URL("../../../examples/park-walk/", import.meta.url))
@@ -126,6 +126,26 @@ describe("river mark and job", { timeout: 120_000 }, () => {
     const again = await cli(["job", "dismiss", "--root", root, "--job", job.id])
     expect(again.code).toBe(0)
     expect(again.out).toContain(`job ${job.id}  dismissed`)
+  })
+
+  it("prints agent text without escape sequences or control characters, keeping its words, tabs and line breaks", async () => {
+    const markId = (await cli(["mark", "add", "--root", root, "--text", "make this calmer"])).out.trim()
+    const job = await startConceptJob({ workspaceRoot: root, board: "main", markId, model: "claude-sonnet-5-5", backend: "claude-code" }, { runTurn: writeDraw })
+    await saveJob(root, {
+      ...job,
+      summary: "Calm\u001b[2J\u001b[1;1H field.\nSecond\tline.\u0007",
+      error: "\u001b]0;owned\u0007Godot \u009b31mfailed\r‮hidden",
+      scripts: [{ ...job.scripts![0]!, caption: "Low \u001b[8msun" }],
+    })
+    await saveCard(root, "main", { kind: "note", x: 900, y: 900, w: 200, ref: "", text: "note \u009b31mred‮", madeBy: "claude-code" })
+    const control = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f‪-‮⁦-⁩]/
+    const shown = await cli(["job", "show", "--root", root, "--job", job.id])
+    expect(shown.out).not.toMatch(control)
+    expect(shown.out).toContain("summary: Calm field.\n           Second\tline.")
+    expect(shown.out).toContain("error: Godot 31mfailedhidden")
+    const board = await cli(["board", "show", "--root", root])
+    expect(board.out).not.toMatch(control)
+    expect(board.out).toContain('"note 31mred"')
   })
 
   it.skipIf(!process.env.GODOT_BIN)("job approve --yes renders with Godot and job accept applies the concept", async () => {
