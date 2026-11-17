@@ -498,8 +498,8 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
         <p className="review-kit">
           <code>Kit.name(…)</code> calls use River's drawing helpers, but River cannot prove that a line only draws.{" "}
           <mark className="read-line">Highlighted</mark> lines use names beyond Kit, the Image API and plain math. The highlight is a reading aid, not
-          a check: read the other lines too. Each numbered row is one line of the script; a row with ↳ and no number is the line
-          above, wrapped to fit.{" "}
+          a check: read the other lines too. Each numbered row is one line of the script; a row with <span className="wrap-hook" role="img" aria-label="a hook" /> and no
+          number is the line above, wrapped to fit.{" "}
           <button type="button" className="link-btn" data-action="view-kit" onClick={() => setKit(true)}>
             Read the Kit
           </button>

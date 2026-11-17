@@ -441,6 +441,10 @@
   user-select: text;
   cursor: text;
 }
+.review-kit,
+.concept-script-text {
+  --wrap-hook: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='16' viewBox='0 0 12 16'%3E%3Cpath d='M3 3.5v5.5h6.5M7 6.5 9.5 9 7 11.5' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
 .script-row {
   position: relative;
   isolation: isolate;
@@ -482,8 +486,16 @@
   left: 0;
   width: var(--ln-w, 6ch);
   background: var(--muted);
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='16' viewBox='0 0 12 16'%3E%3Cpath d='M3 3.5v5.5h6.5M7 6.5 9.5 9 7 11.5' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
-    right 4px top / 12px 16px repeat-y;
+  mask: var(--wrap-hook) right 4px top / 12px 16px repeat-y;
+}
+/* The same hook in the review's legend, so the legend shows exactly what a wrapped row looks like. */
+.wrap-hook {
+  display: inline-block;
+  width: 12px;
+  height: 16px;
+  vertical-align: -4px;
+  background: var(--muted);
+  mask: var(--wrap-hook) center / 12px 16px no-repeat;
 }
 .concept-error {
   margin: 0;
