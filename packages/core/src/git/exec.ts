@@ -1,0 +1,51 @@
+import { execFile } from "node:child_process"
+
+/** Byte-exact git: never convert line endings on the way in or out. */
+export const RAW = ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "-c", "core.safecrlf=false"]
+
+export interface GitOptions {
+  env?: NodeJS.ProcessEnv
+  /** Written to git's stdin. */
+  input?: string | Buffer
+}
+
+function run<T extends string | Buffer>(root: string, args: string[], opts: GitOptions, encoding: "utf8" | "buffer"): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      "git",
+      args,
+      { cwd: root, env: { ...process.env, ...opts.env }, maxBuffer: 256 * 1024 * 1024, windowsHide: true, encoding },
+      (err, stdout, stderr) => {
+        if (err) {
+          return reject(new Error(`git ${args.join(" ")} failed in ${root}: ${String(stderr || err.message).trim()}`))
+        }
+        resolve(stdout as T)
+      },
+    )
+    if (opts.input !== undefined) child.stdin!.end(opts.input)
+  })
+}
+
+export function git(root: string, args: string[], opts: GitOptions = {}): Promise<string> {
+  return run<string>(root, args, opts, "utf8")
+}
+
+/** Like git(), but stdout as bytes (blobs, binary patches). */
+export function gitBytes(root: string, args: string[], opts: GitOptions = {}): Promise<Buffer> {
+  return run<Buffer>(root, args, opts, "buffer")
+}
+
+/** Like git(), but resolves to null when git exits non-zero. */
+export function gitTry(root: string, args: string[], opts: GitOptions = {}): Promise<string | null> {
+  return git(root, args, opts).catch(() => null)
+}
+
+/** Identity for commit-tree when the repo has none configured (River's commits are local only). */
+export async function identityEnv(root: string): Promise<NodeJS.ProcessEnv> {
+  const env: NodeJS.ProcessEnv = {}
+  const name = await gitTry(root, ["config", "--get", "user.name"])
+  const email = await gitTry(root, ["config", "--get", "user.email"])
+  if (!name?.trim() && !process.env.GIT_AUTHOR_NAME) env.GIT_AUTHOR_NAME = env.GIT_COMMITTER_NAME = "river"
+  if (!email?.trim() && !process.env.GIT_AUTHOR_EMAIL) env.GIT_AUTHOR_EMAIL = env.GIT_COMMITTER_EMAIL = "river@localhost"
+  return env
+}

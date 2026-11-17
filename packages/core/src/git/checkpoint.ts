@@ -1,7 +1,7 @@
-import { execFile } from "node:child_process"
 import { mkdtemp, readdir, rm, rmdir } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { git, gitTry, identityEnv, RAW } from "./exec"
 
 /** A snapshot of the working tree, kept under refs/river/checkpoints/<n>. Branch history is not changed. */
 export interface Checkpoint {
@@ -14,33 +14,6 @@ export interface Checkpoint {
 
 const REF_PREFIX = "refs/river/checkpoints/"
 const MESSAGE_PREFIX = "river checkpoint: "
-/** Byte-exact snapshots: never convert line endings on the way in or out. */
-const RAW = ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "-c", "core.safecrlf=false"]
-
-interface GitOptions {
-  env?: NodeJS.ProcessEnv
-}
-
-function git(root: string, args: string[], opts: GitOptions = {}): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      "git",
-      args,
-      { cwd: root, env: { ...process.env, ...opts.env }, maxBuffer: 256 * 1024 * 1024, windowsHide: true, encoding: "utf8" },
-      (err, stdout, stderr) => {
-        if (err) {
-          return reject(new Error(`git ${args.join(" ")} failed in ${root}: ${String(stderr || err.message).trim()}`))
-        }
-        resolve(stdout)
-      },
-    )
-  })
-}
-
-/** Like git(), but resolves to null when git exits non-zero. */
-function gitTry(root: string, args: string[], opts: GitOptions = {}): Promise<string | null> {
-  return git(root, args, opts).catch(() => null)
-}
 
 async function hasHead(root: string): Promise<boolean> {
   return (await gitTry(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"])) !== null
@@ -64,16 +37,6 @@ async function snapshotTree(root: string, head?: boolean): Promise<string> {
     await git(root, [...RAW, "add", "-A", "--", "."], { env })
     return (await git(root, ["write-tree"], { env })).trim()
   })
-}
-
-/** Identity for commit-tree when the repo has none configured (checkpoint refs are local only). */
-async function identityEnv(root: string): Promise<NodeJS.ProcessEnv> {
-  const env: NodeJS.ProcessEnv = {}
-  const name = await gitTry(root, ["config", "--get", "user.name"])
-  const email = await gitTry(root, ["config", "--get", "user.email"])
-  if (!name?.trim() && !process.env.GIT_AUTHOR_NAME) env.GIT_AUTHOR_NAME = env.GIT_COMMITTER_NAME = "river"
-  if (!email?.trim() && !process.env.GIT_AUTHOR_EMAIL) env.GIT_AUTHOR_EMAIL = env.GIT_COMMITTER_EMAIL = "river@localhost"
-  return env
 }
 
 function refNumber(ref: string): number {
