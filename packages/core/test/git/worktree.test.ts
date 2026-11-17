@@ -56,8 +56,7 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     const second = await commitJobFile(game, "j_test0001", "game/concepts/k1/concept.png", PNG, "river: render k1")
     expect(git(top, "diff", "--name-only", job.baseSha, second).trim().split("\n").sort()).toEqual(["game/concepts/k1/concept.png", "game/concepts/k1/draw.gd"])
 
-    const files = await applyJobFiles(game, second, "game/concepts/k1")
-    expect(files.sort()).toEqual(["game/concepts/k1/concept.png", "game/concepts/k1/draw.gd"])
+    const undo = await applyJobFiles(game, second, "game/concepts/k1")
     expect(read(top, "game/concepts/k1/draw.gd").toString()).toBe(DRAW)
     expect(read(top, "game/concepts/k1/concept.png").equals(PNG)).toBe(true)
     expect(existsSync(path.join(top, "game/concepts/k1/scratch.txt"))).toBe(false)
@@ -68,8 +67,12 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     const lines = (text: string) => text.trim().split("\n").sort()
     expect(lines(git(top, "status", "--porcelain"))).toEqual(lines(status + "?? game/concepts/\n"))
 
-    expect((await applyJobFiles(game, second, "game/concepts/k1")).length).toBe(2)
+    const again = await applyJobFiles(game, second, "game/concepts/k1")
+    await again()
     expect(read(top, "game/concepts/k1/draw.gd").toString()).toBe(DRAW)
+    await undo()
+    expect(existsSync(path.join(top, "game/concepts"))).toBe(false)
+    expect(git(top, "status", "--porcelain")).toBe(status)
 
     await removeJobWorktree(game, "j_test0001")
     expect(existsSync(job.worktree)).toBe(false)

@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises"
+import { access, mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { snapshotCommit } from "./checkpoint"
 import { git, gitBytes, gitTry, identityEnv, RAW, withTempIndex, type GitOptions } from "./exec"
@@ -34,10 +34,13 @@ async function riverGit(dir: string) {
   const common = path.resolve((await git(dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim())
   const noHooks = path.join(common, "river", "no-hooks")
   await mkdir(noHooks, { recursive: true })
+  // Every job call, not only those that move refs: even a temporary index write runs post-index-change.
+  const hooksOff = ["-c", `core.hooksPath=${noHooks}`]
   return {
     common,
     worktrees: path.join(common, "river", "worktrees"),
-    git: (args: string[], opts?: GitOptions) => git(dir, ["-c", `core.hooksPath=${noHooks}`, ...args], opts),
+    hooksOff,
+    git: (args: string[], opts?: GitOptions) => git(dir, [...hooksOff, ...args], opts),
   }
 }
 
@@ -48,9 +51,9 @@ async function riverGit(dir: string) {
 export async function createJobWorktree(workspaceRoot: string, jobId: string): Promise<JobWorktree> {
   const branch = jobBranch(jobId)
   const projectSub = (await git(workspaceRoot, ["rev-parse", "--show-prefix"])).trim().replace(/\/$/, "")
-  // The branch keeps the snapshot alive, so no checkpoint ref lists job bases among the user's checkpoints.
-  const baseSha = await snapshotCommit(workspaceRoot, `job ${jobId}`)
   const repo = await riverGit(workspaceRoot)
+  // The branch keeps the snapshot alive, so no checkpoint ref lists job bases among the user's checkpoints.
+  const baseSha = await snapshotCommit(workspaceRoot, `job ${jobId}`, repo.hooksOff)
   const worktree = path.join(repo.worktrees, jobId)
   await mkdir(repo.worktrees, { recursive: true })
   await repo.git([...RAW, "worktree", "add", "-q", "-b", branch, worktree, baseSha])
@@ -65,15 +68,15 @@ export async function createJobWorktree(workspaceRoot: string, jobId: string): P
 export async function commitJobFile(dir: string, jobId: string, file: string, bytes: Buffer, message: string): Promise<string> {
   const ref = `refs/heads/${jobBranch(jobId)}`
   const repo = await riverGit(dir)
-  const head = (await git(dir, ["rev-parse", "--verify", "-q", `${ref}^{commit}`])).trim()
-  const blob = (await git(dir, ["hash-object", "-w", "--no-filters", "--stdin"], { input: bytes })).trim()
+  const head = (await repo.git(["rev-parse", "--verify", "-q", `${ref}^{commit}`])).trim()
+  const blob = (await repo.git(["hash-object", "-w", "--no-filters", "--stdin"], { input: bytes })).trim()
   const tree = await withTempIndex(async (env) => {
-    await git(dir, ["read-tree", head], { env })
-    await git(dir, ["update-index", "--add", "--cacheinfo", `100644,${blob},${file}`], { env })
-    return (await git(dir, ["write-tree"], { env })).trim()
+    await repo.git(["read-tree", head], { env })
+    await repo.git(["update-index", "--add", "--cacheinfo", `100644,${blob},${file}`], { env })
+    return (await repo.git(["write-tree"], { env })).trim()
   })
-  if (tree === (await git(dir, ["rev-parse", `${head}^{tree}`])).trim()) return head
-  const sha = (await git(dir, ["commit-tree", tree, "-p", head, "-m", message], { env: await identityEnv(dir) })).trim()
+  if (tree === (await repo.git(["rev-parse", `${head}^{tree}`])).trim()) return head
+  const sha = (await repo.git(["commit-tree", tree, "-p", head, "-m", message], { env: await identityEnv(dir) })).trim()
   await repo.git(["update-ref", "-m", message, ref, sha, head])
   return sha
 }
@@ -83,14 +86,19 @@ export async function readCommittedFile(dir: string, sha: string, file: string):
   return gitBytes(dir, ["cat-file", "blob", `${sha}:${file}`])
 }
 
+const exists = (file: string) => access(file).then(
+  () => true,
+  () => false,
+)
+
 /**
  * Write the files under `pathPrefix` (relative to the git top level) in commit `sha` into the user's
  * working tree as the committed bytes, so no .gitattributes filter or line-ending rule can change
  * them, and the index stays as it is. Only creates files: one that is already there must hold the
  * same bytes, which makes a second run a no-op. On any failure it removes the files and folders it
- * created and throws. Returns the files, relative to the git top level.
+ * created and throws. Returns undo(), which removes them later, for when the step after this fails.
  */
-export async function applyJobFiles(workspaceRoot: string, sha: string, pathPrefix: string): Promise<string[]> {
+export async function applyJobFiles(workspaceRoot: string, sha: string, pathPrefix: string): Promise<() => Promise<void>> {
   const top = await gitTop(workspaceRoot)
   const listing = await git(top, ["-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--full-tree", sha, "--", pathPrefix])
   const files: { file: string; bytes: Buffer }[] = []
@@ -103,11 +111,15 @@ export async function applyJobFiles(workspaceRoot: string, sha: string, pathPref
   }
   const created: string[] = []
   const madeDirs: string[] = []
+  const undo = async () => {
+    for (const abs of created) await rm(abs, { force: true })
+    for (const dir of madeDirs.sort((a, b) => b.length - a.length)) await rmdir(dir).catch(() => {})
+  }
   try {
     for (const { file, bytes } of files) {
       const abs = path.join(top, file)
-      const first = await mkdir(path.dirname(abs), { recursive: true })
-      if (first) for (let dir = path.dirname(abs); dir.length >= first.length; dir = path.dirname(dir)) madeDirs.push(dir)
+      for (let dir = path.dirname(abs); dir !== top && !(await exists(dir)); dir = path.dirname(dir)) madeDirs.push(dir)
+      await mkdir(path.dirname(abs), { recursive: true })
       try {
         await writeFile(abs, bytes, { flag: "wx" })
         created.push(abs)
@@ -120,11 +132,10 @@ export async function applyJobFiles(workspaceRoot: string, sha: string, pathPref
       if (!(await readFile(path.join(top, file))).equals(bytes)) throw new Error(`river: ${file} did not arrive byte for byte`)
     }
   } catch (err) {
-    for (const abs of created) await rm(abs, { force: true })
-    for (const dir of madeDirs.sort((a, b) => b.length - a.length)) await rmdir(dir).catch(() => {})
+    await undo()
     throw err
   }
-  return files.map((f) => f.file)
+  return undo
 }
 
 /** Ids of the jobs that still have a branch. */

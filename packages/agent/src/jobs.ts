@@ -417,8 +417,15 @@ export async function acceptJob(workspaceRoot: string, jobId: string): Promise<J
   if (job.status !== "answered") throw new Error(`river: job ${jobId} is ${job.status}; only an answered job can be accepted`)
   const { bytes } = await committedScript(root, job)
   if (hash(bytes) !== job.scripts![0]!.sha256) throw new Error(`river: refused: the script on job ${jobId}'s branch is not the approved one`)
-  await applyJobFiles(root, job.headSha!, inRepo(job, conceptPath(job.conceptId)))
-  const accepted = await transition(root, job, "accepted")
+  const undo = await applyJobFiles(root, job.headSha!, inRepo(job, conceptPath(job.conceptId)))
+  let accepted: Job
+  try {
+    accepted = await transition(root, job, "accepted")
+  } catch (err) {
+    // Another process can dismiss the job between the write and this move; then none of its files may stay.
+    if ((await loadJob(root, jobId)).status !== "accepted") await undo()
+    throw err
+  }
   await findPendingCard(root, accepted)
     .then((card) => finishAccept(root, accepted, card))
     .catch((err: unknown) => console.warn(`river: job ${jobId} is accepted, but tidying up failed (retried when the project next opens): ${errMsg(err)}`))

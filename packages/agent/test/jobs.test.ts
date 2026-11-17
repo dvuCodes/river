@@ -347,7 +347,12 @@ describe("concept jobs", { timeout: 120_000 }, () => {
 
   it("never runs the user's git hooks, and adds no checkpoint", async () => {
     const marker = path.join(top, "hooks-ran.txt")
-    for (const hook of ["post-checkout", "reference-transaction"]) {
+    const hooks = [
+      "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit", "pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-commit",
+      "pre-rebase", "post-checkout", "post-merge", "pre-push", "pre-receive", "update", "proc-receive", "post-receive", "post-update",
+      "reference-transaction", "push-to-checkout", "pre-auto-gc", "post-rewrite", "post-index-change",
+    ]
+    for (const hook of hooks) {
       writeFileSync(path.join(top, ".git", "hooks", hook), `#!/bin/sh\necho ${hook} >> "${marker.replace(/\\/g, "/")}"\n`, { mode: 0o755 })
     }
     const job = await start({ runTurn: fakeTurn(DRAW) })

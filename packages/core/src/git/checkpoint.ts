@@ -18,13 +18,16 @@ async function hasHead(root: string): Promise<boolean> {
   return (await gitTry(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"])) !== null
 }
 
-/** Write a tree object of the current working tree (tracked + untracked, not ignored) without touching the real index. */
-async function snapshotTree(root: string, head?: boolean): Promise<string> {
+/**
+ * Write a tree object of the current working tree (tracked + untracked, not ignored) without touching
+ * the real index. `config` goes before each git command.
+ */
+async function snapshotTree(root: string, head?: boolean, config: string[] = []): Promise<string> {
   head ??= await hasHead(root)
   return withTempIndex(async (env) => {
-    if (head) await git(root, ["read-tree", "HEAD"], { env })
-    await git(root, [...RAW, "add", "-A", "--", "."], { env })
-    return (await git(root, ["write-tree"], { env })).trim()
+    if (head) await git(root, [...config, "read-tree", "HEAD"], { env })
+    await git(root, [...config, ...RAW, "add", "-A", "--", "."], { env })
+    return (await git(root, [...config, "write-tree"], { env })).trim()
   })
 }
 
@@ -35,12 +38,13 @@ function refNumber(ref: string): number {
 /**
  * A commit of the working tree (tracked and untracked, not ignored) on top of HEAD, without changing
  * the working tree or the index. Nothing refers to it yet: the caller keeps it with a ref or branch.
+ * `config` goes before each git command (a job passes core.hooksPath so the user's hooks stay off).
  */
-export async function snapshotCommit(root: string, label: string): Promise<string> {
+export async function snapshotCommit(root: string, label: string, config: string[] = []): Promise<string> {
   const head = await hasHead(root)
-  const tree = await snapshotTree(root, head)
+  const tree = await snapshotTree(root, head, config)
   const parents = head ? ["-p", "HEAD"] : []
-  return (await git(root, ["commit-tree", tree, ...parents, "-m", MESSAGE_PREFIX + label], { env: await identityEnv(root) })).trim()
+  return (await git(root, [...config, "commit-tree", tree, ...parents, "-m", MESSAGE_PREFIX + label], { env: await identityEnv(root) })).trim()
 }
 
 /** Snapshot tracked and untracked (not ignored) files without changing the working tree or the index. */
