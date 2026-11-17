@@ -2,13 +2,13 @@
  * The story model. A story is one Twee 3 file. River adds game rules to a
  * passage as `@` lines at the top of its text, ended by a line `--`:
  *
- *   :: Squirrel! [encounter]
- *   @id squirrel
- *   @when distance_m >= 90
+ *   :: Pond [encounter]
+ *   @id pond
+ *   @when energy >= 20
  *   --
- *   A squirrel freezes halfway up the oak.
- *   [[Leave it->Standoff]] @cost treats 1
- *   [[Hold tight->Strain]] @set irk += 35, energy -= 8 @when bond < 50
+ *   Ducks. Many ducks.
+ *   [[Throw a treat->Treat]] @cost treats 1
+ *   [[Hold the leash tight->Calm down]] @set excitement -= 30, bond -= 5 @when bond > 20
  *
  * Twine shows the `@` lines as plain text, so a round trip through Twine keeps them.
  */
@@ -30,7 +30,7 @@ export type Cond =
   | { kind: "or"; terms: Cond[] }
   | { kind: "not"; term: Cond }
 
-/** One state change. `@set irk += 35` is { variable: "irk", op: "add", amount: 35 }. */
+/** One state change. `@set bond += 10` is { variable: "bond", op: "add", amount: 10 }. */
 export interface Effect {
   variable: string
   op: "add" | "set"
@@ -123,8 +123,8 @@ export interface StoryPath {
   steps: PathStep[]
   /** All conditions met along the route (passage `when` and choice `when`). */
   conditions: Cond[]
-  /** "ending" if the last passage has @end or no choices; "loop" if it stops at a passage already on the route. */
+  /** "ending" if the last passage has @end; "dead-end" if it has no open route on and no @end; "loop" if it stops at a passage already on the route. */
   end: "ending" | "dead-end" | "loop"
-  /** False when the conditions cannot all be true, given the schema ranges and the effects on the route. */
+  /** False when the conditions cannot all be true within the schema ranges. Version 1 ignores effects along the route. */
   satisfiable: boolean
 }

@@ -7,9 +7,9 @@
 /** One deterministic shot: a scene, a setup script that freezes it, and how many frames to save. */
 export interface ShotDef {
   id: string
-  /** Engine path of the scene, e.g. "res://src/game/walk/walk.tscn". */
+  /** Engine path of the scene, e.g. "res://scenes/level_1.tscn". */
   scene: string
-  /** Engine path of the setup script, e.g. "res://tools/shots/leash_surge_taut.gd". */
+  /** Engine path of the setup script, e.g. "res://tools/shots/intro_frozen.gd". */
   setup?: string
   /** 1 = a single screenshot. More than 1 = consecutive frames. */
   count: number
@@ -34,7 +34,7 @@ export interface RiverManifest {
   shots: ShotDef[]
   /**
    * Globs (relative to the root) that a change plan can name for the implementer.
-   * Default: ["data/**", "tools/shots/**", "stories/**"].
+   * Default: ["data/**", "tools/shots/**"].
    */
   editable?: string[]
 }

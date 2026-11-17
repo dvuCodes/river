@@ -19,9 +19,13 @@ Early development. See `examples/park-walk` for a small story.
 
 ```sh
 pnpm install
+# if apps/desktop cannot find Electron, fetch its binary once:
+#   node node_modules/.pnpm/electron@*/node_modules/electron/install.js
 pnpm typecheck
 pnpm test
 pnpm river lint examples/park-walk
+pnpm --filter @river/desktop build
+pnpm --filter @river/desktop exec electron .   # RIVER_PROJECT=<game repo> to open one
 ```
 
 ## Licence

@@ -1,0 +1,47 @@
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron"
+import type { RiverApi } from "../shared/api"
+
+const invoke = <T>(channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args) as Promise<T>
+
+function listen<T>(channel: string, cb: (payload: T) => void): () => void {
+  const handler = (_e: IpcRendererEvent, payload: T) => cb(payload)
+  ipcRenderer.on(channel, handler)
+  return () => {
+    ipcRenderer.removeListener(channel, handler)
+  }
+}
+
+const api: RiverApi = {
+  getProject: () => invoke("project:get"),
+  pickProject: () => invoke("project:pick"),
+  loadStory: (rel) => invoke("story:load", rel),
+  savePassage: (rel, id, raw) => invoke("story:savePassage", rel, id, raw),
+  renamePassage: (rel, id, name) => invoke("story:rename", rel, id, name),
+  saveLayout: (rel, positions) => invoke("story:saveLayout", rel, positions),
+  paths: (rel) => invoke("story:paths", rel),
+  openState: (rel, state) => invoke("story:openState", rel, state),
+  playStart: (rel, from) => invoke("play:start", rel, from),
+  playChoose: (id, index) => invoke("play:choose", id, index),
+  playUndo: (id) => invoke("play:undo", id),
+  playSetVar: (id, name, value) => invoke("play:setVar", id, name, value),
+  frames: () => invoke("frames:get"),
+  capture: (shotId) => invoke("frames:capture", shotId),
+  addThread: (target, text) => invoke("review:add", target, text),
+  reply: (threadId, text) => invoke("review:reply", threadId, text),
+  setThreadStatus: (threadId, status) => invoke("review:status", threadId, status),
+  setPlanStatus: (planId, status) => invoke("plan:status", planId, status),
+  agentStatus: () => invoke("agent:status"),
+  agentStart: (req) => invoke("agent:start", req),
+  agentRespond: (requestId, decision) => invoke("agent:respond", requestId, decision),
+  agentAbort: (turnId) => invoke("agent:abort", turnId),
+  restoreCheckpoint: (ref) => invoke("agent:restore", ref),
+  setApiKey: (key) => invoke("settings:setKey", key),
+  clearApiKey: () => invoke("settings:clearKey"),
+  onAgentEvent: (cb) => listen("agent:event", cb),
+  onAgentPermission: (cb) => listen("agent:permission", cb),
+  onFsChange: (cb) => listen("fs:change", cb),
+  onNavigate: (cb) => listen("smoke:navigate", cb),
+  smokeReady: (view) => ipcRenderer.send("smoke:ready", view),
+}
+
+contextBridge.exposeInMainWorld("river", api)
