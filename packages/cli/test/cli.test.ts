@@ -211,6 +211,20 @@ describe("project folder and paths", () => {
     expect((await cli(["frames", "list", dir])).out).toBe("no shots in river.json\n")
   })
 
+  it("capture runs nothing when an argument is a folder without river.json or a shot is unknown", async () => {
+    const dir = storyProject()
+    const manifest = JSON.parse(readFileSync(join(dir, "river.json"), "utf8"))
+    manifest.engine = "godot"
+    manifest.adapter = { godot: { bin: join(dir, "no-godot-here") } }
+    manifest.shots = [{ id: "gate_open", scene: "res://gate.tscn", count: 1 }]
+    writeFileSync(join(dir, "river.json"), JSON.stringify(manifest))
+    const folder = await cliIn(dir, ["capture", "gate_open", "stories"])
+    expect([folder.code, folder.err]).toEqual([1, `river capture: no river.json in ${join(dir, "stories")} (${dir} has one). River wants the game's root folder, the one that holds river.json\n`])
+    const unknown = await cli(["capture", dir, "gate_open", "nope"])
+    expect([unknown.code, unknown.err]).toEqual([1, 'river capture: no shot "nope" in the manifest (shots: gate_open); nothing was captured\n'])
+    expect(existsSync(join(dir, ".river"))).toBe(false)
+  })
+
   it("captures prune needs --keep and reports what it deleted", async () => {
     const dir = storyProject()
     expect((await cli(["captures", "prune", dir])).code).toBe(2)

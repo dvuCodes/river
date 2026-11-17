@@ -101,7 +101,7 @@ A shot is one deterministic capture: a scene, a setup script that puts it in a k
 
 | Key | Meaning |
 | --- | --- |
-| `id` | Letters, digits, `_` and `-`. Names the capture folder and the frame cards. |
+| `id` | Letters, digits, `_`, `-` and `.`, starting with a letter or digit. Names the capture folder and the frame cards. |
 | `scene` | The scene to load, `res://...`. |
 | `setup` | A script that puts the scene in the state you want to see. Required when `count` is more than 1. |
 | `count` | 1 for a still; more for consecutive frames. |

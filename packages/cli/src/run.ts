@@ -1,7 +1,7 @@
-import { existsSync, statSync } from "node:fs"
+import { existsSync } from "node:fs"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
-import { basename, join, resolve } from "node:path"
+import { basename, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { createGodotAdapter } from "@river/adapter-godot"
 import {
@@ -117,6 +117,7 @@ async function storyFiles(project: Project, story: string | undefined): Promise<
   const want = story.replace(/\\/g, "/")
   const match = all.find((s) => s === want) ?? all.find((s) => basename(s) === want || basename(s).replace(/\.(twee|tw)$/i, "") === want)
   if (match) return [match]
+  if (existsSync(safePath(project, want))) return [want]
   throw new Error(`no story "${story}". --story takes a path from the project root, a file name or a name without .twee; stories here: ${all.join(", ") || `(none under ${project.manifest.stories}/)`}`)
 }
 
@@ -124,10 +125,8 @@ function formatDiag(d: Diagnostic): string {
   return `${d.severity.padEnd(6)} ${d.message}`
 }
 
-const isProjectDir = (cwd: string, p: string) => {
-  const dir = resolve(cwd, p)
-  return existsSync(join(dir, "river.json")) && statSync(dir).isDirectory()
-}
+/** A capture argument that names a folder, not a shot: it has a path separator, or it exists. */
+const isPathArg = (cwd: string, a: string) => /[\\/]/.test(a) || a === "." || a === ".." || existsSync(resolve(cwd, a))
 
 /** Run the CLI. Resolves to the process exit code. */
 export async function run(argv: string[], io: RunIo = {}): Promise<number> {
@@ -198,8 +197,8 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
   const board = values.board ?? DEFAULT_BOARD
 
   const capture = (args: string[]) => {
-    // Accept the folder before or after the shot ids: a positional that names a folder with river.json is the folder.
-    const dirs = values.root === undefined ? args.filter((a) => isProjectDir(cwd, a)) : []
+    // The folder can come before or after the shot ids. One that is not a project fails in loadProject, before anything runs.
+    const dirs = values.root === undefined ? args.filter((a) => isPathArg(cwd, a)) : []
     if (dirs.length > 1) throw new UsageError(`more than one project folder: ${dirs.join(", ")}`)
     const shots = args.filter((a) => a !== dirs[0])
     if (values.all && shots.length > 0) throw new UsageError(`--all captures every shot; drop "${shots[0]}" or --all`)
@@ -298,9 +297,15 @@ async function cmdShots(dir: string, out: Out): Promise<number> {
 async function cmdCapture(dir: string, shotIds: string[] | undefined, out: Out, err: Out): Promise<number> {
   const project = await loadProject(dir)
   const adapter = adapterFor(project)
-  const ids = shotIds ?? project.manifest.shots.map((s) => s.id)
+  const known = project.manifest.shots.map((s) => s.id)
+  const ids = shotIds ?? known
   if (ids.length === 0) {
     err.line("river capture: no shots in river.json")
+    return 1
+  }
+  const unknown = ids.filter((id) => !known.includes(id))
+  if (unknown.length > 0) {
+    err.line(`river capture: no shot ${unknown.map((id) => JSON.stringify(id)).join(", ")} in the manifest (shots: ${known.join(", ") || "none yet"}); nothing was captured`)
     return 1
   }
   let failed = 0
