@@ -137,6 +137,8 @@ export interface AgentStatus {
   backendChosen: boolean
   model: AgentModel
   claudePath?: string
+  /** After Godot renders a job's scripts, one more short turn looks at the pictures and may rewrite the note and captions. */
+  selfCheck: boolean
   /** Only installed / version / loggedIn / authMethod / subscriptionType. Null while unknown. */
   claudeCode: ClaudeCodeStatus | null
 }
@@ -146,6 +148,7 @@ export interface AgentPrefsUpdate {
   model?: AgentModel
   /** Empty string clears it (use PATH). */
   claudePath?: string
+  selfCheck?: boolean
 }
 
 export interface AgentStartRequest {
@@ -191,6 +194,10 @@ export type CardView =
 export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error" | "scripts"> & {
   /** The user replied on the mark since this answer, or the job failed: it can be revised. */
   revisable: boolean
+  /** The agent is looking at the renders this app approved (the job is still "rendering"); jobStopLook ends it. */
+  looking?: boolean
+  /** The job has a runner log, .river/logs/<job>.log (jobs started outside the app by concept_request). */
+  log?: boolean
 }
 
 /** A job and, while it waits for approval, the exact bytes of every script it wants to run. */
@@ -286,11 +293,17 @@ export interface RiverApi {
   boardDeleteEdge(name: string, edgeId: string): Promise<void>
   boardSaveCard(name: string, card: NewCard): Promise<CardDTO>
   boardDeleteCard(name: string, cardId: string): Promise<void>
-  /** Saves the mark; returns it with the board's open mark count. */
+  /**
+   * Saves a mark under its lock. A new mark is written whole; for one already on disk only its shape, path, breaks and
+   * anchors come from `mark`, and its thread, status, job and claim stay as an agent may have just written them.
+   * Returns the mark as saved, with the board's open mark count.
+   */
   boardSaveMark(name: string, mark: NewMark): Promise<{ mark: Mark; openMarks: number }>
   boardDeleteMark(name: string, markId: string): Promise<number>
   /** Add your message to a mark's thread (core replyToMark); returns it with the open mark count. */
   boardReply(name: string, markId: string, text: string): Promise<{ mark: Mark; openMarks: number }>
+  /** Close a mark that follows no job: dismissed (`text` says why) or accepted as resolved. `text` joins the thread when not empty. */
+  boardCloseMark(name: string, markId: string, status: "dismissed" | "accepted", text: string): Promise<{ mark: Mark; openMarks: number }>
   boardOpenCount(name: string): Promise<number>
   /** Rename a board's folder (and the jobs that point at it). Refused while one of its jobs is still working. */
   boardRename(from: string, to: string): Promise<void>
@@ -318,6 +331,12 @@ export interface RiverApi {
   jobDismiss(jobId: string, reason?: string): Promise<void>
   /** A new job revising this answer after the user's replies on the mark. Runs in the background like jobStart. */
   jobRevise(jobId: string): Promise<void>
+  /** End the agent's look at the renders; the job is answered with its note as first written. */
+  jobStopLook(jobId: string): Promise<void>
+  /** The runner's output for a job started outside the app (.river/logs/<job>.log); null when there is none. */
+  jobLog(jobId: string): Promise<string | null>
+  /** River's drawing kit (concepts/kit.gd as River writes it), from the installed Godot adapter. */
+  jobKit(): Promise<string>
   // agent
   agentStatus(): Promise<AgentStatus>
   agentStart(req: AgentStartRequest): Promise<string>

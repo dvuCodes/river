@@ -7,6 +7,7 @@ import {
   type Edge,
   type Job,
   type Mark,
+  type MarkStatusChange,
   type Project,
   type Story,
   IMAGE_CARD_W,
@@ -37,6 +38,7 @@ import {
   saveEdge,
   saveJob,
   saveMark,
+  withMarkLock,
 } from "@river/core"
 import type { BoardCard, BoardDTO, CardDTO, CardView, ConceptJob, FrameStrip, ImageSize, NewCard, NewEdge, NewMark, StagedImage } from "../shared/api"
 import { loadAgent } from "./agent"
@@ -70,6 +72,22 @@ async function imageAt(p: Project, abs: string): Promise<{ url?: string; size?: 
   }
 }
 
+/** Jobs whose renders this app approved and whose agent is looking at them now; aborting ends the look. */
+export const lookingJobs = new Map<string, AbortController>()
+
+/** Job ids as River and concept_request make them; a log path is built from one. */
+const JOB_ID = /^j_[a-z0-9]{1,32}$/
+
+export function jobLogFile(root: string, jobId: string): string {
+  if (!JOB_ID.test(jobId)) throw new Error(`Not a job id: ${JSON.stringify(jobId)}`)
+  return join(root, ".river", "logs", `${jobId}.log`)
+}
+
+const exists = (abs: string) => stat(abs).then(
+  () => true,
+  () => false,
+)
+
 /** Card files are written by agents too, and the variant becomes part of a file name. */
 const VARIANT = /^[a-e]$/
 
@@ -90,7 +108,9 @@ async function jobView(p: Project, jobId: string): Promise<{ job: ConceptJob } |
   try {
     const job = await loadJob(p.root, jobId)
     const { id, status, summary, error, scripts } = job
-    return { job: { id, status, summary, error, scripts, revisable: await jobRevisable(p.root, job) } }
+    const looking = status === "rendering" && lookingJobs.has(id)
+    const log = JOB_ID.test(id) && (await exists(jobLogFile(p.root, id)))
+    return { job: { id, status, summary, error, scripts, revisable: await jobRevisable(p.root, job), ...(looking ? { looking } : {}), ...(log ? { log } : {}) } }
   } catch (e) {
     return { missing: e instanceof Error ? e.message : String(e) }
   }
@@ -248,6 +268,24 @@ async function loadEdge(p: Project, board: string, id: string): Promise<Edge | n
   }
 }
 
+/**
+ * A mark as the canvas saves it: whole when it is new, else only where it is drawn. Its thread, status, job and claim
+ * are an agent's to change too, so they are read from disk under the mark's lock, never taken from the canvas's copy.
+ */
+async function writeMark(p: Project, board: string, mark: NewMark): Promise<Mark> {
+  const id = mark.id ?? newBoardId("m_")
+  return withMarkLock(p.root, board, id, async () => {
+    const cur = await loadMark(p.root, board, id)
+    let next: Mark
+    if (cur) {
+      const { breaks: _breaks, ...rest } = cur
+      next = { ...rest, shape: mark.shape, path: mark.path, anchors: mark.anchors, ...(mark.breaks ? { breaks: mark.breaks } : {}) }
+    } else next = { ...mark, id, createdAt: mark.createdAt ?? new Date().toISOString(), status: mark.status ?? "open" }
+    noteOwnWrite(markFile(p.root, board, id), boardJsonText(next))
+    return saveMark(p.root, board, next)
+  })
+}
+
 async function countOpen(p: Project, board: string): Promise<number> {
   return openMarks(await loadBoard(p.root, board)).length
 }
@@ -301,9 +339,7 @@ export function boardHandlers(need: () => Project, watch: { add(dir: string): vo
     "board:deleteCard": (name: string, id: string) => deleteCard(need().root, name, id),
     "board:saveMark": async (name: string, mark: NewMark): Promise<{ mark: Mark; openMarks: number }> => {
       const p = need()
-      const full: Mark = { ...mark, id: mark.id ?? newBoardId("m_"), createdAt: mark.createdAt ?? new Date().toISOString(), status: mark.status ?? "open" }
-      noteOwnWrite(markFile(p.root, name, full.id), boardJsonText(full))
-      const saved = await saveMark(p.root, name, full)
+      const saved = await writeMark(p, name, mark)
       for (const cb of boardWritten) cb({ kind: "mark", value: saved })
       return { mark: saved, openMarks: await countOpen(p, name) }
     },
@@ -315,6 +351,13 @@ export function boardHandlers(need: () => Project, watch: { add(dir: string): vo
       const p = need()
       if (typeof text !== "string" || !text.trim()) throw new Error("Write a reply first.")
       const mark = await replyToMark(p.root, name, markId, ME, text.trim())
+      for (const cb of boardWritten) cb({ kind: "mark", value: mark })
+      return { mark, openMarks: await countOpen(p, name) }
+    },
+    "board:closeMark": async (name: string, markId: string, status: Extract<MarkStatusChange, "dismissed" | "accepted">, text: string): Promise<{ mark: Mark; openMarks: number }> => {
+      const p = need()
+      if (status !== "dismissed" && status !== "accepted") throw new Error(`A mark is closed as dismissed or accepted, not ${String(status)}.`)
+      const mark = await replyToMark(p.root, name, markId, ME, typeof text === "string" ? text.trim() : "", status)
       for (const cb of boardWritten) cb({ kind: "mark", value: mark })
       return { mark, openMarks: await countOpen(p, name) }
     },

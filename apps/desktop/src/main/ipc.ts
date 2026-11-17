@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto"
-import { mkdir } from "node:fs/promises"
+import { mkdir, readFile } from "node:fs/promises"
 import { userInfo } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
-import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobAgentSettings, JobDeps, PermissionDecision } from "@river/agent"
-import { createGodotAdapter } from "@river/adapter-godot"
+import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobAgentSettings, JobDeps, PermissionDecision, RunTurn } from "@river/agent"
+import { createGodotAdapter, kitFileText } from "@river/adapter-godot"
 import {
   type Capture,
   type ChangePlan,
@@ -64,7 +64,7 @@ import type {
 import { type JobApi, loadAgent } from "./agent"
 import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
-import { boardHandlers, closeRowGap, jobRevisable } from "./board"
+import { boardHandlers, closeRowGap, jobLogFile, jobRevisable, lookingJobs } from "./board"
 import { type ProjectWatch, noteOwnWrite, watchProject } from "./watch"
 
 let project: Project | null = null
@@ -248,6 +248,7 @@ async function agentStatus(refreshClaude = false): Promise<AgentStatus> {
     backendChosen: prefs.backend !== undefined,
     model: prefs.model,
     ...(prefs.claudePath ? { claudePath: prefs.claudePath } : {}),
+    selfCheck: prefs.selfCheck,
     claudeCode,
   }
 }
@@ -268,6 +269,25 @@ async function jobApi(): Promise<JobApi> {
   if (!agent.jobs) throw new Error(agent.jobsReason ?? "Concept jobs are unavailable.")
   return agent.jobs
 }
+
+/** The look at a job's renders runs as the job's own turns do: the user's model, backend, key or claude path. */
+async function lookSettings(): Promise<false | JobAgentSettings> {
+  if (!settings.getAgentPrefs().selfCheck) return false
+  try {
+    const status = await agentStatus()
+    return { model: status.model, ...(await turnAuth(status)) }
+  } catch (err) {
+    // Without a way to run the look, the renders are still worth showing: answer with the note as written.
+    console.warn("river: skipping the look at the renders:", err instanceof Error ? err.message : String(err))
+    return false
+  }
+}
+
+/** A short turn, as core's own look at the renders runs it. */
+const LOOK_LIMITS = { maxTurns: 6, effort: "low" } as const
+
+/** Tell the canvas a job's cards changed although its file did not (the look started or ended). */
+const jobTouched = (jobId: string) => send("fs:change", [{ kind: "job", rel: `.river/jobs/${jobId}.json` }])
 
 /** `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn). */
 export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: JobDeps } = {}): void {
@@ -463,9 +483,46 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     // The committed bytes, hashed as read: the only bytes approveJobScripts will run.
     return { job, scripts: await (await jobApi()).readJobScripts(p.root, jobId), revisable }
   })
+  /**
+   * Approving renders the scripts and then lets the agent look at the renders. During approve only that look runs an
+   * agent turn, so the turn is wrapped here: the canvas shows it, and jobStopLook aborts it. Returns once the job has
+   * started rendering; a refusal (changed bytes) comes before that and is thrown here.
+   */
   handle("job:approve", async (jobId: string, shas: Record<string, string>) => {
-    await (await jobApi()).approveJobScripts(need().root, jobId, shas, opts.jobDeps)
+    const p = need()
+    const jobs = await jobApi()
+    const agent = await loadAgent()
+    const selfCheck = await lookSettings()
+    const base: RunTurn | undefined = opts.jobDeps?.runTurn ?? (agent.start ? (req, h) => agent.start!(req, h, LOOK_LIMITS) : undefined)
+    const stop = new AbortController()
+    const runTurn: RunTurn | undefined =
+      base &&
+      (async (req, h) => {
+        lookingJobs.set(jobId, stop)
+        jobTouched(jobId)
+        try {
+          await base(req, { ...h, signal: stop.signal })
+        } finally {
+          lookingJobs.delete(jobId)
+          jobTouched(jobId)
+        }
+      })
+    const run = jobs.approveJobScripts(p.root, jobId, shas, { ...opts.jobDeps, selfCheck, ...(runTurn ? { runTurn } : {}) })
+    run.catch((err: unknown) => console.warn("river: approving the scripts failed", err))
+    await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
   })
+  handle("job:stopLook", (jobId: string) => {
+    lookingJobs.get(jobId)?.abort()
+  })
+  handle("job:log", async (jobId: string): Promise<string | null> => {
+    try {
+      return await readFile(jobLogFile(need().root, jobId), "utf8")
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null
+      throw err
+    }
+  })
+  handle("job:kit", () => kitFileText())
   handle("job:accept", async (jobId: string, variants?: string[]) => {
     const p = need()
     const { board } = await loadJob(p.root, jobId)

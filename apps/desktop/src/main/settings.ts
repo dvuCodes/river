@@ -16,6 +16,8 @@ interface Settings {
   /** The `claude` executable, when it is not on PATH. */
   claudePath?: string
   canvasTheme?: CanvasTheme
+  /** False turns off the look at a job's renders after they are drawn. On unless set to false. */
+  selfCheck?: boolean
   /** Project root -> the board last open in it. */
   lastBoards?: Record<string, string>
 }
@@ -30,6 +32,7 @@ export interface AgentPrefs {
   backend?: AgentBackend
   model: AgentModel
   claudePath?: string
+  selfCheck: boolean
 }
 
 export function getAgentPrefs(): AgentPrefs {
@@ -38,10 +41,11 @@ export function getAgentPrefs(): AgentPrefs {
     ...(s.backend && BACKENDS.includes(s.backend) ? { backend: s.backend } : {}),
     model: s.model && MODELS.includes(s.model) ? s.model : "claude-opus-5-5",
     ...(s.claudePath ? { claudePath: s.claudePath } : {}),
+    selfCheck: s.selfCheck !== false,
   }
 }
 
-export function setAgentPrefs(p: { backend?: AgentBackend; model?: AgentModel; claudePath?: string }): void {
+export function setAgentPrefs(p: { backend?: AgentBackend; model?: AgentModel; claudePath?: string; selfCheck?: boolean }): void {
   const s = read()
   if (p.backend !== undefined) {
     if (!BACKENDS.includes(p.backend)) throw new Error(`Unknown backend ${String(p.backend)}`)
@@ -55,6 +59,10 @@ export function setAgentPrefs(p: { backend?: AgentBackend; model?: AgentModel; c
     const t = p.claudePath.trim()
     if (t) s.claudePath = t
     else delete s.claudePath
+  }
+  if (p.selfCheck !== undefined) {
+    if (typeof p.selfCheck !== "boolean") throw new Error("selfCheck is true or false")
+    s.selfCheck = p.selfCheck
   }
   write(s)
 }

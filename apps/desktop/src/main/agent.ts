@@ -1,7 +1,8 @@
 import type * as Agent from "@river/agent"
 import type { AgentTurnHandlers, AgentTurnRequest, ClaudeCodeStatus } from "@river/agent"
 
-type StartAgentTurn = (req: AgentTurnRequest, handlers: AgentTurnHandlers) => unknown
+/** The third argument limits a short turn, such as the look at a job's renders. */
+type StartAgentTurn = (req: AgentTurnRequest, handlers: AgentTurnHandlers, limits?: { maxTurns?: number; effort?: "low" | "medium" | "high" }) => Promise<void>
 type GetClaudeCodeStatus = (claudePath?: string) => Promise<ClaudeCodeStatus>
 type OpenClaudeSignIn = (claudePath?: string) => Promise<void>
 

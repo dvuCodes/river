@@ -2,7 +2,7 @@ import { useReactFlow, useViewport, useViewportStore } from "@xyflow/react"
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react"
 import type { Mark, MarkStatus } from "@river/core"
 import type { CanvasTheme, JobDTO } from "../../../shared/api"
-import { cx, errorText, shortTime } from "../util"
+import { cx, errorText, liveClaim, shortTime } from "../util"
 import type { Pt } from "./geometry"
 import { ME } from "./nodes"
 
@@ -465,11 +465,14 @@ export function RefForm(props: { fileName: string; licence: string; left: number
 
 // ---------- concept jobs ----------
 
+const loadKit = () => window.river.jobKit()
+
 /** Every script a job wants to run, each with the hash of exactly the bytes shown; Run all approves those hashes. */
 export function ReviewDialog(props: { jobId: string; onClose(): void }) {
   const [dto, setDto] = useState<JobDTO | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [kit, setKit] = useState(false)
   useEffect(() => {
     window.river.jobGet(props.jobId).then(setDto, (e: unknown) => setErr(errorText(e)))
   }, [props.jobId])
@@ -489,6 +492,12 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
           <span className="mono sec-hint">{props.jobId}</span>
         </header>
         <p className="concept-warn">Running a script executes its code on this computer. Read each one before you run them.</p>
+        <p className="review-kit">
+          <code>Kit.*</code> calls are River's own drawing helpers, not the agent's code.{" "}
+          <button type="button" className="link-btn" data-action="view-kit" onClick={() => setKit(true)}>
+            Read the Kit
+          </button>
+        </p>
         <div className="review-list nowheel">
           {scripts.map((s) => (
             <section key={s.file} className="review-script" data-variant={s.variant ?? ""}>
@@ -516,6 +525,49 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
             {scripts.length > 1 ? `Run all ${scripts.length}` : "Run script"}
           </button>
         </footer>
+      </div>
+      {kit && <TextPanel title="River's drawing kit" sub="concepts/kit.gd, as River writes it on Accept" load={loadKit} onClose={() => setKit(false)} />}
+    </div>
+  )
+}
+
+/** A file to read, not edit: a job's log, the Kit. */
+export function TextPanel(props: { title: string; sub: string; load(): Promise<string | null>; onClose(): void }) {
+  const [text, setText] = useState<string | null | undefined>(undefined)
+  const [err, setErr] = useState<string | null>(null)
+  const box = useRef<HTMLDivElement>(null)
+  const { load } = props
+  useEffect(() => {
+    load().then(setText, (e: unknown) => setErr(errorText(e)))
+    box.current?.focus()
+  }, [load])
+  return (
+    <div className="canvas-modal" onPointerDown={(e) => (e.stopPropagation(), e.target === e.currentTarget && props.onClose())}>
+      <div
+        ref={box}
+        className="text-panel"
+        role="dialog"
+        aria-label={props.title}
+        tabIndex={-1}
+        onKeyDown={(e) => {
+          if (e.key !== "Escape") return
+          e.preventDefault()
+          e.stopPropagation()
+          props.onClose()
+        }}
+      >
+        <header className="dialog-head">
+          <h2>{props.title}</h2>
+          <span className="mono sec-hint">{props.sub}</span>
+          <span className="tb-spacer" />
+          <button type="button" className="icon-btn" data-action="close-text" onClick={props.onClose} aria-label="Close">
+            ×
+          </button>
+        </header>
+        {err && <p className="err-note">{err}</p>}
+        {text === undefined && !err && <p className="sec-hint">Reading…</p>}
+        {text === null && <p className="sec-hint">There is no such file.</p>}
+        {typeof text === "string" && <pre className="text-panel-body nowheel">{text || "(empty)"}</pre>}
       </div>
     </div>
   )
@@ -614,6 +666,8 @@ export function MarkPanel(props: {
   onAsk(): Promise<void>
   onReply(text: string): Promise<void>
   onRevise(jobId: string): Promise<void>
+  /** Close a mark that follows no job: dismissed (the text says why) or accepted as resolved. */
+  onSettle(status: "dismissed" | "accepted", text: string): Promise<void>
   onShowAnswer(): void
   onDelete(): void
   onClose(): void
@@ -623,6 +677,19 @@ export function MarkPanel(props: {
   const [reply, setReply] = useState("")
   const [sending, setSending] = useState(false)
   const [revisable, setRevisable] = useState(false)
+  const [dismissing, setDismissing] = useState(false)
+  const [why, setWhy] = useState("")
+  const [settling, setSettling] = useState(false)
+  const settle = (status: "dismissed" | "accepted", text: string) => {
+    setSettling(true)
+    props
+      .onSettle(status, text)
+      .then(() => (setDismissing(false), setWhy("")))
+      .finally(() => setSettling(false))
+  }
+  const claim = liveClaim(m)
+  // A mark an agent answered through river-mcp, or one nobody took yet, is closed here; a job's mark follows its job.
+  const closable = !m.jobId && (m.status === "open" || m.status === "working" || m.status === "answered")
   // The thread changes when you reply, so whether the answer can be revised is asked again.
   useEffect(() => {
     let live = true
@@ -652,7 +719,11 @@ export function MarkPanel(props: {
           ×
         </button>
       </header>
-      {m.claimedBy && <p className="mark-claim">✦ claimed by {m.claimedBy}</p>}
+      {claim && (
+        <p className="mark-claim" data-claim={claim}>
+          ✦ {claim} is working on this
+        </p>
+      )}
       {m.anchors.length > 0 && (
         <p className="mark-panel-anchors">
           On{" "}
@@ -690,7 +761,11 @@ export function MarkPanel(props: {
           {asking ? "Starting…" : "✦ Ask concept artist"}
         </button>
       )}
-      {m.status === "working" && <p className="mark-working">✦ {m.claimedBy ? `${m.claimedBy} is on it.` : "The concept artist is on it. Its card beside the mark shows each step."}</p>}
+      {m.status === "working" && !claim && (
+        <p className="mark-working">
+          {m.jobId ? "✦ The concept artist is on it. Its card beside the mark shows each step." : `✦ ${m.claimedBy ?? "An agent"} took this ${m.claimedAt ? shortTime(m.claimedAt) : ""} and has gone quiet; another agent may take it over.`}
+        </p>
+      )}
       <form
         className="mark-reply"
         onSubmit={(e) => {
@@ -724,6 +799,35 @@ export function MarkPanel(props: {
           Show the answer{props.answers > 1 ? ` (${props.answers} cards)` : ""}
         </button>
       )}
+      {closable &&
+        (dismissing ? (
+          <form
+            className="mark-dismiss"
+            onSubmit={(e) => {
+              e.preventDefault()
+              settle("dismissed", why)
+            }}
+          >
+            <input autoFocus value={why} placeholder="Why not? (optional)" aria-label="Why dismiss this mark" onChange={(e) => setWhy(e.target.value)} />
+            <div className="mark-status-actions">
+              <button type="button" className="btn" onClick={() => setDismissing(false)}>
+                Keep it
+              </button>
+              <button className="btn btn-danger" data-action="dismiss-mark-confirm" disabled={settling}>
+                Dismiss
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="mark-status-actions">
+            <button className="btn" data-action="resolve-mark" disabled={settling} title="Done: close the mark as accepted" onClick={() => settle("accepted", "")}>
+              Mark resolved
+            </button>
+            <button className="btn" data-action="dismiss-mark" disabled={settling} title="Close the mark without doing it" onClick={() => setDismissing(true)}>
+              Dismiss mark
+            </button>
+          </div>
+        ))}
       <footer className="mark-panel-foot">
         <span className="mono sec-hint">{m.id}</span>
         <span className="tb-spacer" />

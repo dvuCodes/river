@@ -165,6 +165,7 @@ export function App() {
         backendChosen: false,
         model: "claude-opus-5-5",
         claudeCode: null,
+        selfCheck: true,
       }),
     )
     return window.river.onNavigate((v) => setView(v))

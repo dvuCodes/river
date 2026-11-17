@@ -52,3 +52,13 @@ export function shortTime(iso: string): string {
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
 }
+
+/** Core's CLAIM_STALE_MS: a claim nobody refreshed for this long is abandoned (the renderer imports no core runtime). */
+const CLAIM_STALE_MS = 30 * 60_000
+
+/** The agent working a mark on its own (core liveClaim): it claimed the mark, follows no River job, and its claim is fresh. */
+export function liveClaim(m: { status: string; claimedBy?: string; claimedAt?: string; jobId?: string }, now = Date.now()): string | undefined {
+  if (m.status !== "working" || !m.claimedBy || m.jobId) return undefined
+  const at = m.claimedAt ? Date.parse(m.claimedAt) : NaN
+  return now - at < CLAIM_STALE_MS ? m.claimedBy : undefined
+}

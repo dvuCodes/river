@@ -2,7 +2,7 @@ import { Handle, type Node, type NodeProps, NodeResizeControl, Position, ResizeC
 import { type ReactNode, createContext, memo, useContext, useEffect, useRef, useState } from "react"
 import type { Mark } from "@river/core"
 import type { BoardCard, CardDTO, ConceptJob, ImageSize } from "../../../shared/api"
-import { cx } from "../util"
+import { cx, liveClaim } from "../util"
 import { type Pt, arrowPath, bounds, markBox, pointsOf, smoothPath, strokesOf } from "./geometry"
 
 export const ME = "you"
@@ -23,6 +23,8 @@ export interface CanvasActions {
   review(jobId: string): void
   /** Ask why not, then dismiss a job's whole answer. */
   dismissJob(jobId: string): void
+  /** Show the runner's log of a job started outside the app. */
+  viewLog(jobId: string): void
 }
 export const Actions = createContext<CanvasActions | null>(null)
 
@@ -60,9 +62,10 @@ function CardImage({ url, size, alt }: { url: string | undefined; size: ImageSiz
   )
 }
 
-function NoteBody({ id, text }: { id: string; text: string }) {
+/** `fresh`: a note of yours just placed, empty; it opens ready for typing. An agent's empty note does not take focus. */
+function NoteBody({ id, text, fresh }: { id: string; text: string; fresh: boolean }) {
   const actions = useContext(Actions)!
-  const [editing, setEditing] = useState(text === "")
+  const [editing, setEditing] = useState(fresh)
   const [draft, setDraft] = useState(text)
   const area = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
@@ -165,7 +168,7 @@ function JobBar({ job, cardId }: { job: ConceptJob; cardId: string }) {
       line = <p className="job-line">✦ {scripts.length > 1 ? `${scripts.length} scripts are` : "A script is"} waiting for you to review</p>
       break
     case "rendering":
-      line = <p className="job-line is-working">Running the approved scripts in Godot…</p>
+      line = job.looking ? <p className="job-line is-working is-looking">✦ looking at the renders…</p> : <p className="job-line is-working">Running the approved scripts in Godot…</p>
       break
     case "answered":
       line = failed > 0 ? <p className="job-line">{rendered} rendered, {failed} failed to render</p> : null
@@ -185,6 +188,16 @@ function JobBar({ job, cardId }: { job: ConceptJob; cardId: string }) {
         {job.status === "approval" && (
           <button className="btn btn-primary nodrag" data-action="review" onClick={() => actions.review(job.id)}>
             Review {scripts.length > 1 ? `${scripts.length} scripts` : "script"}
+          </button>
+        )}
+        {job.looking && (
+          <button className="btn nodrag" data-action="stop-look" disabled={busy} title="Answer now, with the note as the agent first wrote it" onClick={() => act(() => window.river.jobStopLook(job.id))}>
+            Stop looking
+          </button>
+        )}
+        {job.status === "failed" && job.log && (
+          <button className="btn nodrag" data-action="view-log" onClick={() => actions.viewLog(job.id)}>
+            View log
           </button>
         )}
         {job.status === "answered" && rendered > 0 && (
@@ -243,7 +256,8 @@ function ConceptBody({ card, view, frame }: { card: BoardCard; view: ConceptView
         body = placeholder("Waiting for you to review the script", false)
         break
       case "rendering":
-        body = script?.render?.ok ? frame(image) : placeholder("Rendering in Godot…")
+        // The job file says which options rendered only once it is answered; while the agent looks, the renders are on disk.
+        body = script?.render?.ok || (job.looking && view.url) ? frame(image) : job.looking ? placeholder("No picture", false) : placeholder("Rendering in Godot…")
         break
       case "failed":
         body = placeholder("No render", false)
@@ -385,7 +399,7 @@ export const CardView = memo(function CardView({ id, data, selected }: NodeProps
       body = (
         <>
           {agent && <Star by={card.madeBy} />}
-          <NoteBody id={id} text={card.text ?? ""} />
+          <NoteBody id={id} text={card.text ?? ""} fresh={!card.text && !agent && !pending} />
           {view.job && <JobBar job={view.job} cardId={id} />}
           {pending && <span className="cnode-pending-tag">pending</span>}
         </>
@@ -516,12 +530,18 @@ export const MarkView = memo(function MarkView({ data, selected }: NodeProps<Mar
   const m = data.mark
   const b = markBox(m.shape, m.path)
   const [dx, dy] = statusDotAt(m)
+  const claim = liveClaim(m)
   return (
     <>
       <Anchors />
-      <svg className="mark-svg" width={b.w} height={b.h} viewBox={`${b.x} ${b.y} ${b.w} ${b.h}`} data-mark={m.id}>
+      <svg className={cx("mark-svg", m.status === "dismissed" && "is-dismissed")} width={b.w} height={b.h} viewBox={`${b.x} ${b.y} ${b.w} ${b.h}`} data-mark={m.id}>
         <MarkShapeView m={m} selected={selected} hit />
         <circle className={cx("mark-dot", `ms-${m.status}`)} cx={dx} cy={dy} r={4} />
+        {claim && (
+          <text className="mark-claim-badge" x={dx + 8} y={dy + 3.5}>
+            ✦ {claim}
+          </text>
+        )}
       </svg>
     </>
   )

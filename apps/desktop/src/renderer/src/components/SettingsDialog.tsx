@@ -133,6 +133,14 @@ export function SettingsDialog(props: { status: AgentStatus | null; onStatus(s: 
             {status && !status.encryptionAvailable && <p className="err-note">Secure storage is not available on this system, so a key cannot be saved.</p>}
           </>
         )}
+        <label className="radio-row self-check-row">
+          <input type="checkbox" data-setting="self-check" checked={status?.selfCheck ?? true} onChange={(e) => void act(() => window.river.setAgentPrefs({ selfCheck: e.target.checked }))} />
+          <span>Look at the renders before answering</span>
+        </label>
+        <p className="dialog-note">
+          After Godot draws a concept, the agent takes one more short turn to look at the pictures and fix its note and captions. It uses the
+          backend and model above. Turn it off to answer as soon as the renders are done.
+        </p>
         {err && <p className="err-note">{err}</p>}
         {note && <p className="ok-note">{note}</p>}
         <footer className="dialog-foot">

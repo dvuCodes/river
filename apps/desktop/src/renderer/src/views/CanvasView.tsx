@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import "@fontsource/caveat/600.css"
 import type { Card, Edge, Mark, MarkShape } from "@river/core"
 import type { BoardDTO, CanvasTheme, CardDTO, StagedImage } from "../../../shared/api"
-import { AskBox, BoardPill, DismissDialog, type JumpItem, Lightbox, type LightboxItem, MarkPanel, QuickJump, RefForm, ReviewDialog, SelectionBar, TOOLS, type Tool, ToolBar, ZoomControls } from "../canvas/chrome"
+import { AskBox, BoardPill, DismissDialog, type JumpItem, Lightbox, type LightboxItem, MarkPanel, QuickJump, RefForm, ReviewDialog, SelectionBar, TextPanel, TOOLS, type Tool, ToolBar, ZoomControls } from "../canvas/chrome"
 import { type Pt, type Rect, anchorsFor, bounds, ellipsePoints, flatten, grow, intersects, markBox, readingOrder, translatePath } from "../canvas/geometry"
 import { type Step, createHistory } from "../canvas/history"
 import { LinkEdge, type LinkEdgeType, linkEdge } from "../canvas/LinkEdge"
@@ -191,6 +191,7 @@ function CanvasInner(props: CanvasProps) {
   const [dropping, setDropping] = useState(false)
   const [reviewing, setReviewing] = useState<string | null>(null)
   const [dismissing, setDismissing] = useState<string | null>(null)
+  const [logOf, setLogOf] = useState<string | null>(null)
   const lastPen = useRef<{ id: string; endedAt: number; box: Rect } | null>(null)
   const pointer = useRef<Pt | null>(null)
   /** Ids to select once their nodes exist (after a duplicate). */
@@ -433,6 +434,7 @@ function CanvasInner(props: CanvasProps) {
       fail,
       review: setReviewing,
       dismissJob: setDismissing,
+      viewLog: setLogOf,
     }),
     [commit, refresh, fail],
   )
@@ -442,6 +444,11 @@ function CanvasInner(props: CanvasProps) {
     const { mark, openMarks } = await window.river.boardReply(board, markId, text)
     putMark(mark.id, mark, openMarks)
   }
+  const settleMark = async (markId: string, status: "dismissed" | "accepted", text: string) => {
+    const { mark, openMarks } = await window.river.boardCloseMark(board, markId, status, text)
+    putMark(mark.id, mark, openMarks)
+  }
+  const loadLog = useCallback(() => (logOf ? window.river.jobLog(logOf) : Promise.resolve(null)), [logOf])
 
   /** Saves where dragged cards and marks ended up, as one step. A moved mark is re-anchored to the cards under it. */
   const persistMoves = (moved: BoardNode[]) => {
@@ -905,6 +912,7 @@ function CanvasInner(props: CanvasProps) {
             onAsk={() => window.river.jobStart(board, soleMark.id).catch(fail)}
             onReply={(text) => reply(soleMark.id, text).catch(fail)}
             onRevise={(jobId) => window.river.jobRevise(jobId).catch(fail)}
+            onSettle={(status, text) => settleMark(soleMark.id, status, text).catch(fail)}
             onClose={() => setSelected(() => false)}
             onDelete={() => deleteItems([soleMark.id])}
           />
@@ -939,6 +947,7 @@ function CanvasInner(props: CanvasProps) {
         {lightbox && images.includes(lightbox) && (
           <Lightbox items={images.map((id) => imageOf(state?.cards[id])!)} at={images.indexOf(lightbox)} onAt={(i) => setLightbox(images[i]!)} onClose={() => setLightbox(null)} />
         )}
+        {logOf && <TextPanel title="Job log" sub={`.river/logs/${logOf}.log`} load={loadLog} onClose={() => setLogOf(null)} />}
         {reviewing && <ReviewDialog key={reviewing} jobId={reviewing} onClose={() => setReviewing(null)} />}
         {dismissing && (
           <DismissDialog

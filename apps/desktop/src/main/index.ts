@@ -5,10 +5,11 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { BrowserWindow, ClipboardItem, app, clipboard, ipcMain, nativeTheme, net, protocol } from "electron"
 import type { JobDeps } from "@river/agent"
 import { VIEWS, type ViewId } from "../shared/api"
-import { type Card, type Mark, loadBoard, loadCard, loadJob, saveCard, saveEdge } from "@river/core"
+import { type Card, type Job, type Mark, CONCEPT_ROLE, boardJsonText, claimMark, loadBoard, loadCard, loadJob, loadMark, markFile, replyToMark, saveCard, saveEdge, saveJob, saveMark } from "@river/core"
 import { type BoardEntity, onBoardWritten } from "./board"
 import { currentProject, onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
 import { getLastProject } from "./settings"
+import { noteOwnWrite } from "./watch"
 import { STILL_SHOT, STRIP_FRAMES, STRIP_SHOT, scenePng, seedPerfBoard, seedRichBoard, seedStripCapture } from "./smokeBoard"
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -332,9 +333,27 @@ func draw(img: Image) -> void:
 	img.fill_rect(Rect2i(w * 7 / 10, h / 10, w / 10, w / 10), Color(0.98, 0.90, 0.62))
 `
 
-/** RIVER_SMOKE_JOB: the agent turn writes three options instead of calling a model; option B does not compile, so its render fails. */
+/** What the fake look at the renders says, once the smoke lets it answer. */
+const LOOK_NOTE = "Looked at the renders: A keeps the low horizon, C warms the sky, B did not render."
+let releaseLook: (() => void) | null = null
+
+/**
+ * RIVER_SMOKE_JOB: the agent turn writes three options instead of calling a model; option B does not compile, so its
+ * render fails. The look at the renders waits until the smoke releases it (or it is stopped), then answers in JSON.
+ */
 const smokeJobDeps: JobDeps = {
   runTurn: async (req, h) => {
+    if (req.prompt.includes("River rendered your scripts.")) {
+      await new Promise<void>((done) => {
+        releaseLook = done
+        h.signal?.addEventListener("abort", () => done())
+        setTimeout(done, 90_000)
+      })
+      releaseLook = null
+      if (h.signal?.aborted) return
+      h.onEvent({ type: "text", text: JSON.stringify({ note: LOOK_NOTE, captions: { a: "Low horizon, checked", c: "Warmer sky, checked" } }) })
+      return
+    }
     const dir = join(req.root, "concepts", req.conceptId ?? "missing")
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, "draw_a.gd"), SMOKE_DRAW_GD)
@@ -470,6 +489,12 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const sections = await until(async () => (await w.webContents.executeJavaScript(`document.querySelectorAll(".review .review-script").length`)) === 3, 5_000)
   console.log(`river smoke: review shows ${sections ? "all three" : "NOT all three"} scripts`)
   await shoot(w, dir, "job-review.png")
+  const kitShown =
+    (await clickEl(w, `.review [data-action="view-kit"]`, 3_000)) &&
+    (await until(async () => ((await w.webContents.executeJavaScript(`document.querySelector(".text-panel-body")?.textContent ?? ""`)) as string).includes("class_name Kit"), 5_000))
+  await clickEl(w, `.text-panel [data-action="close-text"]`, 2_000)
+  console.log(`river smoke: the review's Kit link ${kitShown ? "shows River's kit.gd" : "does NOT show the kit"}`)
+  const firstNote = (await loadJob(p.root, jobId)).summary
   if (!(await clickEl(w, `.review [data-action="run"]`, 3_000))) return false
   console.log("river smoke: ran all; rendering")
   // While drawing, the answer holds one placeholder card; each option has its own card from approval on.
@@ -478,6 +503,11 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   // The options run off to the right of the note; fit the board so all of them are on screen.
   await key(w, "1", ["shift"])
   await sleep(500)
+  const looking = Boolean(await waitRect(w, `${noteSel} .job-line.is-looking`, 120_000))
+  if (looking) await shoot(w, dir, "job-looking.png")
+  releaseLook?.()
+  const looked = await until(async () => (await loadJob(p.root, jobId)).summary === LOOK_NOTE && (await loadCard(p.root, "main", kept.note.id))?.text === LOOK_NOTE, 20_000)
+  console.log(`river smoke: the answer ${looking ? "showed" : "did NOT show"} "looking at the renders"; the look ${looked ? "rewrote the note" : "did NOT rewrite the note"} (first note ${JSON.stringify(firstNote)})`)
   const optSel = (v: string) => `.react-flow__node[data-id="${options.find((c) => c.variant === v)?.id}"]`
   const rendered = (await waitImage(w, `${optSel("a")} img.cnode-img`, 120_000)) && (await waitImage(w, `${optSel("c")} img.cnode-img`, 10_000))
   const brokenShown = Boolean(await waitRect(w, `${optSel("b")} .render-error`, 10_000))
@@ -503,7 +533,7 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const closed = await until(async () => (await loadCard(p.root, "main", optionC.id))?.x === rowStart, 5_000)
   const markNow = (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)
   console.log(`river smoke: concepts/${job.conceptId}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}; kept card ${closed ? "moved to the row start" : "did NOT close the gap"}`)
-  const keptOk = sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
+  const keptOk = kitShown && looking && looked && sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
 
   await key(w, "Escape")
   await key(w, "1", ["shift"])
@@ -511,7 +541,16 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const gone = await askAndShow(toDismiss.id)
   if (!gone) return false
   const goneJob = gone.note.pending!.jobId
-  if (!(await waitRect(w, `.react-flow__node[data-id="${gone.note.id}"] [data-action="review"]`, 120_000))) return false
+  const goneSel = `.react-flow__node[data-id="${gone.note.id}"]`
+  if (!(await clickEl(w, `${goneSel} [data-action="review"]`, 120_000))) return false
+  const goneFirst = (await loadJob(p.root, goneJob)).summary
+  await until(async () => (await w.webContents.executeJavaScript(`document.querySelectorAll(".review .review-script").length`)) === 3, 5_000)
+  if (!(await clickEl(w, `.review [data-action="run"]`, 5_000))) return false
+  const lookShown = Boolean(await waitRect(w, `${goneSel} .job-line.is-looking`, 120_000))
+  const stopClicked = lookShown && (await clickEl(w, `${goneSel} [data-action="stop-look"]`, 3_000))
+  const stopped = stopClicked && (await until(async () => (await loadJob(p.root, goneJob)).status === "answered", 15_000))
+  const kept1st = (await loadJob(p.root, goneJob)).summary === goneFirst
+  console.log(`river smoke: Stop looking ${stopped ? "answered at once" : "did NOT answer"}; the note ${kept1st ? "stayed as first written" : "changed"}`)
   const goneOption = (await answer(toDismiss.id, 5_000))?.options[0]
   if (!goneOption || !(await clickEl(w, `.react-flow__node[data-id="${goneOption.id}"] .cnode-frame`, 3_000))) return false
   // Delete on one option of a live answer asks to dismiss the whole answer instead of deleting the card.
@@ -542,7 +581,7 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   }, 15_000)
   console.log(`river smoke: reply ${replied ? "saved in the thread" : "NOT saved"}; revise ${revised ? "started a job revising " + jobId : "did NOT start"}`)
 
-  const ok = keptOk && dismissed && reasoned && replied && revised
+  const ok = keptOk && stopped && kept1st && dismissed && reasoned && replied && revised
   console.log(`river smoke: job checks ${ok ? "PASSED" : "FAILED"}`)
   return ok
 }
@@ -900,6 +939,178 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   return ok
 }
 
+/** A drag like `drag`, running `beforeUp` while the button is still down. */
+async function dragAround(w: BrowserWindow, from: [number, number], to: [number, number], beforeUp: () => Promise<void>): Promise<void> {
+  const [x0, y0, x1, y1] = [...from, ...to].map(Math.round) as [number, number, number, number]
+  w.webContents.sendInputEvent({ type: "mouseMove", x: x0, y: y0 })
+  await sleep(30)
+  w.webContents.sendInputEvent({ type: "mouseDown", x: x0, y: y0, button: "left", clickCount: 1 })
+  for (let i = 1; i <= 14; i++) {
+    await sleep(16)
+    w.webContents.sendInputEvent({ type: "mouseMove", x: Math.round(x0 + ((x1 - x0) * i) / 14), y: Math.round(y0 + ((y1 - y0) * i) / 14), button: "left", modifiers: ["leftbuttondown"] })
+  }
+  await beforeUp()
+  await sleep(30)
+  w.webContents.sendInputEvent({ type: "mouseUp", x: x1, y: y1, button: "left", clickCount: 1 })
+}
+
+/**
+ * RIVER_SMOKE_AGENTS=1: what the canvas shows of agents working outside the app, driven with real input.
+ * claude-code claims a mark (badge on the mark, a line in its panel); it replies while the user is dragging that mark,
+ * and the reply must survive the move; the user dismisses one mark with a reason and resolves another from the panel;
+ * a job started outside the app (as concept_request does) appears, fails, and its log opens from the card. With
+ * RIVER_SMOKE_USERDATA set, the self-check setting is switched off and on in Settings.
+ */
+async function smokeAgents(w: BrowserWindow, dir: string, waitFor: (view: ViewId, ms: number) => Promise<boolean>): Promise<boolean> {
+  const p = currentProject()
+  if (!p) return false
+  const root = p.root
+  const results: [string, boolean][] = []
+  const check = (name: string, ok: boolean) => {
+    results.push([name, ok])
+    console.log(`river smoke: ${ok ? "ok" : "FAILED"} ${name}`)
+  }
+  const card = (
+    (await w.webContents.executeJavaScript(`(async () => {
+      const info = await window.river.getProject()
+      const rel = info.stories[0]
+      const story = await window.river.loadStory(rel)
+      return window.river.boardPin("main", { kind: "passage", ref: rel + "#" + story.passages[0].id })
+    })()`)) as { card: Card }
+  ).card
+  const pinMark = async (dy: number, text: string) =>
+    (
+      (await w.webContents.executeJavaScript(
+        `window.river.boardSaveMark("main", ${JSON.stringify({ shape: "pin", path: [card.x + card.w + 60, card.y + dy], anchors: [card.id], thread: [{ by: "you", at: new Date().toISOString(), text }], madeBy: "you" })})`,
+      )) as { mark: Mark }
+    ).mark
+  const claimed = await pinMark(40, "make the gate older")
+  const toDismiss = await pinMark(150, "add a lamp by the gate")
+  const toResolve = await pinMark(260, "less fog")
+  w.webContents.send("smoke:navigate", "canvas")
+  if (!(await waitFor("canvas", 15_000))) console.warn("river smoke: canvas did not report ready")
+  w.focus()
+  w.webContents.focus()
+  await sleep(400)
+  const pinSel = (m: Mark) => `[data-mark="${m.id}"] .mark-pin`
+  const text = async (sel: string) => (await w.webContents.executeJavaScript(`document.querySelector(${JSON.stringify(sel)})?.textContent ?? null`)) as string | null
+
+  await claimMark(root, "main", claimed.id, "claude-code")
+  await replyToMark(root, "main", claimed.id, "claude-code", "On it: weathered stone, ivy, a rusted latch.")
+  const badge = await waitRect(w, `[data-mark="${claimed.id}"] .mark-claim-badge`, 6_000)
+  await clickEl(w, pinSel(claimed), 3_000)
+  const line = (await waitRect(w, ".mark-panel .mark-claim", 3_000)) ? await text(".mark-panel .mark-claim") : null
+  const noAsk = !(await rectOf(w, `[data-action="ask-concept"]`))
+  await sleep(300)
+  await shoot(w, dir, "mark-claimed.png")
+  check(`a mark claude-code claimed shows a badge (${JSON.stringify(badge ? await text(`[data-mark="${claimed.id}"] .mark-claim-badge`) : null)}) and its panel says ${JSON.stringify(line)}`, badge !== null && line === "✦ claude-code is working on this" && noAsk)
+  await key(w, "Escape")
+
+  // The reply lands on disk while the pointer is down; the watcher is told it is River's own write, so the canvas
+  // still holds the mark without it when the move is saved. Only a locked merge keeps the reply.
+  const before = (await loadMark(root, "main", claimed.id))!
+  const grab = await centerOf(w, pinSel(claimed), 3_000)
+  const reply = "Two options coming: ivy, and bare stone."
+  const movedSaved = waitBoardWrite("mark", (m) => m.id === claimed.id && m.path[0] !== before.path[0], 8_000)
+  if (grab) {
+    await dragAround(w, grab, [grab[0] + 90, grab[1] + 40], async () => {
+      const m = await replyToMark(root, "main", claimed.id, "claude-code", reply)
+      noteOwnWrite(markFile(root, "main", claimed.id), boardJsonText(m))
+    })
+  }
+  const moved = await movedSaved
+  const after = await loadMark(root, "main", claimed.id)
+  const replies = after?.thread.map((t) => t.text) ?? []
+  check(
+    `moving the mark while claude-code replies keeps the reply and the claim (moved ${moved ? `${before.path[0]} to ${after?.path[0]}` : "NOT saved"}; thread ${JSON.stringify(replies)}; ${after?.status} by ${after?.claimedBy})`,
+    moved !== null && after !== undefined && after.path[0] !== before.path[0] && replies.includes(reply) && after.status === "working" && after.claimedBy === "claude-code",
+  )
+  await key(w, "Escape")
+
+  const why = "the lamp is already in shot 3"
+  await clickEl(w, pinSel(toDismiss), 3_000)
+  await clickEl(w, `[data-action="dismiss-mark"]`, 3_000)
+  await clickEl(w, ".mark-dismiss input", 2_000)
+  await typeText(w, why)
+  await clickEl(w, `[data-action="dismiss-mark-confirm"]`, 2_000)
+  const dismissed = await until(async () => {
+    const m = await loadMark(root, "main", toDismiss.id)
+    const last = m?.thread[m.thread.length - 1]
+    return m?.status === "dismissed" && last?.by === "you" && last.text === why
+  }, 5_000)
+  await key(w, "Escape")
+  const opacity = async () => Number(await w.webContents.executeJavaScript(`getComputedStyle(document.querySelector('[data-mark="${toDismiss.id}"]')).opacity`))
+  const faded = await until(async () => (await opacity()) < 0.5, 3_000)
+  check(`"Dismiss mark" with a reason closes the mark (reason in its thread) and the mark fades (opacity ${await opacity()})`, dismissed && faded)
+
+  await clickEl(w, pinSel(toResolve), 3_000)
+  await clickEl(w, `[data-action="resolve-mark"]`, 3_000)
+  const resolved = await until(async () => (await loadMark(root, "main", toResolve.id))?.status === "accepted", 5_000)
+  check(`"Mark resolved" accepts a mark that follows no job`, resolved)
+  await key(w, "Escape")
+
+  // A job as concept_request starts it: its own process writes the log, the job file and the answer's note card.
+  const jobId = "j_smokeout1"
+  const now = new Date().toISOString()
+  const asked = await saveMark(root, "main", { shape: "pin", path: [card.x - 40, card.y + 40], anchors: [card.id], thread: [{ by: "claude-code", at: now, text: "the gate at dusk" }], madeBy: "claude-code", status: "working", jobId })
+  const logText = [`river job start --job ${jobId}`, `concept job ${jobId}: running the agent turn`, `concept job ${jobId}: the agent turn ended without writing a script`, ""].join("\n")
+  await mkdir(join(root, ".river", "logs"), { recursive: true })
+  await writeFile(join(root, ".river", "logs", `${jobId}.log`), logText)
+  const job: Job = {
+    id: jobId,
+    markId: asked.id,
+    board: "main",
+    role: CONCEPT_ROLE,
+    model: "claude-sonnet-5-5",
+    backend: "claude-code",
+    status: "running",
+    conceptId: jobId,
+    baseSha: "0".repeat(40),
+    branch: `river/job/${jobId}`,
+    worktree: join(root, ".git", "river", "worktrees", jobId),
+    projectSub: "",
+    createdAt: now,
+    updatedAt: now,
+  }
+  const jobsExisted = await exists(join(root, ".river", "jobs"))
+  await saveJob(root, job)
+  // Until the agent writes its scripts, a job's answer is one placeholder concept card that carries the job's bar.
+  const placeholder = await saveCard(root, "main", { kind: "concept", ref: jobId, x: card.x - 340, y: card.y, w: 260, madeBy: CONCEPT_ROLE, pending: { markId: asked.id, jobId } })
+  const cardSel = `.react-flow__node[data-id="${placeholder.id}"]`
+  const drawing = Boolean(await waitRect(w, `${cardSel} .job-line.is-working`, 6_000))
+  await saveJob(root, { ...job, status: "failed", error: "The agent turn ended without writing a script.", updatedAt: new Date().toISOString() })
+  await key(w, "1", ["shift"])
+  await sleep(500)
+  const logLink = Boolean(await waitRect(w, `${cardSel} [data-action="view-log"]`, 8_000))
+  await clickEl(w, `${cardSel} [data-action="view-log"]`, 3_000)
+  const shown = await until(async () => ((await text(".text-panel-body")) ?? "").includes("ended without writing a script"), 4_000)
+  await sleep(200)
+  await shoot(w, dir, "job-log.png")
+  await key(w, "Escape")
+  const closed = await until(async () => !(await rectOf(w, ".text-panel")), 2_000)
+  check(
+    `a job started outside the app (.river/jobs ${jobsExisted ? "existed" : "did not exist"} at open) shows live (${drawing}), fails live (${logLink}), and "View log" opens .river/logs/${jobId}.log read-only (${shown}, closed ${closed})`,
+    drawing && logLink && shown && closed,
+  )
+
+  if (process.env["RIVER_SMOKE_USERDATA"]) {
+    await w.webContents.executeJavaScript(`[...document.querySelectorAll(".sidebar-foot .nav-item")].find((b) => b.textContent.includes("Settings"))?.setAttribute("data-smoke", "settings")`)
+    await clickEl(w, `.nav-item[data-smoke="settings"]`, 3_000)
+    const box = `[data-setting="self-check"]`
+    const on0 = (await w.webContents.executeJavaScript(`document.querySelector(${JSON.stringify(box)})?.checked ?? null`)) as boolean | null
+    await clickEl(w, box, 3_000)
+    const off = await until(async () => (await savedSettings()).selfCheck === false, 3_000)
+    await clickEl(w, box, 3_000)
+    const on = await until(async () => (await savedSettings()).selfCheck === true, 3_000)
+    await key(w, "Escape")
+    check(`Settings turns the look at the renders off and on (was ${on0})`, on0 === true && off && on)
+  } else console.log("river smoke: skipped the Settings check (it writes settings; set RIVER_SMOKE_USERDATA)")
+
+  const ok = results.every(([, r]) => r)
+  console.log(`river smoke: agents checks ${ok ? "PASSED" : "FAILED"} (${results.filter(([, r]) => r).length}/${results.length})`)
+  return ok
+}
+
 const stats = (xs: number[]) => {
   const s = [...xs].sort((a, b) => a - b)
   const q = (f: number) => s[Math.min(s.length - 1, Math.floor(f * s.length))] ?? 0
@@ -1065,7 +1276,7 @@ async function bgOf(w: BrowserWindow, selector: string): Promise<string> {
 const PAPER_BG = "rgb(243, 241, 236)"
 const DARK_BG = "rgb(27, 26, 24)"
 
-async function savedSettings(): Promise<{ canvasTheme?: string; lastBoards?: Record<string, string> }> {
+async function savedSettings(): Promise<{ canvasTheme?: string; lastBoards?: Record<string, string>; selfCheck?: boolean }> {
   try {
     return JSON.parse(await readFile(join(app.getPath("userData"), "river-settings.json"), "utf8")) as { canvasTheme?: string }
   } catch {
@@ -1332,6 +1543,7 @@ async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
   }
   for (const [env, run] of [
     ["RIVER_SMOKE_BOARD", () => smokeBoard(w, dir, waitFor)],
+    ["RIVER_SMOKE_AGENTS", () => smokeAgents(w, dir, waitFor)],
     ["RIVER_SMOKE_PERF", () => smokePerf(w, dir, waitFor)],
   ] as const) {
     if (process.env[env] !== "1") continue
