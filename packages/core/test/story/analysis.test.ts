@@ -61,7 +61,7 @@ describe("lint", () => {
   it("checks variables, types, duplicates and reachability", () => {
     const schema: StateSchema = {
       n: { type: "int", min: 0, max: 10 },
-      mood: { type: "enum", values: ["CALM", "SURGE"] },
+      mood: { type: "enum", values: ["CALM", "EXCITED"] },
       seen: { type: "bool" },
     }
     const src = [

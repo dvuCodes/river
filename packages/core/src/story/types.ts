@@ -55,7 +55,7 @@ export const RETURN_TARGET = "@return"
 
 /** A link from a passage, with the River rules written after it on the same line. */
 export interface Choice {
-  /** Text the player sees. For `[[Leave it->Standoff]]` this is "Leave it". */
+  /** Text the player sees. For `[[Feed the ducks->Ducks]]` this is "Feed the ducks". */
   label: string
   /** Target passage NAME as written in the link. Resolve with `resolveTarget`. */
   target: string

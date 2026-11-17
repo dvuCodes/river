@@ -48,7 +48,7 @@ function tokenize(src: string): Token[] {
   return out
 }
 
-/** Parse "a >= 1 and (mood == SURGE or not b)". Bare words on the right are enum values. */
+/** Parse "a >= 1 and (mood == EXCITED or not b)". Bare words on the right are enum values. */
 export function parseCond(src: string): Cond {
   const toks = tokenize(src)
   let pos = 0
@@ -172,7 +172,7 @@ function parseEffectValue(raw: string, whole: string): Value {
   throw new Error(`bad value "${s}" in "${whole}"`)
 }
 
-/** Parse "bond += 10, energy -= 8, bond *= 0.5, bond /= 2, mood = CALM". "-=" adds the negative, "/=" multiplies by the inverse. */
+/** Parse "bond += 10, energy -= 5, bond *= 0.5, bond /= 2, mood = CALM". "-=" adds the negative, "/=" multiplies by the inverse. */
 export function parseEffects(src: string): Effect[] {
   if (src.trim() === "") return []
   return splitTopLevel(src).map((part): Effect => {

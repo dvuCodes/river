@@ -24,16 +24,16 @@ afterEach(() => removeDir(root))
 describe("review threads", () => {
   it("adds, replies to and sets the status of a thread, stored per shot", async () => {
     const p = project(root)
-    const t = await addThread(p, { shotId: "walk", rev: "abc1234", frame: 0, box: [1, 2, 3, 4] }, "dat", "leash looks slack")
+    const t = await addThread(p, { shotId: "walk", rev: "abc1234", frame: 0, box: [1, 2, 3, 4] }, "you", "the ducks look too small")
     expect(t.id).toMatch(/^t_[0-9a-z]{8}$/)
     expect(t.status).toBe("open")
-    expect(t.messages[0]).toMatchObject({ author: "dat", text: "leash looks slack" })
+    expect(t.messages[0]).toMatchObject({ author: "you", text: "the ducks look too small" })
     expect(new Date(t.messages[0]!.at).toISOString()).toBe(t.messages[0]!.at)
 
-    const other = await addThread(p, { shotId: "boss_intro", rev: "abc1234" }, "dat", "sprite too small")
+    const other = await addThread(p, { shotId: "boss_intro", rev: "abc1234" }, "you", "sprite too small")
 
     const r = await reply(p, t.id, "agent", "I will plan a fix")
-    expect(r.messages.map((m) => m.author)).toEqual(["dat", "agent"])
+    expect(r.messages.map((m) => m.author)).toEqual(["you", "agent"])
     const s = await setStatus(p, t.id, "accepted")
     expect(s.status).toBe("accepted")
 
@@ -63,12 +63,12 @@ describe("review threads", () => {
 describe("change plans", () => {
   it("savePlan writes a draft, links the thread and sets it to planned; approval sets approvedAt", async () => {
     const p = project(root)
-    const t = await addThread(p, { shotId: "walk", rev: "abc" }, "dat", "make the leash tighter")
+    const t = await addThread(p, { shotId: "walk", rev: "abc" }, "you", "make the ducks bigger")
     const plan = await savePlan(p, {
       threadId: t.id,
-      title: "Tighten leash",
-      rationale: "The comment asks for more tension",
-      steps: [{ file: "data/leash.json", change: "raise tension to 0.8" }],
+      title: "Bigger ducks",
+      rationale: "The comment asks for bigger ducks",
+      steps: [{ file: "data/ducks.json", change: "raise duck_scale to 1.5" }],
       recapture: ["walk"],
     })
     expect(plan.id).toMatch(/^p_[0-9a-z]{8}$/)
@@ -107,7 +107,7 @@ describe("assertEditAllowed", () => {
     title: "t",
     rationale: "r",
     steps: [
-      { file: "data/leash.json", change: "c" },
+      { file: "data/ducks.json", change: "c" },
       { file: "tools\\shots\\walk.gd", change: "c" },
       { file: "src/game/walk.gd", change: "c" },
       { file: "../outside.json", change: "c" },
@@ -122,19 +122,19 @@ describe("assertEditAllowed", () => {
 
   it("allows a listed file of an approved plan that matches the editable globs", () => {
     const p = project(root)
-    expect(() => assertEditAllowed(p, plan(), "data/leash.json")).not.toThrow()
-    expect(() => assertEditAllowed(p, plan(), "data\\leash.json")).not.toThrow()
-    expect(() => assertEditAllowed(p, plan(), "./data//leash.json")).not.toThrow()
+    expect(() => assertEditAllowed(p, plan(), "data/ducks.json")).not.toThrow()
+    expect(() => assertEditAllowed(p, plan(), "data\\ducks.json")).not.toThrow()
+    expect(() => assertEditAllowed(p, plan(), "./data//ducks.json")).not.toThrow()
     expect(() => assertEditAllowed(p, plan(), "tools/shots/walk.gd")).not.toThrow()
     if (process.platform === "win32") {
-      expect(() => assertEditAllowed(p, plan(), "DATA/Leash.json")).not.toThrow()
+      expect(() => assertEditAllowed(p, plan(), "DATA/Ducks.json")).not.toThrow()
     }
   })
 
   it("rejects a plan that is not approved", () => {
     const p = project(root)
     for (const status of ["draft", "rejected", "implemented"] as const) {
-      expect(() => assertEditAllowed(p, plan({ status }), "data/leash.json")).toThrow(/not approved/)
+      expect(() => assertEditAllowed(p, plan({ status }), "data/ducks.json")).toThrow(/not approved/)
     }
   })
 
@@ -147,18 +147,18 @@ describe("assertEditAllowed", () => {
     expect(() => assertEditAllowed(p, plan(), "../outside.json")).toThrow(/without '\.\.'/)
     expect(() => assertEditAllowed(p, plan(), "data/../../outside.json")).toThrow(/without '\.\.'/)
     expect(() => assertEditAllowed(p, plan(), "data\\..\\..\\outside.json")).toThrow(/without '\.\.'/)
-    const abs = path.join(root, "data", "leash.json")
+    const abs = path.join(root, "data", "ducks.json")
     expect(() => assertEditAllowed(p, plan({ steps: [{ file: abs, change: "c" }] }), abs)).toThrow(/relative to the project root/)
-    expect(() => assertEditAllowed(p, plan(), "/data/leash.json")).toThrow(/relative to the project root/)
-    expect(() => assertEditAllowed(p, plan(), "C:data/leash.json")).toThrow(/relative to the project root/)
+    expect(() => assertEditAllowed(p, plan(), "/data/ducks.json")).toThrow(/relative to the project root/)
+    expect(() => assertEditAllowed(p, plan(), "C:data/ducks.json")).toThrow(/relative to the project root/)
     expect(() => assertEditAllowed(p, plan(), "")).toThrow(/relative to the project root/)
   })
 
   it("rejects a listed file outside the editable globs, and honours manifest.editable", () => {
     expect(() => assertEditAllowed(project(root), plan(), "src/game/walk.gd")).toThrow(/editable globs/)
     expect(() => assertEditAllowed(project(root, { editable: ["src/**"] }), plan(), "src/game/walk.gd")).not.toThrow()
-    expect(() => assertEditAllowed(project(root, { editable: ["src/**"] }), plan(), "data/leash.json")).toThrow(/editable globs/)
-    expect(() => assertEditAllowed(project(root, { editable: [] }), plan(), "data/leash.json")).toThrow(/editable globs/)
+    expect(() => assertEditAllowed(project(root, { editable: ["src/**"] }), plan(), "data/ducks.json")).toThrow(/editable globs/)
+    expect(() => assertEditAllowed(project(root, { editable: [] }), plan(), "data/ducks.json")).toThrow(/editable globs/)
   })
 
   it("rejects a path that escapes the root through a symlink or junction", () => {

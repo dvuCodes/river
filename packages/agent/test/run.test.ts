@@ -18,7 +18,7 @@ const req = (over: Partial<AgentTurnRequest> = {}): AgentTurnRequest => ({
   root,
   mode: "plan",
   model: "claude-sonnet-5-5",
-  prompt: "tighten the leash",
+  prompt: "brighten the pond",
   backend: "api-key",
   apiKey: "sk-test-not-real",
   ...over,

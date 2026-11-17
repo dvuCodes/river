@@ -10,6 +10,6 @@ export function tempProject(): string {
   const dir = mkdtempSync(join(tmpdir(), "river-mcp-"))
   cpSync(example, dir, { recursive: true })
   mkdirSync(join(dir, "data"))
-  writeFileSync(join(dir, "data/tuning.txt"), "leash_max = 4.0\nsurge_force = 12\nsurge_force_alt = 12\nsurge_force = 12\n")
+  writeFileSync(join(dir, "data/tuning.txt"), "walk_speed = 4.0\nball_throw = 12\nball_throw_alt = 12\nball_throw = 12\n")
   return dir
 }

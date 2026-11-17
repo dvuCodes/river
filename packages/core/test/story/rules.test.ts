@@ -89,7 +89,7 @@ describe("paths follow effects along the route", () => {
 })
 
 describe("engine variables", () => {
-  const src = story(":: A", "@set hp = 0", "--", "[[Bolt->B]] @when hp >= 9", "", ":: B", "@end", "--")
+  const src = story(":: A", "@set hp = 0", "--", "[[Jump->B]] @when hp >= 9", "", ":: B", "@end", "--")
 
   it("are free again at every passage, whatever the story set them to", () => {
     expect(paths(src.story, schema)[0]!.satisfiable).toBe(false)

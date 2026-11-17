@@ -153,25 +153,25 @@ describe("story writes", () => {
 
 describe("plans and the implementer guard", () => {
   const save = async (files: string[]) =>
-    ((await call("plan_save", { title: "Softer surge", rationale: "Comment says the surge is too strong", steps: files.map((file) => ({ file, change: "lower surge_force" })), recapture: [] })).data as { id: string }).id
+    ((await call("plan_save", { title: "Shorter throw", rationale: "Comment says the ball goes too far", steps: files.map((file) => ({ file, change: "lower ball_throw" })), recapture: [] })).data as { id: string }).id
 
   it("implement_edit is denied while draft, allowed once approved, and only for listed files", async () => {
     const planId = await save(["data/tuning.txt"])
     expect((await loadPlan(project, planId)).status).toBe("draft")
-    const edit = { planId, file: "data/tuning.txt", oldText: "leash_max = 4.0", newText: "leash_max = 3.5" }
+    const edit = { planId, file: "data/tuning.txt", oldText: "walk_speed = 4.0", newText: "walk_speed = 3.5" }
     await expect(call("implement_edit", edit)).rejects.toThrow(/is draft, not approved/)
 
     await setPlanStatus(project, planId, "approved")
     const r = await call("implement_edit", edit)
-    expect(readFileSync(join(dir, "data/tuning.txt"), "utf8")).toContain("leash_max = 3.5\n")
-    expect(r.text).toContain("-leash_max = 4.0\n+leash_max = 3.5")
+    expect(readFileSync(join(dir, "data/tuning.txt"), "utf8")).toContain("walk_speed = 3.5\n")
+    expect(r.text).toContain("-walk_speed = 4.0\n+walk_speed = 3.5")
 
     await expect(call("implement_edit", { ...edit, file: "stories/state.json", oldText: "{", newText: "{" })).rejects.toThrow(/does not name this file/)
-    await expect(call("implement_edit", { ...edit, oldText: "surge_force = 12\n", newText: "surge_force = 8\n" })).rejects.toThrow(/occurs 2 times/)
+    await expect(call("implement_edit", { ...edit, oldText: "ball_throw = 12\n", newText: "ball_throw = 8\n" })).rejects.toThrow(/occurs 2 times/)
     await expect(call("implement_edit", { ...edit, oldText: "missing", newText: "x" })).rejects.toThrow(/not found/)
     // `$&` in newText is literal, not a replace pattern.
-    await call("implement_edit", { ...edit, oldText: "leash_max = 3.5", newText: "leash_max = $&" })
-    expect(readFileSync(join(dir, "data/tuning.txt"), "utf8")).toContain("leash_max = $&\n")
+    await call("implement_edit", { ...edit, oldText: "walk_speed = 3.5", newText: "walk_speed = $&" })
+    expect(readFileSync(join(dir, "data/tuning.txt"), "utf8")).toContain("walk_speed = $&\n")
 
     expect((await call("plan_mark_implemented", { planId })).text).toContain("implemented")
     expect((await loadPlan(project, planId)).status).toBe("implemented")
@@ -185,10 +185,10 @@ describe("plans and the implementer guard", () => {
   })
 
   it("plan_save links a review thread and review_reply answers it", async () => {
-    const thread = await addThread(project, { shotId: "leash", rev: "abc" }, "dat", "Too strong")
+    const thread = await addThread(project, { shotId: "walk", rev: "abc" }, "you", "Throws too far")
     const planId = ((await call("plan_save", { threadId: thread.id, title: "t", rationale: "r", steps: [{ file: "data/tuning.txt", change: "c" }], recapture: [] })).data as { id: string }).id
     await call("review_reply", { threadId: thread.id, text: `See plan ${planId}` })
-    const listed = await call("review_list", { shotId: "leash" })
+    const listed = await call("review_list", { shotId: "walk" })
     expect(listed.text).toContain(`[planned]  plan ${planId}`)
     expect(listed.text).toContain(`agent (`)
     expect((await call("plan_read", { planId })).text).toContain('"status": "draft"')
