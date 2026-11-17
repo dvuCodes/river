@@ -207,9 +207,9 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
   }
   const prune = (args: string[]) => {
     const [dir] = upTo(args, 1, "captures prune [dir] --keep N [--dry-run]")
-    const keep = Number(values.keep)
-    if (values.keep === undefined || !Number.isInteger(keep) || keep < 0) throw new UsageError("captures prune needs --keep N, a whole number of captures to keep per shot (0 or more)")
-    return cmdPrune(root(dir), keep, values["dry-run"] ?? false, out)
+    // Number("") is 0, which would delete every unpinned capture; only digits count.
+    if (values.keep === undefined || !/^\d+$/.test(values.keep)) throw new UsageError("captures prune needs --keep N, a whole number of captures to keep per shot (0 or more)")
+    return cmdPrune(root(dir), Number(values.keep), values["dry-run"] ?? false, out)
   }
 
   try {

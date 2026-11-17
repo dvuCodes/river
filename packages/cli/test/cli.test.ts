@@ -228,6 +228,10 @@ describe("project folder and paths", () => {
   it("captures prune needs --keep and reports what it deleted", async () => {
     const dir = storyProject()
     expect((await cli(["captures", "prune", dir])).code).toBe(2)
+    for (const keep of ["", " ", "abc", "-1", "1.5", "0x2", "2 "]) {
+      const bad = await cli(["captures", "prune", dir, `--keep=${keep}`])
+      expect([bad.code, bad.err], JSON.stringify(keep)).toEqual([2, expect.stringContaining("--keep N")])
+    }
     const r = await cli(["captures", "prune", dir, "--keep", "2", "--dry-run"])
     expect([r.code, r.out]).toEqual([0, "would delete 0 captures, keeping the newest 2 of each shot\n"])
   })
