@@ -169,18 +169,37 @@ export function claudeCodeStdin(req: AgentTurnRequest): string {
   return turnContext(req) + req.prompt
 }
 
-/** Kill the CLI and everything it started (river-mcp, the engine). */
-export function killTree(child: ChildProcess): void {
-  if (child.pid === undefined || child.exitCode !== null) return
-  if (process.platform === "win32") {
-    execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {})
-  } else {
+/** How long a child may take to exit after the first kill before River forces it. */
+const KILL_GRACE_MS = 5_000
+
+/**
+ * Kill the CLI and everything it started (river-mcp, the engine): taskkill the tree on Windows, falling back to
+ * the CLI itself when taskkill cannot run; SIGTERM to the process group on POSIX. A child still running after
+ * `graceMs` is killed outright (SIGKILL to the group on POSIX), so a turn never waits forever on its exit.
+ */
+export function killTree(child: ChildProcess, graceMs = KILL_GRACE_MS): void {
+  const pid = child.pid
+  const ended = () => child.exitCode !== null || child.signalCode !== null
+  if (pid === undefined || ended()) return
+  const signalGroup = (signal: NodeJS.Signals) => {
     try {
-      process.kill(-child.pid, "SIGTERM")
+      process.kill(-pid, signal)
     } catch {
-      child.kill("SIGTERM")
+      child.kill(signal)
     }
   }
+  if (process.platform === "win32") {
+    execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }, (err) => {
+      if (err && !ended()) child.kill()
+    })
+  } else signalGroup("SIGTERM")
+  const force = setTimeout(() => {
+    if (ended()) return
+    if (process.platform === "win32") child.kill()
+    else signalGroup("SIGKILL")
+  }, graceMs)
+  force.unref()
+  child.once("exit", () => clearTimeout(force))
 }
 
 export interface ClaudeRunDeps {

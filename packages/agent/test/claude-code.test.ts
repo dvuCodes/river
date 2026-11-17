@@ -1,3 +1,5 @@
+import { spawn, type ChildProcess } from "node:child_process"
+import { once } from "node:events"
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -9,6 +11,7 @@ import {
   claudeCodeEnv,
   claudeCodeStdin,
   getClaudeCodeStatus,
+  killTree,
   parseAuthStatus,
   resolveClaudeCommand,
 } from "../src/claude-code"
@@ -257,5 +260,50 @@ describe("claude-code turn with a fake claude", () => {
     expect(Date.now() - started).toBeLessThan(15_000)
     expect(events.at(-2)).toEqual({ type: "error", message: "Turn aborted." })
     expect(events.at(-1)).toEqual({ type: "done" })
+  }, 20_000)
+})
+
+describe("killTree", () => {
+  /** A Node process that runs until killed; with ignoreTerm it shrugs off SIGTERM. */
+  const sleeper = (ignoreTerm: boolean) => {
+    const child = spawn(process.execPath, ["-e", `${ignoreTerm ? "process.on('SIGTERM', () => {}); " : ""}console.log('up'); setInterval(() => {}, 1000)`], {
+      stdio: ["ignore", "pipe", "ignore"],
+      detached: process.platform !== "win32",
+    })
+    return { child, up: once(child.stdout!, "data") }
+  }
+  const exitsWithin = (child: ChildProcess, ms: number) =>
+    new Promise<boolean>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve(true)
+      const timer = setTimeout(() => resolve(false), ms)
+      child.once("exit", () => {
+        clearTimeout(timer)
+        resolve(true)
+      })
+    })
+
+  it.runIf(process.platform === "win32")("kills the child itself when taskkill cannot run", async () => {
+    const { child, up } = sleeper(false)
+    await up
+    const saved = process.env.PATH
+    process.env.PATH = ""
+    try {
+      killTree(child, 60_000)
+    } finally {
+      process.env.PATH = saved
+    }
+    const exited = await exitsWithin(child, 10_000)
+    child.kill()
+    expect(exited).toBe(true)
+  }, 20_000)
+
+  it.skipIf(process.platform === "win32")("follows SIGTERM with SIGKILL when the child ignores it", async () => {
+    const { child, up } = sleeper(true)
+    await up
+    killTree(child, 300)
+    const exited = await exitsWithin(child, 10_000)
+    child.kill("SIGKILL")
+    expect(exited).toBe(true)
+    expect(child.signalCode).toBe("SIGKILL")
   }, 20_000)
 })
