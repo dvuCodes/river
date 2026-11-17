@@ -1,6 +1,32 @@
 import { existsSync } from "node:fs"
 import path from "node:path"
-import { DEFAULT_BOARD, ensureBoard, formatBoard, jobRenderName, listBoards, loadBoard, loadJob, loadProject, replyToMark, saveMark, type Job } from "@river/core"
+import {
+  BOARD_GAP,
+  cardHeight,
+  DEFAULT_BOARD,
+  ensureBoard,
+  formatBoard,
+  IMAGE_CARD_W,
+  jobRenderName,
+  listBoards,
+  loadBoard,
+  loadJob,
+  loadProject,
+  loadStory,
+  normalizeRel,
+  NOTE_CARD_W,
+  occupiedRects,
+  passageById,
+  placeRow,
+  replyToMark,
+  safePath,
+  saveCard,
+  saveMark,
+  type Board,
+  type Card,
+  type Job,
+  type MarkStatusChange,
+} from "@river/core"
 import type { AgentBackend, AgentEvent, AgentModel } from "@river/agent"
 
 interface Out {
@@ -25,6 +51,10 @@ export interface JobArgs {
   variants?: string | undefined
   /** `job dismiss`: why, added to the project brief. */
   reason?: string | undefined
+  /** `job start`: who asks, "you" by default (concept_request passes its agent). */
+  by?: string | undefined
+  /** `job approve --yes`: skip the agent's look at its renders. */
+  "skip-self-check"?: boolean | undefined
 }
 
 const BACKENDS: readonly AgentBackend[] = ["claude-code", "api-key"]
@@ -40,9 +70,18 @@ function ellipse(cx: number, cy: number, rx: number, ry: number, n = 24): number
   return points
 }
 
+/** Where something new goes on a board that has no place for it: under everything, at the left edge. */
+function freeStart(board: Board): { x: number; y: number } {
+  const rects = occupiedRects(board)
+  return { x: Math.min(0, ...rects.map((r) => r.x)), y: rects.length > 0 ? Math.max(...rects.map((r) => r.y + r.h)) + BOARD_GAP : 0 }
+}
+
+const MARK_STATUS: Record<string, MarkStatusChange> = { dismiss: "dismissed", accept: "accepted" }
+
 /**
- * `river mark add`: a circle mark with one message, around a card or at 0,0. Prints the mark id.
+ * `river mark add`: a circle mark with one message, around a card or at a free spot under the board. Prints the mark id.
  * `river mark reply`: add the user's message to a mark's thread (then `job revise` answers it).
+ * `river mark dismiss|accept`: close a mark an agent answered (or will not), with an optional message.
  */
 export async function cmdMark(
   sub: string | undefined,
@@ -50,16 +89,27 @@ export async function cmdMark(
   out: Out,
   err: Out,
 ): Promise<number> {
-  if (sub !== "add" && sub !== "reply") {
-    err.line('river mark: use "mark add --text ..." or "mark reply --mark <id> --text ..."')
+  if (sub !== "add" && sub !== "reply" && sub !== "dismiss" && sub !== "accept") {
+    err.line('river mark: use "mark add --text ...", "mark reply --mark <id> --text ...", or "mark dismiss|accept --mark <id> [--text ...]"')
     return 2
   }
   const text = o.text?.trim()
-  if (!text) {
+  const status = MARK_STATUS[sub]
+  if (!text && !status) {
     err.line(`river mark ${sub}: --text is required`)
     return 2
   }
   const root = (await loadProject(o.root)).root
+  if (status) {
+    if (!o.mark) {
+      err.line(`river mark ${sub}: --mark <id> is required`)
+      return 2
+    }
+    const mark = await replyToMark(root, o.board, o.mark, "you", text ?? "", status)
+    out.line(`${mark.id}  ${mark.status}  ${mark.thread.length} messages`)
+    return 0
+  }
+  if (!text) return 2
   if (sub === "reply") {
     if (!o.mark) {
       err.line("river mark reply: --mark <id> is required")
@@ -71,7 +121,8 @@ export async function cmdMark(
     return 0
   }
   await ensureBoard(root, o.board)
-  let outline = ellipse(0, 0, 40, 40)
+  const spot = freeStart(await loadBoard(root, o.board))
+  let outline = ellipse(spot.x + 40, spot.y + 40, 40, 40)
   if (o.anchor) {
     const card = (await loadBoard(root, o.board)).cards.find((c) => c.id === o.anchor)
     if (!card) {
@@ -125,7 +176,9 @@ function shaMap(job: Job, values: string[]): Record<string, string> | string {
 
 const shaArgs = (scripts: { variant?: string; sha256: string }[]) => scripts.map((s) => `--sha256 ${s.variant ? `${s.variant}=` : ""}${s.sha256}`).join(" ")
 
-function progress(e: AgentEvent, err: Out): void {
+/** Turn progress on stderr. Sums the cost of each turn's "done" event into `spent`. */
+function progress(e: AgentEvent, err: Out, spent: { usd: number }): void {
+  if (e.type === "done" && e.costUsd !== undefined) spent.usd += e.costUsd
   if (e.type === "text") err.line(`agent: ${e.text.trim()}`)
   else if (e.type === "tool") err.line(`  > ${e.tool}: ${e.summary}`)
   else if (e.type === "tool-result" && !e.ok) err.line(`  ! ${e.tool}: ${e.summary}`)
@@ -140,6 +193,11 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
   }
   const root = (await loadProject(a.root)).root
   const agent = await import("@river/agent")
+  const spent = { usd: 0 }
+  const onEvent = (e: AgentEvent) => progress(e, err, spent)
+  const cost = () => {
+    if (spent.usd > 0) out.line(`cost: ${spent.usd.toFixed(4)} (agent turns, from Claude's own report)`)
+  }
 
   const settings = () => {
     const backend = (a.backend ?? "claude-code") as AgentBackend
@@ -152,6 +210,7 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
   }
   const afterTurn = (job: Job) => {
     printJob(root, job, out)
+    cost()
     if (job.status === "approval") out.line(`next: river job approve --root ${root} --job ${job.id}`)
     return job.status === "approval" ? 0 : 1
   }
@@ -160,7 +219,8 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
     if (!a.mark) return usage("start needs --mark <id>")
     const s = settings()
     if (typeof s === "string") return usage(s)
-    return afterTurn(await agent.startConceptJob({ workspaceRoot: root, board: a.board ?? DEFAULT_BOARD, markId: a.mark, ...s }, { onEvent: (e) => progress(e, err) }))
+    const request = { workspaceRoot: root, board: a.board ?? DEFAULT_BOARD, markId: a.mark, ...(a.job ? { jobId: a.job } : {}), ...(a.by ? { by: a.by } : {}), ...s }
+    return afterTurn(await agent.startConceptJob(request, { onEvent }))
   }
 
   if (!a.job) return usage(`${sub ?? "job"} needs --job <id>`)
@@ -168,7 +228,7 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
     case "revise": {
       const s = settings()
       if (typeof s === "string") return usage(s)
-      return afterTurn(await agent.reviseJob(root, a.job, s, { onEvent: (e) => progress(e, err) }))
+      return afterTurn(await agent.reviseJob(root, a.job, s, { onEvent }))
     }
     case "show": {
       printJob(root, await loadJob(root, a.job), out)
@@ -182,8 +242,13 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
         }
         const shas = shaMap(await loadJob(root, a.job), a.sha256)
         if (typeof shas === "string") return usage(shas)
-        const job = await agent.approveJobScripts(root, a.job, shas)
+        const before = await loadJob(root, a.job)
+        const apiKey = process.env.ANTHROPIC_API_KEY
+        // The look at the renders runs as the job ran; an api-key job needs the key from the environment again.
+        const selfCheck = a["skip-self-check"] ? false : before.backend === "api-key" && apiKey ? { model: before.model as AgentModel, backend: before.backend, apiKey } : undefined
+        const job = await agent.approveJobScripts(root, a.job, shas, { onEvent, ...(selfCheck !== undefined ? { selfCheck } : {}) })
         printJob(root, job, out)
+        cost()
         return job.status === "answered" ? 0 : 1
       }
       const scripts = await agent.readJobScripts(root, a.job)
@@ -212,6 +277,13 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
   }
 }
 
+const START_HINT = [
+  "Put something on it first:",
+  "  river card add --passage stories/<file>.twee#<passage id>   a passage of a story",
+  '  river card add --note "..."                               a note',
+  '  river mark add --text "..." [--anchor <cardId>]           a request for an agent',
+]
+
 /** `river board show`: the board as compact text, the way agents read it with board_read. */
 export async function cmdBoard(sub: string | undefined, o: { root: string; board: string }, out: Out, err: Out): Promise<number> {
   if (sub !== "show") {
@@ -221,9 +293,64 @@ export async function cmdBoard(sub: string | undefined, o: { root: string; board
   const root = (await loadProject(o.root)).root
   const boards = await listBoards(root)
   if (!boards.includes(o.board)) {
-    err.line(`river board show: no board ${o.board}. Boards: ${boards.join(", ") || "(none yet)"}`)
+    err.line(`river board show: no board ${o.board} yet. Boards: ${boards.join(", ") || "(none yet)"}`)
+    for (const l of START_HINT) err.line(l)
     return 1
   }
-  out.line(formatBoard(await loadBoard(root, o.board)))
+  const board = await loadBoard(root, o.board)
+  out.line(formatBoard(board))
+  if (board.cards.length + board.marks.length === 0) for (const l of START_HINT) out.line(l)
+  return 0
+}
+
+export interface CardArgs {
+  root: string
+  board: string
+  passage?: string | undefined
+  note?: string | undefined
+  image?: string | undefined
+  caption?: string | undefined
+  licence?: string | undefined
+  /** Put the card right of this card or mark. Default: under everything. */
+  anchor?: string | undefined
+}
+
+/** `river card add --passage <file#id> | --note "..." | --image <file> --licence "..."`: one card at a free spot. Prints its id. */
+export async function cmdCard(sub: string | undefined, a: CardArgs, out: Out, err: Out): Promise<number> {
+  const given = [a.passage, a.note, a.image].filter((v) => v !== undefined).length
+  if (sub !== "add" || given !== 1) {
+    err.line('river card: use "card add" with one of --passage <file>#<passage id>, --note "...", or --image <file> --licence "..."')
+    return 2
+  }
+  const project = await loadProject(a.root)
+  const root = project.root
+  let card: Omit<Card, "id" | "createdAt" | "x" | "y" | "madeBy">
+  if (a.passage !== undefined) {
+    const [file = "", id = ""] = a.passage.split("#")
+    const story = await loadStory(project, file).catch(() => undefined)
+    if (!story) return (err.line(`river card add: no story file ${file}`), 1)
+    if (!passageById(story.story, id)) return (err.line(`river card add: ${file} has no passage with id "${id}" (river paths and story_read list them)`), 1)
+    card = { kind: "passage", ref: `${normalizeRel(file)}#${id}`, w: 280 }
+  } else if (a.note !== undefined) {
+    if (!a.note.trim()) return (err.line("river card add: --note needs text"), 2)
+    card = { kind: "note", ref: "", text: a.note, w: NOTE_CARD_W }
+  } else {
+    const rel = normalizeRel(a.image!)
+    if (!rel || !/\.(png|jpe?g|webp|gif)$/i.test(rel) || !existsSync(safePath(project, rel))) return (err.line(`river card add: ${a.image} is not an image file under the project`), 1)
+    if (!a.licence?.trim()) return (err.line('river card add: an image card needs --licence, such as "own work" or "CC BY 4.0"'), 2)
+    card = { kind: "ref", ref: rel, w: IMAGE_CARD_W, source: { licence: a.licence.trim() } }
+  }
+  if (a.caption && card.kind !== "note") card = { ...card, caption: a.caption }
+  await ensureBoard(root, a.board)
+  const board = await loadBoard(root, a.board)
+  let start = freeStart(board)
+  if (a.anchor) {
+    const at = board.cards.find((c) => c.id === a.anchor)
+    if (!at) return (err.line(`river card add: no card ${a.anchor} on board ${a.board}`), 1)
+    start = { x: at.x + at.w + BOARD_GAP, y: at.y }
+  }
+  const [spot] = placeRow(start, [{ w: card.w, h: cardHeight(card) }], occupiedRects(board))
+  const saved = await saveCard(root, a.board, { ...card, ...spot!, madeBy: "you" })
+  out.line(saved.id)
   return 0
 }

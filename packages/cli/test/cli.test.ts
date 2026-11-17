@@ -38,7 +38,7 @@ describe("river CLI", () => {
     expect(r.code).toBe(1)
     expect(r.out).toContain("error  Pond → Splash: no passage has this name\n")
     expect(r.out).toContain("warn   Fetch: dead end, no link and no @end\n")
-    expect(r.out).toContain("1 error, 2 warnings in 8 passages")
+    expect(r.out).toContain("1 error, 3 warnings in 8 passages")
   })
 
   it("paths numbers the routes", async () => {

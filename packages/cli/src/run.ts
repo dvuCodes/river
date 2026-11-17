@@ -27,7 +27,7 @@ import {
 import type { Diagnostic, EngineAdapter, Project, StateSchema, Story } from "@river/core"
 import { mkdir, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
-import { cmdBoard, cmdJob, cmdMark } from "./jobs"
+import { cmdBoard, cmdCard, cmdJob, cmdMark } from "./jobs"
 
 export interface RunIo {
   /** Where normal output goes. Default: process.stdout. */
@@ -53,17 +53,23 @@ Commands:
 
 Storyboard (--root defaults to the current folder, --board to main):
   board show                               the board as agents read it: cards, marks with threads, arrows
-  mark add --text "..." [--anchor <cardId>]   add a mark, circled around the card (or at 0,0); prints its id
+  card add --passage <file>#<passage id> | --note "..." | --image <file> --licence "..." [--caption "..."] [--anchor <cardId>]
+                                           add a card at a free spot (or right of the anchor); prints its id
+  mark add --text "..." [--anchor <cardId>]   add a mark, circled around the card (or at a free spot); prints its id
   mark reply --mark <id> --text "..."      add your reply to a mark's thread
+  mark dismiss|accept --mark <id> [--text "..."]
+                                           close a mark an agent answered (dismiss: --text says why)
   job start --mark <id> [--backend claude-code|api-key] [--model claude-sonnet-5-5]
-                                           the concept artist answers the mark; waits until its scripts need approval
+                                           the concept artist answers the mark; waits until its scripts need approval,
+                                           then prints the job and what its turn cost
   job revise --job <id> [--backend ...] [--model ...]
                                            answer your reply on the job's mark with a new job, under the old answer
   job show --job <id>                      status, summary, error and scripts of a job
   job approve --job <id>                   print every script and its sha256; runs nothing
   job approve --job <id> --sha256 a=<hex> --sha256 b=<hex> ... --yes
                                            run the scripts in Godot, only if every one still hashes to the sha256
-                                           you read (one draw.gd: --sha256 <hex>)
+                                           you read (one draw.gd: --sha256 <hex>); then the agent looks at its
+                                           renders once and may rewrite its note (--skip-self-check: don't)
   job accept --job <id> [--variants a,c]   apply the chosen options (default: all that rendered) to your checkout
   job dismiss --job <id> [--reason "..."]  throw the job away; the reason goes into .river/brief.md
 `
@@ -120,6 +126,13 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
         sha256: { type: "string", multiple: true },
         variants: { type: "string" },
         reason: { type: "string" },
+        by: { type: "string" },
+        "skip-self-check": { type: "boolean" },
+        passage: { type: "string" },
+        note: { type: "string" },
+        image: { type: "string" },
+        caption: { type: "string" },
+        licence: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     })
@@ -147,6 +160,7 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
       case "shots": return await cmdShots(resolve(cwd, rest[0] ?? "."), out)
       case "mark": return await cmdMark(rest[0], { root: resolve(cwd, values.root ?? "."), board: values.board ?? DEFAULT_BOARD, text: values.text, anchor: values.anchor, mark: values.mark }, out, err)
       case "board": return await cmdBoard(rest[0], { root: resolve(cwd, values.root ?? "."), board: values.board ?? DEFAULT_BOARD }, out, err)
+      case "card": return await cmdCard(rest[0], { ...values, root: resolve(cwd, values.root ?? "."), board: values.board ?? DEFAULT_BOARD }, out, err)
       case "job": return await cmdJob(rest[0], { ...values, root: resolve(cwd, values.root ?? ".") }, out, err)
       case "capture": {
         if (values.all) return await cmdCapture(resolve(cwd, rest[0] ?? "."), undefined, out, err)
