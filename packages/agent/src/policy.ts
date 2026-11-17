@@ -161,76 +161,98 @@ export async function proposedDiff(project: Project, tool: string, input: Record
   return undefined
 }
 
-const deny = (message: string): PermissionResult => ({ behavior: "deny", message })
+/** The outcome of the River policy for one tool call. Same shape the SDK and Claude Code's prompt tool expect. */
+export type PolicyResult = { behavior: "allow"; updatedInput: Record<string, unknown> } | { behavior: "deny"; message: string }
+
+export interface ToolCallInfo {
+  /** The tool_use id, when the caller knows it. Becomes the PermissionRequest id. */
+  toolUseId?: string
+  /** Path Claude Code flagged as outside the allowed directories (SDK only). */
+  blockedPath?: string
+  signal?: AbortSignal
+}
+
+const deny = (message: string): PolicyResult => ({ behavior: "deny", message })
+
+let requestSeq = 0
 
 /**
- * The River permission policy. Read-only River tools and AUTO_ALLOWED_WRITES are in allowedTools,
- * so the SDK does not call this for them; they are allowed here too in case it does.
+ * The River permission policy, shared by both backends (SDK canUseTool and the Claude Code
+ * permission prompt tool). Read-only River tools and AUTO_ALLOWED_WRITES are pre-allowed by the
+ * backend, so they usually do not get here; they are allowed here too in case they do.
  * - Read/Glob/Grep: allowed only on paths inside the game root.
- * - River write tools of the current mode: ask the user through onPermission.
- * - Anything else: denied.
+ * - River write tools of the current mode: ask the user through onPermission (with a diff).
+ * - Anything else (including the approval_prompt tool itself): denied.
  */
-export function createCanUseTool(ctx: PolicyContext): (...args: Parameters<CanUseTool>) => Promise<PermissionResult> {
-  const allowedInMode = new Set<string>(MODE_TOOLS[ctx.mode])
-  return async (toolName, input, options) => {
-    if ((BUILTIN_READ_TOOLS as readonly string[]).includes(toolName)) {
-      const p = str(input, toolName === "Read" ? "file_path" : "path")
-      if (p === undefined && toolName === "Read") return deny("Read needs a file_path")
-      const outside = `River only reads inside the game repo (${ctx.project.root})`
-      if (p !== undefined && !pathInsideRoot(ctx.project.root, p)) return deny(outside)
-      if (options.blockedPath && !pathInsideRoot(ctx.project.root, options.blockedPath)) return deny(outside)
-      // A pathless Glob/Grep searches the root, but a glob can still reach out ("C:/Users/**", "../**").
-      for (const key of ["pattern", "glob"] as const) {
-        if (toolName === "Grep" && key === "pattern") continue // Grep's pattern is a regex, not a path
-        const g = str(input, key)
-        if (g !== undefined && (path.isAbsolute(g) || /^[A-Za-z]:/.test(g) || g.startsWith("~") || /(^|[\\/])\.\.([\\/]|$)/.test(g))) {
-          return deny(outside)
-        }
-      }
-      return { behavior: "allow", updatedInput: input }
-    }
-
-    const tool = riverToolName(toolName)
-    if (!tool) return deny(`${toolName} is not available in River`)
-    if (!allowedInMode.has(tool)) return deny(`${tool} is not available in ${ctx.mode} mode`)
-    if ((READ_TOOLS as readonly string[]).includes(tool) || AUTO_ALLOWED_WRITES.includes(tool)) {
-      return { behavior: "allow", updatedInput: input }
-    }
-
-    if (tool === "implement_edit" || tool === "plan_mark_implemented") {
-      if (!ctx.plan) return deny(`${tool} needs an approved plan`)
-      if (input.planId !== undefined && input.planId !== ctx.plan.id) {
-        return deny(`This turn runs plan ${ctx.plan.id}; ${tool} must use that planId`)
+export async function decideToolCall(ctx: PolicyContext, toolName: string, input: Record<string, unknown>, info: ToolCallInfo = {}): Promise<PolicyResult> {
+  if ((BUILTIN_READ_TOOLS as readonly string[]).includes(toolName)) {
+    const p = str(input, toolName === "Read" ? "file_path" : "path")
+    if (p === undefined && toolName === "Read") return deny("Read needs a file_path")
+    const outside = `River only reads inside the game repo (${ctx.project.root})`
+    if (p !== undefined && !pathInsideRoot(ctx.project.root, p)) return deny(outside)
+    if (info.blockedPath && !pathInsideRoot(ctx.project.root, info.blockedPath)) return deny(outside)
+    // A pathless Glob/Grep searches the root, but a glob can still reach out ("C:/Users/**", "../**").
+    for (const key of ["pattern", "glob"] as const) {
+      if (toolName === "Grep" && key === "pattern") continue // Grep's pattern is a regex, not a path
+      const g = str(input, key)
+      if (g !== undefined && (path.isAbsolute(g) || /^[A-Za-z]:/.test(g) || g.startsWith("~") || /(^|[\\/])\.\.([\\/]|$)/.test(g))) {
+        return deny(outside)
       }
     }
-    if (tool === "implement_edit") {
-      if (!ctx.plan) return deny("implement_edit needs an approved plan")
-      const file = str(input, "file", "path")
-      if (!file) return deny("implement_edit needs a file")
-      try {
-        assertEditAllowed(ctx.project, ctx.plan, file)
-      } catch (err) {
-        return deny((err as Error).message)
-      }
-    }
-
-    const request: PermissionRequest = {
-      id: options.toolUseID,
-      tool,
-      summary: summarizeToolCall(tool, input),
-      input,
-    }
-    const diff = await proposedDiff(ctx.project, tool, input)
-    if (diff) request.diff = diff
-
-    if (options.signal.aborted) return deny("Turn aborted")
-    let decision: PermissionDecision
-    try {
-      decision = await ctx.onPermission(request)
-    } catch (err) {
-      return deny(`Permission request failed: ${(err as Error).message}`)
-    }
-    if (decision.behavior === "allow") return { behavior: "allow", updatedInput: input }
-    return deny(decision.message || "The user denied this change")
+    return { behavior: "allow", updatedInput: input }
   }
+
+  const allowedInMode = new Set<string>(MODE_TOOLS[ctx.mode])
+  const tool = riverToolName(toolName)
+  if (!tool) return deny(`${toolName} is not available in River`)
+  if (!allowedInMode.has(tool)) return deny(`${tool} is not available in ${ctx.mode} mode`)
+  if ((READ_TOOLS as readonly string[]).includes(tool) || AUTO_ALLOWED_WRITES.includes(tool)) {
+    return { behavior: "allow", updatedInput: input }
+  }
+
+  if (tool === "implement_edit" || tool === "plan_mark_implemented") {
+    if (!ctx.plan) return deny(`${tool} needs an approved plan`)
+    if (input.planId !== undefined && input.planId !== ctx.plan.id) {
+      return deny(`This turn runs plan ${ctx.plan.id}; ${tool} must use that planId`)
+    }
+  }
+  if (tool === "implement_edit") {
+    if (!ctx.plan) return deny("implement_edit needs an approved plan")
+    const file = str(input, "file", "path")
+    if (!file) return deny("implement_edit needs a file")
+    try {
+      assertEditAllowed(ctx.project, ctx.plan, file)
+    } catch (err) {
+      return deny((err as Error).message)
+    }
+  }
+
+  const request: PermissionRequest = {
+    id: info.toolUseId ?? `river-perm-${Date.now().toString(36)}-${++requestSeq}`,
+    tool,
+    summary: summarizeToolCall(tool, input),
+    input,
+  }
+  const diff = await proposedDiff(ctx.project, tool, input)
+  if (diff) request.diff = diff
+
+  if (info.signal?.aborted) return deny("Turn aborted")
+  let decision: PermissionDecision
+  try {
+    decision = await ctx.onPermission(request)
+  } catch (err) {
+    return deny(`Permission request failed: ${(err as Error).message}`)
+  }
+  if (decision.behavior === "allow") return { behavior: "allow", updatedInput: input }
+  return deny(decision.message || "The user denied this change")
+}
+
+/** The SDK backend's canUseTool: a thin wrapper over decideToolCall. */
+export function createCanUseTool(ctx: PolicyContext): (...args: Parameters<CanUseTool>) => Promise<PermissionResult> {
+  return (toolName, input, options) =>
+    decideToolCall(ctx, toolName, input, {
+      toolUseId: options.toolUseID,
+      ...(options.blockedPath ? { blockedPath: options.blockedPath } : {}),
+      signal: options.signal,
+    })
 }

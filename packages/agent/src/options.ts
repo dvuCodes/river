@@ -48,6 +48,30 @@ export function defaultMcpLaunch(): McpLaunch {
   return { command: process.execPath, args: ["--import", tsx, mcpEntryPath()] }
 }
 
+/** River tools the backend may run without asking: the mode's read tools plus AUTO_ALLOWED_WRITES, full MCP names. */
+export function preAllowedTools(mode: AgentTurnRequest["mode"]): string[] {
+  const modeTools = MODE_TOOLS[mode]
+  const readTools = modeTools.filter((t) => (READ_TOOLS as readonly string[]).includes(t))
+  const autoWrites = modeTools.filter((t) => AUTO_ALLOWED_WRITES.includes(t))
+  return [...readTools, ...autoWrites].map((t) => MCP_PREFIX + t)
+}
+
+/** The stdio config of the "river" MCP server, shared by both backends. */
+export function riverMcpServer(
+  mode: AgentTurnRequest["mode"],
+  root: string,
+  launch: McpLaunch,
+  extraArgs: string[] = [],
+): { command: string; args: string[]; env: Record<string, string> } {
+  return {
+    command: launch.command,
+    args: [...launch.args, "--root", root, "--tools", MODE_TOOLS[mode].join(","), ...extraArgs],
+    // The River server needs no Anthropic key; make sure it does not inherit one.
+    // Inside Electron, process.execPath is the app itself; ELECTRON_RUN_AS_NODE makes it run the script as Node.
+    env: { ANTHROPIC_API_KEY: "", ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}) },
+  }
+}
+
 export interface QueryOptionDeps {
   canUseTool: CanUseTool
   abortController: AbortController
@@ -65,16 +89,13 @@ export interface QueryOptionDeps {
 /** The query() options for one turn. Pure apart from resolving the default MCP launch. */
 export function buildQueryOptions(req: AgentTurnRequest, deps: QueryOptionDeps): Options {
   const root = deps.root ?? req.root
-  const modeTools = MODE_TOOLS[req.mode]
   const launch = deps.mcpLaunch ?? defaultMcpLaunch()
-  const readTools = modeTools.filter((t) => (READ_TOOLS as readonly string[]).includes(t))
-  const autoWrites = modeTools.filter((t) => AUTO_ALLOWED_WRITES.includes(t))
 
   const options: Options = {
     model: req.model,
     cwd: root,
     // `env` replaces the child environment, so start from a copy of the base env.
-    env: { ...(deps.baseEnv ?? process.env), ANTHROPIC_API_KEY: req.apiKey, CLAUDE_AGENT_SDK_CLIENT_APP: "river/0.1.0" },
+    env: { ...(deps.baseEnv ?? process.env), ANTHROPIC_API_KEY: req.apiKey ?? "", CLAUDE_AGENT_SDK_CLIENT_APP: "river/0.1.0" },
     // No filesystem settings: the game repo's .claude/ cannot add allow rules, hooks or MCP servers.
     settingSources: [],
     strictMcpConfig: true,
@@ -83,19 +104,11 @@ export function buildQueryOptions(req: AgentTurnRequest, deps: QueryOptionDeps):
     tools: [...BUILTIN_READ_TOOLS],
     // Read/Glob/Grep are NOT here on purpose: a bare allow rule would allow reads outside the root.
     // In-root reads are allowed by Claude Code itself; anything else reaches canUseTool, which checks the path.
-    allowedTools: [...readTools, ...autoWrites].map((t) => MCP_PREFIX + t),
+    allowedTools: preAllowedTools(req.mode),
     disallowedTools: [...DISALLOWED_BUILTINS],
     canUseTool: deps.canUseTool,
     mcpServers: {
-      river: {
-        type: "stdio",
-        command: launch.command,
-        args: [...launch.args, "--root", root, "--tools", modeTools.join(",")],
-        // The River server needs no Anthropic key; make sure it does not inherit one.
-        // Inside Electron, process.execPath is the app itself; ELECTRON_RUN_AS_NODE makes it run the script as Node.
-        env: { ANTHROPIC_API_KEY: "", ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}) },
-        alwaysLoad: true,
-      },
+      river: { type: "stdio", ...riverMcpServer(req.mode, root, launch), alwaysLoad: true },
     },
     systemPrompt: {
       type: "preset",

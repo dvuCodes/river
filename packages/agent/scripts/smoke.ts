@@ -36,6 +36,7 @@ try {
       model,
       prompt:
         "Read the story with story_read, then save a one-step plan (plan_save) that shortens the text of the Long path passage. Keep it short. Do not reply to any thread.",
+      backend: "api-key",
       apiKey,
     },
     {

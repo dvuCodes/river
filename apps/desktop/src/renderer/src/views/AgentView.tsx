@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { AgentEvent, AgentMode, AgentModel, PermissionRequest } from "@river/agent"
+import type { AgentBackend, AgentEvent, AgentMode, AgentModel, PermissionRequest } from "@river/agent"
 import type { AgentStatus } from "../../../shared/api"
 import { cx, errorText, useSmokeReady } from "../util"
 
@@ -156,16 +156,42 @@ function Diff({ text }: { text: string }) {
   )
 }
 
+/** Plain-text backend names (no logos). */
+export const BACKEND_LABEL: Record<AgentBackend, string> = {
+  "claude-code": "Claude Code (your Claude sign-in)",
+  "api-key": "Anthropic API key",
+}
+
+const PLAN_NAME: Record<string, string> = { max: "Max", pro: "Pro", team: "Team", enterprise: "Enterprise", free: "Free" }
+
+/** One line about the Claude Code sign-in, e.g. "Signed in · Max plan". */
+export function claudeCodeLine(s: AgentStatus["claudeCode"]): string {
+  if (!s) return "Checking Claude Code…"
+  if (!s.installed) return "Claude Code not found"
+  if (!s.loggedIn) return "Not signed in"
+  const plan = s.subscriptionType ? `${PLAN_NAME[s.subscriptionType] ?? s.subscriptionType} plan` : s.authMethod === "claude.ai" ? "Claude account" : (s.authMethod ?? "")
+  return plan ? `Signed in · ${plan}` : "Signed in"
+}
+
 export function AgentView(props: {
   session: AgentSession
   status: AgentStatus | null
+  onStatus(s: AgentStatus): void
   ctx: AgentContext
   setCtx(c: AgentContext): void
   storyRel: string | undefined
   onSettings(): void
 }) {
-  const { session, status, ctx, setCtx, storyRel, onSettings } = props
-  const [model, setModel] = useState<AgentModel>("claude-opus-5-5")
+  const { session, status, onStatus, ctx, setCtx, storyRel, onSettings } = props
+  const [model, setModel] = useState<AgentModel>(status?.model ?? "claude-opus-5-5")
+  const statusModel = status?.model
+  useEffect(() => {
+    if (statusModel) setModel(statusModel)
+  }, [statusModel])
+  const pickModel = (m: AgentModel) => {
+    setModel(m)
+    void window.river.setAgentPrefs({ model: m }).then(onStatus, () => {})
+  }
   const [prompt, setPrompt] = useState("")
   const log = useRef<HTMLDivElement>(null)
   useSmokeReady("agent", status !== null)
@@ -174,7 +200,17 @@ export function AgentView(props: {
     log.current?.scrollTo({ top: log.current.scrollHeight })
   }, [session.items])
 
-  const blocked = !status?.available ? "unavailable" : !status.hasKey ? "nokey" : ctx.mode === "implement" && !ctx.planId ? "noplan" : null
+  const backend = status?.backend ?? "api-key"
+  const cc = status?.claudeCode
+  const blocked = !status?.available
+    ? "unavailable"
+    : backend === "api-key" && !status.hasKey
+      ? "nokey"
+      : backend === "claude-code" && !(cc?.installed && cc.loggedIn)
+        ? "nosignin"
+        : ctx.mode === "implement" && !ctx.planId
+          ? "noplan"
+          : null
   const send = () => {
     const text = prompt.trim() || (ctx.mode === "plan" ? "Answer this review thread with a change plan." : ctx.mode === "implement" ? "Run the approved plan." : "")
     if (!text || blocked || session.running) return
@@ -195,7 +231,7 @@ export function AgentView(props: {
         </div>
         <label className="tb-field">
           <span className="tb-label">Model</span>
-          <select value={model} onChange={(e) => setModel(e.target.value as AgentModel)}>
+          <select value={model} onChange={(e) => pickModel(e.target.value as AgentModel)}>
             <option value="claude-opus-5-5">Opus 5.5</option>
             <option value="claude-sonnet-5-5">Sonnet 5.5</option>
           </select>
@@ -206,8 +242,9 @@ export function AgentView(props: {
             New conversation
           </button>
         )}
-        <button className="btn" onClick={onSettings}>
-          API key…
+        <button className="chip chip-btn" onClick={onSettings} title="Change the backend in Settings">
+          {backend === "claude-code" ? "Claude Code" : "API key"}
+          {backend === "claude-code" && cc ? ` · ${claudeCodeLine(cc)}` : ""}
         </button>
       </div>
       <div className="agentview">
@@ -218,11 +255,19 @@ export function AgentView(props: {
                 <b>Agent unavailable.</b> {status.reason} The rest of River works without it.
               </div>
             )}
-            {status?.available && !status.hasKey && (
+            {blocked === "nokey" && (
               <div className="banner">
                 Add an Anthropic API key to talk to the agent. It is encrypted with the system keychain and never leaves the main process.{" "}
                 <button className="link-btn" onClick={onSettings}>
                   Add key
+                </button>
+              </div>
+            )}
+            {blocked === "nosignin" && (
+              <div className="banner">
+                {claudeCodeLine(cc ?? null)}. River runs your own Claude Code; sign in to it, or switch to an API key.{" "}
+                <button className="link-btn" onClick={onSettings}>
+                  Open settings
                 </button>
               </div>
             )}

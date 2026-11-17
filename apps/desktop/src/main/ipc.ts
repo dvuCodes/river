@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { userInfo } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
-import type { AgentEvent, PermissionDecision } from "@river/agent"
+import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, PermissionDecision } from "@river/agent"
 import { createGodotAdapter } from "@river/adapter-godot"
 import {
   type Capture,
@@ -42,6 +42,7 @@ import {
   updatePassageText,
 } from "@river/core"
 import type {
+  AgentPrefsUpdate,
   AgentStartRequest,
   AgentStatus,
   CaptureDTO,
@@ -183,13 +184,41 @@ const author = () => {
 const turns = new Map<string, AbortController>()
 const pendingPermissions = new Map<string, (d: PermissionDecision) => void>()
 
-async function agentStatus(): Promise<AgentStatus> {
+/** Last `claude auth status` result (allowlisted fields only; never written to disk). */
+let claudeCache: ClaudeCodeStatus | null = null
+let claudeCheck: Promise<ClaudeCodeStatus | null> | undefined
+const CLAUDE_STATUS_TIMEOUT_MS = 20_000
+
+async function claudeStatus(refresh: boolean): Promise<ClaudeCodeStatus | null> {
+  if (claudeCache && !refresh) return claudeCache
+  claudeCheck ??= (async () => {
+    const agent = await loadAgent()
+    if (!agent.claudeStatus) return null
+    const timeout = new Promise<null>((r) => setTimeout(() => r(null), CLAUDE_STATUS_TIMEOUT_MS))
+    const s = await Promise.race([agent.claudeStatus(settings.getAgentPrefs().claudePath).catch(() => null), timeout])
+    if (s) claudeCache = s
+    return claudeCache
+  })().finally(() => {
+    claudeCheck = undefined
+  })
+  return claudeCheck
+}
+
+async function agentStatus(refreshClaude = false): Promise<AgentStatus> {
   const agent = await loadAgent()
+  const prefs = settings.getAgentPrefs()
+  const claudeCode = await claudeStatus(refreshClaude)
+  const fallback = claudeCode?.installed && claudeCode.loggedIn ? "claude-code" : "api-key"
   return {
     available: Boolean(agent.start),
     ...(agent.reason ? { reason: agent.reason } : {}),
     hasKey: settings.hasApiKey(),
     encryptionAvailable: await settings.encryptionAvailable(),
+    backend: prefs.backend ?? fallback,
+    backendChosen: prefs.backend !== undefined,
+    model: prefs.model,
+    ...(prefs.claudePath ? { claudePath: prefs.claudePath } : {}),
+    claudeCode,
   }
 }
 
@@ -287,6 +316,17 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
   handle("plan:status", (planId: string, status: ChangePlan["status"]) => setPlanStatus(need(), planId, status))
 
   handle("agent:status", () => agentStatus())
+  handle("agent:refreshStatus", () => agentStatus(true))
+  handle("settings:setAgentPrefs", (p: AgentPrefsUpdate) => {
+    settings.setAgentPrefs(p)
+    // A new claude path needs a new status check.
+    return agentStatus(p.claudePath !== undefined)
+  })
+  handle("claude:signIn", async () => {
+    const agent = await loadAgent()
+    if (!agent.claudeSignIn) throw new Error(agent.reason ?? "The agent is unavailable.")
+    await agent.claudeSignIn(settings.getAgentPrefs().claudePath)
+  })
   handle("settings:setKey", async (key: string) => {
     await settings.setApiKey(key)
     return agentStatus()
@@ -299,9 +339,18 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
     const p = need()
     const agent = await loadAgent()
     if (!agent.start) throw new Error(agent.reason ?? "The agent is unavailable.")
-    const apiKey = await settings.getApiKey()
-    if (!apiKey) throw new Error("Add an Anthropic API key in Settings first.")
+    const status = await agentStatus()
     const { turnId, ...turn } = req
+    let auth: Pick<AgentTurnRequest, "backend" | "apiKey" | "claudePath">
+    if (status.backend === "api-key") {
+      const apiKey = await settings.getApiKey()
+      if (!apiKey) throw new Error("Add an Anthropic API key in Settings first.")
+      auth = { backend: "api-key", apiKey }
+    } else {
+      auth = { backend: "claude-code", ...(status.claudePath ? { claudePath: status.claudePath } : {}) }
+    }
+    // The model picker is per turn; remember the last one.
+    if (turn.model !== status.model) settings.setAgentPrefs({ model: turn.model })
     const ac = new AbortController()
     turns.set(turnId, ac)
     let ended = false
@@ -312,7 +361,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
     Promise.resolve()
       .then(() =>
         agent.start!(
-          { ...turn, root: p.root, apiKey },
+          { ...turn, root: p.root, ...auth },
           {
             onEvent: emit,
             onPermission: (request) =>

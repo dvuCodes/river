@@ -11,6 +11,15 @@ River is a game dev harness for branching stories and game frames. It works with
 
 River reads and writes Twee 3 and imports Twine 2 archives, using the published specs. It is not affiliated with Twine.
 
+## Agent backends
+
+The in-app agent runs in one of two ways. Pick one in Settings; the model can change on every turn.
+
+- **Claude Code (your Claude sign-in).** River runs your own installed `claude` CLI ([install it](https://code.claude.com/docs/en/setup)) in headless mode. You sign in to Claude Code itself: the Sign in button opens a terminal running `claude auth login`, Anthropic's own flow. River never reads, stores or forwards your sign-in, and it removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the CLI's environment so the CLI uses that sign-in. Settings shows only whether you are signed in and your plan type. The CLI runs without your user or project settings, with only River's MCP server and the Read, Glob and Grep tools. Each permission prompt goes to River through `river-mcp`'s `approval_prompt` tool.
+- **Anthropic API key.** River runs the Claude Agent SDK with a key you paste in Settings. The key is encrypted with the system's secure storage.
+
+Both use the same permission policy: reads stay inside the game repo, every write asks you first, and anything else is denied.
+
 ## Status
 
 Early development. See `examples/park-walk` for a small story.

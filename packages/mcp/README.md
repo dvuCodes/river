@@ -21,11 +21,12 @@ Everything after `--` is the server command. Add `-s project` to write the entry
 ## Options
 
 ```
-river-mcp --root <dir> [--tools name,name,...]
+river-mcp --root <dir> [--tools name,name,...] [--approval-pipe <name>]
 ```
 
 - `--root` is required. It is the game repo, the folder with `river.json`.
 - `--tools` serves only the tools you name. The default is all 17.
+- `--approval-pipe` is for the River app only. It adds `approval_prompt`, the tool Claude Code calls for permission prompts (`--permission-prompt-tool mcp__river__approval_prompt`). The tool asks the River app over that local named pipe or socket, and denies on any error or timeout. It is never one of the `--tools`.
 
 Read-only tools: `project_info`, `story_list`, `story_read`, `story_lint`, `story_paths`, `playtest_run`, `frames_list`, `review_list`, `plan_list`, `plan_read`.
 

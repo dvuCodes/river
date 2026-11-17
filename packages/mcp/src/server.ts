@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadProject } from "@river/core"
 import type { Project } from "@river/core"
+import { APPROVAL_TOOL_NAME, approvalInputSchema, requestApproval } from "./approval"
 import { createRiverTools, RIVER_TOOL_NAMES } from "./tools"
 import type { RiverTool, RiverToolsOptions } from "./tools"
 
@@ -11,6 +12,34 @@ export const SERVER_VERSION = "0.1.0"
 export interface ServerOptions extends RiverToolsOptions {
   /** Only register these tools. Default: all of them. */
   tools?: readonly string[]
+  /**
+   * Local pipe/socket of the River agent host. When set, the server also offers `approval_prompt`,
+   * the permission prompt tool for the Claude Code backend. Never part of `tools`.
+   */
+  approvalPipe?: string
+}
+
+/**
+ * Register `approval_prompt`. Claude Code requires exactly one text block back and no
+ * structuredContent, so this does not go through the River tool wrapper.
+ */
+function registerApprovalTool(server: McpServer, pipe: string): void {
+  server.registerTool(
+    APPROVAL_TOOL_NAME,
+    {
+      description: "Internal: River's permission prompt for Claude Code. Not for the model to call.",
+      inputSchema: approvalInputSchema,
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async (args: { tool_name: string; input?: Record<string, unknown>; tool_use_id?: string }) => {
+      const answer = await requestApproval(pipe, {
+        tool_name: args.tool_name,
+        input: args.input ?? {},
+        ...(args.tool_use_id ? { tool_use_id: args.tool_use_id } : {}),
+      })
+      return { content: [{ type: "text" as const, text: JSON.stringify(answer) }] }
+    },
+  )
 }
 
 /** Pick tools by name. Throws on a name River does not have. */
@@ -48,6 +77,7 @@ export function createServer(project: Project, opts: ServerOptions = {}): McpSer
       },
     )
   }
+  if (opts.approvalPipe) registerApprovalTool(server, opts.approvalPipe)
   return server
 }
 

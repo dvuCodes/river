@@ -125,9 +125,29 @@ export function App() {
 
   useEffect(() => {
     void window.river.getProject().then(applyProject)
-    void window.river.agentStatus().then(setAgentStatus, () => setAgentStatus({ available: false, reason: "Status check failed.", hasKey: false, encryptionAvailable: false }))
+    void window.river.agentStatus().then(setAgentStatus, () =>
+      setAgentStatus({
+        available: false,
+        reason: "Status check failed.",
+        hasKey: false,
+        encryptionAvailable: false,
+        backend: "api-key",
+        backendChosen: false,
+        model: "claude-opus-5-5",
+        claudeCode: null,
+      }),
+    )
     return window.river.onNavigate((v) => setView(v))
   }, [applyProject])
+
+  // Coming back to the window (e.g. from the Claude sign-in terminal): check the sign-in again.
+  useEffect(() => {
+    const onFocus = () => {
+      void window.river.refreshAgentStatus().then(setAgentStatus, () => {})
+    }
+    window.addEventListener("focus", onFocus)
+    return () => window.removeEventListener("focus", onFocus)
+  }, [])
 
   const loadStory = useCallback(async (rel: string) => {
     if (!rel) return
@@ -264,7 +284,7 @@ export function App() {
         ) : view === "frames" ? (
           <FramesView tick={framesTick} onAgent={onAgentIntent} />
         ) : (
-          <AgentView session={agent} status={agentStatus} ctx={agentCtx} setCtx={setAgentCtx} storyRel={storyRel || undefined} onSettings={() => setSettingsOpen(true)} />
+          <AgentView session={agent} status={agentStatus} onStatus={setAgentStatus} ctx={agentCtx} setCtx={setAgentCtx} storyRel={storyRel || undefined} onSettings={() => setSettingsOpen(true)} />
         )}
       </div>
       {settingsOpen && <SettingsDialog status={agentStatus} onStatus={setAgentStatus} onClose={() => setSettingsOpen(false)} />}

@@ -1,36 +1,58 @@
 import { useEffect, useRef, useState } from "react"
+import type { AgentBackend } from "@river/agent"
 import type { AgentStatus } from "../../../shared/api"
 import { errorText } from "../util"
+import { BACKEND_LABEL, claudeCodeLine } from "../views/AgentView"
+
+const SETUP_URL = "https://code.claude.com/docs/en/setup"
 
 export function SettingsDialog(props: { status: AgentStatus | null; onStatus(s: AgentStatus): void; onClose(): void }) {
   const { status, onStatus, onClose } = props
   const [key, setKey] = useState("")
+  const [claudePath, setClaudePath] = useState(status?.claudePath ?? "")
   const [err, setErr] = useState<string | null>(null)
-  const [saved, setSaved] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+  const [checking, setChecking] = useState(false)
   const ref = useRef<HTMLDialogElement>(null)
 
   useEffect(() => {
     ref.current?.showModal()
   }, [])
 
-  const save = async () => {
+  const backend = status?.backend ?? "api-key"
+  const cc = status?.claudeCode ?? null
+
+  const act = async (fn: () => Promise<AgentStatus | void>, ok?: string) => {
     try {
-      onStatus(await window.river.setApiKey(key))
-      setKey("")
+      const s = await fn()
+      if (s) onStatus(s)
       setErr(null)
-      setSaved(true)
+      setNote(ok ?? null)
     } catch (e) {
       setErr(errorText(e))
+      setNote(null)
     }
   }
-  const clear = async () => {
-    try {
-      onStatus(await window.river.clearApiKey())
-      setSaved(false)
-    } catch (e) {
-      setErr(errorText(e))
-    }
+  const save = () =>
+    act(async () => {
+      const s = await window.river.setApiKey(key)
+      setKey("")
+      return s
+    }, "Key saved.")
+  const clear = () => act(() => window.river.clearApiKey())
+  const pickBackend = (b: AgentBackend) => act(() => window.river.setAgentPrefs({ backend: b }))
+  const refresh = async () => {
+    setChecking(true)
+    await act(() => window.river.refreshAgentStatus())
+    setChecking(false)
   }
+  const savePath = async () => {
+    setChecking(true)
+    await act(() => window.river.setAgentPrefs({ claudePath }))
+    setChecking(false)
+  }
+  const signIn = () =>
+    act(() => window.river.openClaudeSignIn(), "A terminal window opened with Claude Code's own sign-in. Finish there, then come back here (or press Refresh).")
 
   return (
     <dialog ref={ref} className="dialog" onClose={onClose} onCancel={onClose}>
@@ -47,19 +69,74 @@ export function SettingsDialog(props: { status: AgentStatus | null; onStatus(s: 
             ×
           </button>
         </header>
-        <label className="field">
-          <span>Anthropic API key</span>
-          <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder={status?.hasKey ? "•••••••• stored — paste to replace" : "sk-ant-…"} />
-        </label>
-        <p className="dialog-note">
-          Stored in the app's data folder, encrypted with the system's secure storage. Only the main process reads it, to pass it to the agent; the
-          window never sees it.
-        </p>
-        {status && !status.encryptionAvailable && <p className="err-note">Secure storage is not available on this system, so a key cannot be saved.</p>}
+
+        <fieldset className="field backend-pick">
+          <legend>Agent backend</legend>
+          {(["claude-code", "api-key"] as const).map((b) => (
+            <label key={b} className="radio-row">
+              <input type="radio" name="backend" checked={backend === b} onChange={() => void pickBackend(b)} />
+              <span>{BACKEND_LABEL[b]}</span>
+            </label>
+          ))}
+        </fieldset>
+
+        {backend === "claude-code" ? (
+          <>
+            <div className="cc-status">
+              <span className={cc?.installed && cc.loggedIn ? "ok-note" : "dialog-note"}>
+                {claudeCodeLine(cc)}
+                {cc?.version ? ` · v${cc.version}` : ""}
+              </span>
+              <span className="tb-spacer" />
+              {cc?.installed && !cc.loggedIn && (
+                <button type="button" className="btn btn-primary" onClick={() => void signIn()}>
+                  Sign in
+                </button>
+              )}
+              <button type="button" className="btn" disabled={checking} onClick={() => void refresh()}>
+                {checking ? "Checking…" : "Refresh"}
+              </button>
+            </div>
+            {cc && !cc.installed && (
+              <p className="dialog-note">
+                Install Claude Code ({SETUP_URL}), sign in to it, then press Refresh. Or set its path below.
+              </p>
+            )}
+            <label className="field">
+              <span>Claude Code path (optional)</span>
+              <input
+                type="text"
+                spellCheck={false}
+                value={claudePath}
+                onChange={(e) => setClaudePath(e.target.value)}
+                onBlur={() => {
+                  if (claudePath.trim() !== (status?.claudePath ?? "")) void savePath()
+                }}
+                placeholder="claude on PATH"
+              />
+            </label>
+            <p className="dialog-note">
+              River runs your own installed Claude Code. You sign in to Claude Code itself, in its own window; River never sees, stores or
+              forwards your sign-in, and usage counts against your own Claude plan.
+            </p>
+          </>
+        ) : (
+          <>
+            <label className="field">
+              <span>Anthropic API key</span>
+              <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder={status?.hasKey ? "•••••••• stored — paste to replace" : "sk-ant-…"} />
+            </label>
+            <p className="dialog-note">
+              Stored in the app's data folder, encrypted with the system's secure storage. Only the main process reads it, to pass it to the agent; the
+              window never sees it.
+            </p>
+            {status && !status.encryptionAvailable && <p className="err-note">Secure storage is not available on this system, so a key cannot be saved.</p>}
+          </>
+        )}
         {err && <p className="err-note">{err}</p>}
-        {saved && <p className="ok-note">Key saved.</p>}
+        {note && <p className="ok-note">{note}</p>}
         <footer className="dialog-foot">
-          {status?.hasKey && (
+          {backend === "api-key" && status?.hasKey && (
             <button type="button" className="btn btn-danger" onClick={() => void clear()}>
               Remove key
             </button>
@@ -68,9 +145,11 @@ export function SettingsDialog(props: { status: AgentStatus | null; onStatus(s: 
           <button type="button" className="btn" onClick={onClose}>
             Close
           </button>
-          <button type="submit" className="btn btn-primary" disabled={!key.trim()}>
-            Save key
-          </button>
+          {backend === "api-key" && (
+            <button type="submit" className="btn btn-primary" disabled={!key.trim()}>
+              Save key
+            </button>
+          )}
         </footer>
       </form>
     </dialog>
