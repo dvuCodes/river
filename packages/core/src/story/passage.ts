@@ -96,6 +96,7 @@ function splitRules(segment: string): { word: string; body: string }[] {
   const marks: { word: string; at: number; bodyStart: number }[] = []
   let m: RegExpExecArray | null
   while ((m = re.exec(segment))) {
+    if (insideQuotes(segment, m.index)) continue
     marks.push({ word: m[1]!, at: m.index, bodyStart: m.index + m[0].length })
   }
   marks.forEach((mk, i) => {
@@ -112,6 +113,33 @@ export function parseCost(src: string): Effect[] {
     if (!m) throw new Error(`bad cost "${part.trim()}" (expected "var n")`)
     return { variable: m[1]!, op: "add" as const, amount: -Number(m[2]!) }
   })
+}
+
+/** True when `at` is inside a double-quoted string of `text` (backslash escapes the next character). */
+function insideQuotes(text: string, at: number): boolean {
+  let inside = false
+  for (let i = 0; i < at; i++) {
+    if (text[i] === "\\") i++
+    else if (text[i] === '"') inside = !inside
+  }
+  return inside
+}
+
+/** `"Costs one treat"` -> Costs one treat. Unquoted text is taken as written. */
+function parseHint(body: string): string {
+  if (!body.startsWith('"')) return body
+  if (body.length < 2 || !body.endsWith('"')) throw new Error(`unterminated string in @hint ${body}`)
+  return body.slice(1, -1).replace(/\\(.)/g, "$1")
+}
+
+/**
+ * The line index of the `--` that ends a passage's rule block, or undefined when the text has none.
+ * A rule block is one or more lines starting with `@` at the very top, then `--` (trailing spaces allowed).
+ */
+export function ruleBlockEnd(lines: string[]): number | undefined {
+  let i = 0
+  while (i < lines.length && lines[i]!.startsWith("@")) i++
+  return i > 0 && i < lines.length && lines[i]!.trimEnd() === "--" ? i : undefined
 }
 
 function andCond(a: Cond | undefined, b: Cond): Cond {
@@ -146,38 +174,35 @@ export function parsePassage(input: PassageInput): { passage: Passage; diagnosti
   const diag = (severity: Diagnostic["severity"], message: string, lineNo: number, column = 1) =>
     diagnostics.push({ severity, code: "parse", message: `${name}: ${message}`, span: { file, line: lineNo, column } })
 
-  if (!isCode) {
-    let i = 0
-    while (i < lines.length && lines[i]!.startsWith("@")) i++
-    if (i < lines.length && lines[i] === "--") {
-      textStart = i + 1
-      for (let k = 0; k < i; k++) {
-        const ln = lines[k]!
-        const lineNo = line + 1 + k
-        const m = /^@([A-Za-z]+)\s*([\s\S]*)$/.exec(ln)
-        const word = m?.[1] ?? ""
-        const body = (m?.[2] ?? "").trim()
-        try {
-          switch (word) {
-            case "id":
-              if (!body) diag("error", "@id needs a value", lineNo)
-              else id = body
-              break
-            case "when":
-              when = andCond(when, parseCond(body))
-              break
-            case "set":
-              onEnter.push(...parseEffects(body))
-              break
-            case "end":
-              isEnding = true
-              break
-            default:
-              diag("warn", `unknown rule "@${word}"`, lineNo)
-          }
-        } catch (e) {
-          diag("error", (e as Error).message, lineNo)
+  const blockEnd = isCode ? undefined : ruleBlockEnd(lines)
+  if (blockEnd !== undefined) {
+    textStart = blockEnd + 1
+    for (let k = 0; k < blockEnd; k++) {
+      const ln = lines[k]!
+      const lineNo = line + 1 + k
+      const m = /^@([A-Za-z]+)\s*([\s\S]*)$/.exec(ln)
+      const word = m?.[1] ?? ""
+      const body = (m?.[2] ?? "").trim()
+      try {
+        switch (word) {
+          case "id":
+            if (!body) diag("error", "@id needs a value", lineNo)
+            else id = body
+            break
+          case "when":
+            when = andCond(when, parseCond(body))
+            break
+          case "set":
+            onEnter.push(...parseEffects(body))
+            break
+          case "end":
+            isEnding = true
+            break
+          default:
+            diag("warn", `unknown rule "@${word}"`, lineNo)
         }
+      } catch (e) {
+        diag("error", (e as Error).message, lineNo)
       }
     }
   }
@@ -207,6 +232,7 @@ export function parsePassage(input: PassageInput): { passage: Passage; diagnosti
                 case "cost": choice.cost.push(...parseCost(r.body)); break
                 case "set": choice.set.push(...parseEffects(r.body)); break
                 case "when": choice.when = andCond(choice.when, parseCond(r.body)); break
+                case "hint": choice.hint = parseHint(r.body); break
                 default: diag("warn", `unknown choice rule "@${r.word}"`, lineNo, l.end + 1)
               }
             } catch (e) {

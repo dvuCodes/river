@@ -1,4 +1,5 @@
-import { parsePassage, rewriteLinks, slugify } from "./passage"
+import { parsePassage, rewriteLinks, ruleBlockEnd, slugify } from "./passage"
+import { RETURN_TARGET } from "./types"
 import type { Passage, Story } from "./types"
 
 /** "Pond!" -> "pond", "Long path" -> "long_path". Lowercase, [a-z0-9_] only. */
@@ -9,6 +10,20 @@ export function slug(name: string): string {
 /** Find the passage a choice target names: by name first, then by id. */
 export function resolveTarget(story: Story, target: string): Passage | undefined {
   return story.passages.find((p) => p.name === target) ?? story.passages.find((p) => p.id === target)
+}
+
+/** Where a choice leads: a passage, back to the passage an interrupt interrupted, or nowhere (a broken link). */
+export type ChoiceTarget = { kind: "passage"; passage: Passage } | { kind: "return" } | { kind: "missing" }
+
+export function choiceTarget(story: Story, target: string): ChoiceTarget {
+  if (target === RETURN_TARGET) return { kind: "return" }
+  const passage = resolveTarget(story, target)
+  return passage ? { kind: "passage", passage } : { kind: "missing" }
+}
+
+/** A passage tagged `interrupt`: the game can enter it from any passage while its @when holds. */
+export function isInterrupt(p: Passage): boolean {
+  return p.tags.includes("interrupt")
 }
 
 export function passageById(story: Story, id: string): Passage | undefined {
@@ -99,11 +114,7 @@ export function updatePassageText(story: Story, passageId: string, rawText: stri
  * rules block (`@id ...` then `--`) when the text has none.
  */
 function withIdRule(rawText: string, id: string): string {
-  const lines = rawText.split("\n")
-  let i = 0
-  while (i < lines.length && lines[i]!.startsWith("@")) i++
-  const hasRules = i < lines.length && lines[i] === "--"
-  return hasRules ? `@id ${id}\n${rawText}` : `@id ${id}\n--\n${rawText}`
+  return ruleBlockEnd(rawText.split("\n")) !== undefined ? `@id ${id}\n${rawText}` : `@id ${id}\n--\n${rawText}`
 }
 
 /**

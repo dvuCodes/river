@@ -1,12 +1,15 @@
 /**
- * Can a set of conditions all be true at once, given the schema ranges?
- * Conditions are put in negation normal form, expanded to DNF, and each clause is
- * checked by narrowing one domain per variable (an interval for numbers, a value set
- * for bool and enum). Number/int min and max are hard bounds because applyEffects clamps.
- * Unknown variables are unconstrained. If the DNF grows too large we answer "satisfiable"
- * (we only want to flag conditions that are certainly impossible).
+ * Which states the conditions and effects along a route allow, one variable at a time: an interval for numbers,
+ * a value set for bool and enum. A Box maps each constrained variable to its domain; a variable missing from a
+ * box can be anything in its schema range. A list of boxes is their union: a condition with `or` splits a box.
+ *
+ * Conditions compare one variable with a constant and effects change one variable by a constant, so variables
+ * only interact through `or`. Every step over-approximates (too many boxes merge into one that covers them all,
+ * an int `*=` keeps whole bounds), so an empty list means "certainly impossible". Number/int min and max are hard
+ * bounds because applyEffects clamps. Unknown variables are never constrained.
  */
-import type { CmpOp, Cond, StateSchema, VarDecl } from "../story/types"
+import { settleNumber } from "../story/cond"
+import type { CmpOp, Cond, Effect, StateSchema, VarDecl } from "../story/types"
 
 type Atom = { variable: string; op: CmpOp; value: number | string | boolean }
 
@@ -29,6 +32,7 @@ function nnf(c: Cond, neg: boolean): Cond {
 }
 
 const MAX_CLAUSES = 2000
+const MAX_BOXES = 32
 
 /** DNF of an NNF condition: a list of clauses, each a list of atoms. Null if too big. */
 function dnf(c: Cond): Atom[][] | null {
@@ -60,12 +64,33 @@ function dnf(c: Cond): Atom[][] | null {
   }
 }
 
-interface NumDom { lo: number; loStrict: boolean; hi: number; hiStrict: boolean; isInt: boolean; not: Set<number> }
+interface NumDom { kind: "num"; lo: number; loStrict: boolean; hi: number; hiStrict: boolean; isInt: boolean; not: Set<number> }
+interface SetDom { kind: "set"; values: Set<string | boolean> }
+type Dom = NumDom | SetDom
+export type Box = Map<string, Dom>
+
+/** Any state within the schema ranges. */
+export const anyState = (): Box[] => [new Map()]
+
+function fullDom(decl: VarDecl): Dom {
+  if (decl.type === "number" || decl.type === "int") {
+    return { kind: "num", lo: decl.min ?? -Infinity, loStrict: false, hi: decl.max ?? Infinity, hiStrict: false, isInt: decl.type === "int", not: new Set() }
+  }
+  return { kind: "set", values: new Set<string | boolean>(decl.type === "bool" ? [true, false] : decl.values) }
+}
+
+const copyDom = (d: Dom): Dom => (d.kind === "num" ? { ...d, not: new Set(d.not) } : { kind: "set", values: new Set(d.values) })
+
+/** The smallest and largest whole numbers an int domain allows. */
+function intBounds(d: NumDom): { lo: number; hi: number } {
+  const lo = d.lo === -Infinity ? -Infinity : d.loStrict && Number.isInteger(d.lo) ? d.lo + 1 : Math.ceil(d.lo)
+  const hi = d.hi === Infinity ? Infinity : d.hiStrict && Number.isInteger(d.hi) ? d.hi - 1 : Math.floor(d.hi)
+  return { lo, hi }
+}
 
 function numEmpty(d: NumDom): boolean {
   if (d.isInt) {
-    const lo = d.lo === -Infinity ? -Infinity : d.loStrict && Number.isInteger(d.lo) ? d.lo + 1 : Math.ceil(d.lo)
-    const hi = d.hi === Infinity ? Infinity : d.hiStrict && Number.isInteger(d.hi) ? d.hi - 1 : Math.floor(d.hi)
+    const { lo, hi } = intBounds(d)
     if (lo > hi) return true
     if (hi - lo + 1 <= d.not.size) {
       for (let v = lo; v <= hi; v++) if (!d.not.has(v)) return false
@@ -78,61 +103,166 @@ function numEmpty(d: NumDom): boolean {
   return false
 }
 
-function clauseSatisfiable(clause: Atom[], schema: StateSchema): boolean {
-  const nums = new Map<string, NumDom>()
-  const sets = new Map<string, Set<string | boolean>>()
+/** Narrow one domain to the values that satisfy the atom. False when none is left. */
+function narrowDom(d: Dom, a: Atom): boolean {
+  if (d.kind === "num") {
+    if (typeof a.value !== "number") return a.op === "!="
+    const v = a.value
+    switch (a.op) {
+      case "==":
+        if (v > d.lo || (v === d.lo && !d.loStrict)) { d.lo = v; d.loStrict = false } else return false
+        if (v < d.hi || (v === d.hi && !d.hiStrict)) { d.hi = v; d.hiStrict = false } else return false
+        break
+      case "!=": d.not.add(v); break
+      case ">": if (v >= d.lo) { d.lo = v; d.loStrict = true } break
+      case ">=": if (v > d.lo) { d.lo = v; d.loStrict = false } break
+      case "<": if (v <= d.hi) { d.hi = v; d.hiStrict = true } break
+      case "<=": if (v < d.hi) { d.hi = v; d.hiStrict = false } break
+    }
+    return !numEmpty(d)
+  }
+  if (a.op === "==") {
+    const keep = d.values.has(a.value as string | boolean)
+    d.values.clear()
+    if (keep) d.values.add(a.value as string | boolean)
+  } else if (a.op === "!=") {
+    d.values.delete(a.value as string | boolean)
+  } else {
+    return false // ordering on bool/enum is never true
+  }
+  return d.values.size > 0
+}
+
+function narrowBox(box: Box, clause: Atom[], schema: StateSchema): Box | undefined {
+  const out: Box = new Map(box)
+  const copied = new Set<string>()
   for (const a of clause) {
-    const decl: VarDecl | undefined = schema[a.variable]
+    const decl = schema[a.variable]
     if (!decl) continue // unknown variable: no constraint
-    if (decl.type === "number" || decl.type === "int") {
-      let d = nums.get(a.variable)
-      if (!d) {
-        d = { lo: decl.min ?? -Infinity, loStrict: false, hi: decl.max ?? Infinity, hiStrict: false, isInt: decl.type === "int", not: new Set() }
-        nums.set(a.variable, d)
+    if (!copied.has(a.variable)) {
+      const cur = out.get(a.variable)
+      out.set(a.variable, cur ? copyDom(cur) : fullDom(decl))
+      copied.add(a.variable)
+    }
+    if (!narrowDom(out.get(a.variable)!, a)) return undefined
+  }
+  return out
+}
+
+/** One box that covers all of them. A variable free in any box is free in the result. */
+function hull(boxes: Box[]): Box {
+  const [first, ...rest] = boxes
+  const out: Box = new Map()
+  for (const [name, d0] of first!) {
+    const d = copyDom(d0)
+    const others = rest.map((b) => b.get(name))
+    if (others.some((e) => e === undefined)) continue
+    for (const e of others as Dom[]) {
+      if (d.kind === "set" && e.kind === "set") {
+        for (const v of e.values) d.values.add(v)
+      } else if (d.kind === "num" && e.kind === "num") {
+        if (e.lo < d.lo) { d.lo = e.lo; d.loStrict = e.loStrict } else if (e.lo === d.lo) d.loStrict &&= e.loStrict
+        if (e.hi > d.hi) { d.hi = e.hi; d.hiStrict = e.hiStrict } else if (e.hi === d.hi) d.hiStrict &&= e.hiStrict
+        for (const v of d.not) if (!e.not.has(v)) d.not.delete(v)
       }
-      if (typeof a.value !== "number") {
-        if (a.op !== "!=") return false
-        continue
-      }
-      const v = a.value
-      switch (a.op) {
-        case "==":
-          if (v > d.lo || (v === d.lo && !d.loStrict)) { d.lo = v; d.loStrict = false } else return false
-          if (v < d.hi || (v === d.hi && !d.hiStrict)) { d.hi = v; d.hiStrict = false } else return false
-          break
-        case "!=": d.not.add(v); break
-        case ">": if (v >= d.lo) { d.lo = v; d.loStrict = true } break
-        case ">=": if (v > d.lo) { d.lo = v; d.loStrict = false } break
-        case "<": if (v <= d.hi) { d.hi = v; d.hiStrict = true } break
-        case "<=": if (v < d.hi) { d.hi = v; d.hiStrict = false } break
-      }
-      if (numEmpty(d)) return false
-    } else {
-      let s = sets.get(a.variable)
-      if (!s) {
-        s = new Set<string | boolean>(decl.type === "bool" ? [true, false] : decl.values)
-        sets.set(a.variable, s)
-      }
-      if (a.op === "==") {
-        const keep = s.has(a.value as string | boolean)
-        s.clear()
-        if (keep) s.add(a.value as string | boolean)
-      } else if (a.op === "!=") {
-        s.delete(a.value as string | boolean)
-      } else {
-        return false // ordering on bool/enum is never true
-      }
-      if (s.size === 0) return false
+    }
+    out.set(name, d)
+  }
+  return out
+}
+
+const capped = (boxes: Box[]): Box[] => (boxes.length > MAX_BOXES ? [hull(boxes)] : boxes)
+
+/** The part of the boxes where the condition holds. */
+export function narrow(boxes: Box[], cond: Cond, schema: StateSchema): Box[] {
+  const clauses = dnf(nnf(cond, false))
+  if (!clauses) return boxes
+  const out: Box[] = []
+  for (const box of boxes) {
+    for (const clause of clauses) {
+      const b = narrowBox(box, clause, schema)
+      if (b) out.push(b)
     }
   }
-  return true
+  return capped(out)
+}
+
+const point = (v: number, isInt: boolean): NumDom => ({ kind: "num", lo: v, loStrict: false, hi: v, hiStrict: false, isInt, not: new Set() })
+
+/** Where a number domain lands once applyEffects clamps it to the schema range. */
+function clampDom(d: NumDom, decl: VarDecl): NumDom {
+  if (decl.type !== "number" && decl.type !== "int") return d
+  const min = decl.min ?? -Infinity
+  const max = decl.max ?? Infinity
+  if (d.hi < min || (d.hi === min && d.hiStrict)) return point(min, d.isInt)
+  if (d.lo > max || (d.lo === max && d.loStrict)) return point(max, d.isInt)
+  if (d.lo < min) { d.lo = min; d.loStrict = false; d.not.clear() }
+  if (d.hi > max) { d.hi = max; d.hiStrict = false; d.not.clear() }
+  return d
+}
+
+function effectOnNum(d: NumDom, e: Effect, decl: VarDecl): NumDom | undefined {
+  if (typeof e.amount !== "number") return undefined
+  const k = e.amount
+  switch (e.op) {
+    case "set":
+      return point(settleNumber(k, decl), d.isInt)
+    case "add":
+      return clampDom({ ...d, lo: d.lo + k, hi: d.hi + k, not: new Set([...d.not].map((v) => v + k)) }, decl)
+    case "mul": {
+      if (k === 0) return point(settleNumber(0, decl), d.isInt)
+      if (d.isInt) {
+        // trunc is monotone, so whole bounds scaled and truncated cover every result.
+        const b = intBounds(d)
+        const ends = [Math.trunc(b.lo * k), Math.trunc(b.hi * k)]
+        return clampDom({ ...point(0, true), lo: Math.min(...ends), hi: Math.max(...ends) }, decl)
+      }
+      const flip = k < 0
+      return clampDom(
+        {
+          ...d,
+          lo: flip ? d.hi * k : d.lo * k,
+          hi: flip ? d.lo * k : d.hi * k,
+          loStrict: flip ? d.hiStrict : d.loStrict,
+          hiStrict: flip ? d.loStrict : d.hiStrict,
+          not: new Set([...d.not].map((v) => v * k)),
+        },
+        decl,
+      )
+    }
+  }
+}
+
+/** The boxes after one effect. */
+export function applyEffect(boxes: Box[], e: Effect, schema: StateSchema): Box[] {
+  const decl = schema[e.variable]
+  if (!decl) return boxes
+  return boxes.map((box) => {
+    const out: Box = new Map(box)
+    const cur = box.get(e.variable) ?? fullDom(decl)
+    let next: Dom | undefined
+    if (cur.kind === "num") next = effectOnNum(cur, e, decl)
+    else if (e.op === "set") next = { kind: "set", values: new Set([e.amount as string | boolean]) }
+    // A type error (lint reports it) leaves the variable free.
+    if (next) out.set(e.variable, next)
+    else out.delete(e.variable)
+    return out
+  })
+}
+
+/** The boxes with these variables free again: the game moved them. */
+export function release(boxes: Box[], variables: string[]): Box[] {
+  if (variables.length === 0) return boxes
+  return boxes.map((box) => {
+    const out: Box = new Map(box)
+    for (const v of variables) out.delete(v)
+    return out
+  })
 }
 
 /** True if some state within the schema ranges makes every condition true. */
 export function satisfiable(conds: Cond[], schema: StateSchema): boolean {
   if (conds.length === 0) return true
   const all: Cond = conds.length === 1 ? conds[0]! : { kind: "and", terms: conds }
-  const clauses = dnf(nnf(all, false))
-  if (!clauses) return true
-  return clauses.some((c) => clauseSatisfiable(c, schema))
+  return narrow(anyState(), all, schema).length > 0
 }
