@@ -413,23 +413,21 @@
   font-size: 11.5px;
   line-height: 1.45;
 }
+/* The agent writes the caption, so the header wraps rather than widen the review past the window. */
 .concept-script-head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 8px;
+  gap: 2px 8px;
   padding: 4px 8px;
   border-bottom: 1px solid var(--line-soft);
   font-size: 10.5px;
   color: var(--muted);
-  white-space: nowrap;
 }
-.concept-script-head > :first-child {
+.concept-script-head > * {
+  flex: 0 1 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.concept-script-head > :last-child {
-  flex: none;
+  overflow-wrap: anywhere;
 }
 .concept-script-text {
   margin: 0;
@@ -437,6 +435,8 @@
   overflow: auto;
   padding: 6px 8px 6px 0;
   font: 11px/16px var(--mono);
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
   tab-size: 4;
   user-select: text;
   cursor: text;
@@ -1293,11 +1293,13 @@
 }
 
 /* ---- reference image form ---- */
+/* A definite row, so a dialog's max-height holds and its list scrolls inside it instead of running off the window. */
 .canvas-modal {
   position: absolute;
   inset: 0;
   z-index: 20;
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   place-items: center;
   background: color-mix(in srgb, var(--board) 55%, transparent);
 }
@@ -1418,9 +1420,11 @@
   color: var(--text-2);
 }
 /* Scoped: the Frames view has a ".review" side panel too. */
+/* When the warning and legend alone overfill a small or zoomed window, the dialog scrolls to its note and buttons. */
 .canvas-modal > .review {
   width: min(760px, 92%);
   max-height: calc(100% - 48px);
+  overflow: auto;
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
   gap: 10px;
@@ -1432,6 +1436,7 @@
 }
 .review-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   min-height: 0;
   overflow: auto;
@@ -1450,6 +1455,10 @@
 }
 .review-caption {
   color: var(--cap);
+}
+.review-blocked {
+  flex: 1;
+  margin: 0;
 }
 .review-script .concept-script-text {
   max-height: none;
