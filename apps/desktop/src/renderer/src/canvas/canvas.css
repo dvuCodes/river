@@ -216,7 +216,10 @@
   padding: 6px 8px;
   font-size: 11px;
   line-height: 1.45;
-  white-space: pre;
+  /* Wrap rather than scroll sideways: code pushed far right after a run of spaces must still be in view. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
   user-select: text;
   cursor: text;
 }
