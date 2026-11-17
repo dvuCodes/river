@@ -84,7 +84,7 @@ function isInside(root: string, p: string): boolean {
 }
 
 /** Resolve rel inside the root. Throws if the result is outside the root (after resolving .. and symlinks). */
-export function safePath(project: Project, rel: string): string {
+export function safePath(project: Pick<Project, "root">, rel: string): string {
   const root = realpathSync(project.root)
   const target = resolve(root, rel)
   // Resolve symlinks on the deepest part of the path that exists.

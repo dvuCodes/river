@@ -338,6 +338,44 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect((await loadJob(game, job.id)).status).toBe("approval")
   })
 
+  it("accepts nothing from a crafted job commit whose tree names paths out of the concept folder", async () => {
+    const job = await answeredJob()
+    const object = (type: string, input: Buffer) =>
+      execFileSync("git", ["hash-object", "-t", type, "--literally", "-w", "--stdin"], { cwd: top, input }).toString().trim()
+    const tree = (entries: [mode: string, name: string, sha: string][]) =>
+      object("tree", Buffer.concat(entries.flatMap(([mode, name, id]) => [Buffer.from(`${mode} ${name}\0`), Buffer.from(id, "hex")])))
+    const escaped = `escaped-${job.id}.txt`
+    const blob = object("blob", Buffer.from("written by Accept\n"))
+    let nested = tree([["100644", escaped, blob]])
+    for (let i = 0; i < 5; i++) nested = tree([["40000", "..", nested]])
+    const png = tree([
+      ["40000", "..", nested],
+      ["100644", `..\\..\\..\\..\\..\\${escaped}`, blob],
+    ])
+    const folder = tree([
+      ["40000", "concept.png", png],
+      ["100644", "draw.gd", object("blob", Buffer.from(DRAW))],
+    ])
+    const root = tree([["40000", "game", tree([["40000", "concepts", tree([["40000", job.id, folder]])]])]])
+    const crafted = git("commit-tree", root, "-m", "crafted").trim()
+    await saveJob(game, { ...job, headSha: crafted })
+
+    await expect(acceptJob(game, job.id)).rejects.toThrow(/refused/)
+    for (const dir of [top, path.dirname(top), path.dirname(path.dirname(top))]) expect(existsSync(path.join(dir, escaped)), dir).toBe(false)
+    expect(existsSync(path.join(game, "concepts", job.id))).toBe(false)
+    expect((await loadJob(game, job.id)).status).toBe("answered")
+  })
+
+  it("accepts nothing for a job file whose script path is not its own concept folder's", async () => {
+    const job = await answeredJob()
+    const record = job.scripts![0]!
+    for (const file of ["concepts/elsewhere/draw.gd", `concepts/${job.id}/../${job.id}/draw.gd`, `concepts/${job.id}/draw_a.gd`]) {
+      await saveJob(game, { ...job, scripts: [{ ...record, file }] })
+      await expect(acceptJob(game, job.id), file).rejects.toThrow(/refused|cannot/)
+    }
+    expect(existsSync(path.join(game, "concepts"))).toBe(false)
+  })
+
   it("keeps working after the repo folder moves: approve and accept from the new place", async () => {
     const job = await start({ runTurn: fakeTurn(DRAW) })
     moveRepo()

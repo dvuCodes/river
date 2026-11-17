@@ -29,6 +29,7 @@ import {
   conceptCaptionName,
   conceptPath,
   conceptRenderName,
+  conceptScriptName,
   createJobWorktree,
   deleteCard,
   deleteEdge,
@@ -472,6 +473,10 @@ async function committedScripts(root: string, job: Job): Promise<{ record: JobSc
   if (!job.scripts?.length || !job.headSha) throw new Error(`river: job ${job.id} has no script yet`)
   const out: { record: JobScriptRecord; bytes: Buffer }[] = []
   for (const record of job.scripts) {
+    // A job file can come from a cloned repo: its script must be where this job's script goes, or nothing is read or applied.
+    if (record.file !== conceptPath(job.conceptId, conceptScriptName(record.variant)) || !parseConceptScriptName(path.posix.basename(record.file))) {
+      throw new Error(`river: refused: ${JSON.stringify(record.file)} is not where job ${job.id}'s script goes. Dismiss the job and ask again.`)
+    }
     const bytes = await readCommittedFile(root, job.headSha, inRepo(job, record.file))
     const refused = conceptScriptProblem(bytes)
     if (refused) throw new Error(`river: refused: ${record.file} cannot be shown as it would run. ${refused} Dismiss the job and ask again.`)
@@ -951,8 +956,8 @@ export async function acceptJob(workspaceRoot: string, jobId: string, opts: { va
   for (const { record, bytes } of chosen) {
     if (hash(bytes) !== record.sha256) throw new Error(`river: refused: ${record.file} on job ${jobId}'s branch is not the approved one`)
   }
-  const files = chosen.flatMap(({ record }) => [record.file, conceptPath(job.conceptId, conceptRenderName(record.variant))])
-  const undo = await applyJobFiles(root, job.headSha!, files.map((f) => inRepo(job, f)))
+  const names = chosen.flatMap(({ record }) => [conceptScriptName(record.variant), conceptRenderName(record.variant)])
+  const undo = await applyJobFiles(root, job.headSha!, job.conceptId, names)
   const keep = new Set(chosen.map(({ record }) => record.file))
   let accepted: Job
   try {

@@ -1,5 +1,7 @@
 import { access, mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { assertConceptFile, conceptPath } from "../concepts/concepts"
+import { safePath } from "../project/project"
 import { snapshotCommit } from "./checkpoint"
 import { git, gitBytes, gitTry, identityEnv, RAW, withTempIndex, type GitOptions } from "./exec"
 
@@ -91,26 +93,41 @@ const exists = (file: string) => access(file).then(
   () => false,
 )
 
+const COMMIT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/
+
 /**
- * Write the files at `paths` (files or folders, relative to the git top level) in commit `sha` into the
- * user's working tree as the committed bytes, so no .gitattributes filter or line-ending rule can change
- * them, and the index stays as it is. Only creates files: one that is already there must hold the
- * same bytes, which makes a second run a no-op. On any failure it removes the files and folders it
- * created and throws. Returns undo(), which removes them later, for when the step after this fails.
+ * Write the files `names` of concepts/<conceptId>/ (under `projectRoot`) in commit `sha` into the user's working
+ * tree as the committed bytes, so no .gitattributes filter or line-ending rule can change them, and the index
+ * stays as it is. The commit and the job file that names it may come from a cloned repo, so nothing in them is
+ * trusted: each name must be a plain file name the agent could have written there, the project's place in the
+ * repo comes from git, every listed entry must be exactly one of those files, and each target must resolve
+ * inside the project (no link out of it). Only creates files: one that is already there must hold the same
+ * bytes, which makes a second run a no-op. On any failure it removes the files and folders it created and
+ * throws. Returns undo(), which removes them later, for when the step after this fails.
  */
-export async function applyJobFiles(workspaceRoot: string, sha: string, paths: readonly string[]): Promise<() => Promise<void>> {
-  // An empty pathspec would list the whole commit.
-  if (paths.length === 0) throw new Error("river: no job files to apply")
-  const top = await gitTop(workspaceRoot)
-  const listing = await git(top, ["-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--full-tree", sha, "--", ...paths])
-  const files: { file: string; bytes: Buffer }[] = []
+export async function applyJobFiles(projectRoot: string, sha: string, conceptId: string, names: readonly string[]): Promise<() => Promise<void>> {
+  if (names.length === 0) throw new Error("river: no job files to apply")
+  if (!COMMIT_ID.test(sha)) throw new Error(`river: refused: ${JSON.stringify(sha)} is not a commit id`)
+  const wanted = names.map((name) => {
+    if (name.includes("/") || name.includes("\\")) throw new Error(`river: refused: ${JSON.stringify(name)} is not a file name`)
+    return assertConceptFile(conceptId, conceptPath(conceptId, name))
+  })
+  const top = await gitTop(projectRoot)
+  const prefix = (await git(projectRoot, ["rev-parse", "--show-prefix"])).trim()
+  const pathspecs = wanted.map((rel) => prefix + rel)
+  const listing = await git(top, ["--literal-pathspecs", "-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--full-tree", sha, "--", ...pathspecs])
+  const files: { file: string; abs: string; bytes: Buffer }[] = []
   for (const entry of listing.split("\0").filter(Boolean)) {
     const tab = entry.indexOf("\t")
     const [mode, type, object] = entry.slice(0, tab).split(" ")
     const file = entry.slice(tab + 1)
+    if (!pathspecs.includes(file)) throw new Error(`river: refused: ${JSON.stringify(file)} on the job branch is not one of the files to apply`)
     if (type !== "blob" || (mode !== "100644" && mode !== "100755")) throw new Error(`river: ${file} on the job branch is not a plain file`)
-    files.push({ file, bytes: await gitBytes(top, ["cat-file", "blob", object!]) })
+    const abs = safePath({ root: projectRoot }, file.slice(prefix.length))
+    files.push({ file, abs, bytes: await gitBytes(top, ["cat-file", "blob", object!]) })
   }
+  const missing = pathspecs.filter((p) => !files.some((f) => f.file === p))
+  if (missing.length > 0) throw new Error(`river: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} not on the job branch`)
   const created: string[] = []
   const madeDirs: string[] = []
   const undo = async () => {
@@ -118,9 +135,8 @@ export async function applyJobFiles(workspaceRoot: string, sha: string, paths: r
     for (const dir of madeDirs.sort((a, b) => b.length - a.length)) await rmdir(dir).catch(() => {})
   }
   try {
-    for (const { file, bytes } of files) {
-      const abs = path.join(top, file)
-      for (let dir = path.dirname(abs); dir !== top && !(await exists(dir)); dir = path.dirname(dir)) madeDirs.push(dir)
+    for (const { file, abs, bytes } of files) {
+      for (let dir = path.dirname(abs); dir !== path.dirname(dir) && !(await exists(dir)); dir = path.dirname(dir)) madeDirs.push(dir)
       await mkdir(path.dirname(abs), { recursive: true })
       try {
         await writeFile(abs, bytes, { flag: "wx" })
@@ -130,8 +146,8 @@ export async function applyJobFiles(workspaceRoot: string, sha: string, paths: r
         if (!(await readFile(abs)).equals(bytes)) throw new Error(`river: ${file} is already in your project with other content; move it away, then accept again`)
       }
     }
-    for (const { file, bytes } of files) {
-      if (!(await readFile(path.join(top, file))).equals(bytes)) throw new Error(`river: ${file} did not arrive byte for byte`)
+    for (const { file, abs, bytes } of files) {
+      if (!(await readFile(abs)).equals(bytes)) throw new Error(`river: ${file} did not arrive byte for byte`)
     }
   } catch (err) {
     await undo()
