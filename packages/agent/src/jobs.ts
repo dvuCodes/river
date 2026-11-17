@@ -136,6 +136,20 @@ export interface JobScript {
 
 const INTERRUPTIBLE: readonly JobStatus[] = ["queued", "running", "rendering"]
 const CAPTION_MAX = 160
+/**
+ * A caption is display text: one short line of printable ASCII. Accents come off their letters, combining marks are
+ * dropped (stacked, they draw ink over the lines around them, script lines in the review included), and any other
+ * character outside 0x20-0x7E becomes a space.
+ */
+const captionText = (raw: string) =>
+  raw
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
+    .replace(/[^\x20-\x7E]+/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim()
+    .slice(0, CAPTION_MAX)
+    .trimEnd()
 /** The agent's closing note goes on the board and into the mark's thread. */
 const SUMMARY_MAX = 1500
 
@@ -439,8 +453,7 @@ async function writtenScripts(dir: string): Promise<{ name: string; variant?: st
     names.map(async (name) => {
       const { variant } = parseConceptScriptName(name)!
       const raw = await readFile(path.join(dir, conceptCaptionName(variant)), "utf8").catch(() => "")
-      // A caption is display text: one line, no control or bidi characters, short.
-      const caption = raw.replace(/[\p{Cc}‪-‮⁦-⁩]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, CAPTION_MAX)
+      const caption = captionText(raw)
       return { name, ...(variant ? { variant } : {}), bytes: await readFile(path.join(dir, name)), ...(caption ? { caption } : {}) }
     }),
   )
@@ -769,9 +782,6 @@ function selfCheckSettings(job: Job, deps: JobDeps): JobAgentSettings | undefine
   return { model: job.model as AgentModel, backend: job.backend }
 }
 
-/** One line of display text: no control or bidi characters, whitespace collapsed, at most `max` characters. */
-const displayLine = (text: string, max: number) => clip(text.replace(/[\p{Cc}‪-‮⁦-⁩]+/gu, " ").replace(/\s+/g, " ").trim(), max)
-
 /** The note and captions from the turn's text: the first {...} span ending at the last "}" that parses with a note, or undefined. */
 function parseSelfCheck(text: string): { note: string; captions: Record<string, string> } | undefined {
   const end = text.lastIndexOf("}")
@@ -826,7 +836,7 @@ async function selfCheck(project: Project, job: Job, scripts: JobScriptRecord[],
   if (!parsed) return undefined
   const summary = clip(parsed.note.trim(), SUMMARY_MAX)
   const next = scripts.map((s) => {
-    const caption = displayLine(parsed.captions[s.variant ?? ""] ?? "", CAPTION_MAX)
+    const caption = captionText(parsed.captions[s.variant ?? ""] ?? "")
     return caption ? { ...s, caption } : s
   })
   const board = await loadBoard(root, job.board)

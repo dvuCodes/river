@@ -362,6 +362,21 @@ describe("the look at the renders", { timeout: 120_000 }, () => {
     expect((await loadMark(game, "main", mark.id))!.thread.at(-1)).toMatchObject({ by: "concept-artist", text: note })
   })
 
+  it("keeps captions as printable ASCII, from the turn's files and from the look", async () => {
+    const zalgo = "Warm" + "̳".repeat(60) + " dusk — naïve \u{1F986}‮"
+    const job = await start({ runTurn: turnWriting({ ...THREE, "caption_a.txt": zalgo }) })
+    expect(job.scripts!.map((s) => s.caption)).toEqual(["Warm dusk naive", "Blue hour (cold)", undefined])
+    const look: RunTurn = async (_req, h) => {
+      const answer = { note: "A: muddy.", captions: { a: "M" + "̿".repeat(80) + "uddy dusk", b: "مساء" } }
+      h.onEvent({ type: "text", text: JSON.stringify(answer) })
+      h.onEvent({ type: "done" })
+    }
+    const answered = await approveJobScripts(game, job.id, await allShas(job), { render: fakeRender(), env: GODOT, runTurn: look })
+    expect(answered.scripts!.map((s) => s.caption)).toEqual(["Muddy dusk", "Blue hour (cold)", undefined])
+    const options = (await answerOf(answered)).filter((c) => c.kind === "concept").sort((a, b) => a.x - b.x)
+    expect(options.map((c) => c.caption)).toEqual(["Muddy dusk", "Blue hour (cold)", undefined])
+  })
+
   it("never fails the job: a look that breaks or says nothing usable keeps the note, and selfCheck false runs no turn", async () => {
     let calls = 0
     const throwing: RunTurn = async () => {
