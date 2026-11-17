@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { BrowserWindow, app, ipcMain, nativeTheme, net, protocol } from "electron"
 import { VIEWS, type ViewId } from "../shared/api"
-import { openProject, registerIpc, resolveRiverFile } from "./ipc"
+import { onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
 import { getLastProject } from "./settings"
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -47,6 +47,53 @@ function createWindow(): BrowserWindow {
   if (devUrl) void w.loadURL(devUrl + (query ? "?smoke=1" : ""))
   else void w.loadFile(join(here, "../renderer/index.html"), query ? { query } : undefined)
   return w
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * RIVER_SMOKE_DRAG=1: drag one story map card ~120 px with real input events, wait until River writes the
+ * story file, then let the watcher settle so its log shows whether the write was echoed back.
+ */
+async function smokeDrag(w: BrowserWindow): Promise<boolean> {
+  const rect = (await w.webContents.executeJavaScript(`(() => {
+    const el = document.querySelector(".react-flow__node-passage[data-id] .pnode-head")
+    if (!el) return null
+    const r = el.getBoundingClientRect()
+    return { id: el.closest(".react-flow__node").getAttribute("data-id"), x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })()`)) as { id: string; x: number; y: number } | null
+  if (!rect) {
+    console.error("river smoke: no passage card to drag")
+    return false
+  }
+  const written = new Promise<string | null>((done) => {
+    const t = setTimeout(() => done(null), 8_000)
+    const off = onStoryWritten((rel) => {
+      clearTimeout(t)
+      off()
+      done(rel)
+    })
+  })
+  const x0 = Math.round(rect.x)
+  const y0 = Math.round(rect.y)
+  console.log(`river smoke: dragging ${rect.id} from ${x0},${y0}`)
+  w.webContents.sendInputEvent({ type: "mouseMove", x: x0, y: y0 })
+  w.webContents.sendInputEvent({ type: "mouseDown", x: x0, y: y0, button: "left", clickCount: 1 })
+  for (let i = 1; i <= 12; i++) {
+    await sleep(16)
+    w.webContents.sendInputEvent({ type: "mouseMove", x: x0 + i * 10, y: y0, button: "left", modifiers: ["leftbuttondown"] })
+  }
+  await sleep(16)
+  w.webContents.sendInputEvent({ type: "mouseUp", x: x0 + 120, y: y0, button: "left", clickCount: 1 })
+  const rel = await written
+  if (!rel) {
+    console.error("river smoke: the drag was not saved")
+    return false
+  }
+  console.log(`river smoke: drag saved to ${rel}`)
+  // Give the watcher time to see the write (awaitWriteFinish + batching) so its log is complete.
+  await sleep(1_200)
+  return true
 }
 
 async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
@@ -100,6 +147,15 @@ async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
     const out = join(dir, `${view}.png`)
     await writeFile(out, image.toPNG())
     console.log(`river smoke: wrote ${out} (${image.getSize().width}x${image.getSize().height})`)
+    if (view === "story-map" && process.env["RIVER_SMOKE_DRAG"] === "1") {
+      const ok = await smokeDrag(w)
+      const after = join(dir, "story-map-dragged.png")
+      await writeFile(after, (await w.webContents.capturePage()).toPNG())
+      console.log(`river smoke: wrote ${after}`)
+      clearTimeout(hardStop)
+      app.exit(ok ? 0 : 1)
+      return
+    }
   }
   clearTimeout(hardStop)
   app.exit(failed ? 1 : 0)

@@ -106,7 +106,7 @@ export interface StoryMapProps {
   onSelect(id: string | undefined): void
   highlight?: Highlight | undefined
   open?: OpenStateDTO | undefined
-  /** Called after a drag with every passage position. */
+  /** Called when a drag ends, with the new positions of the dragged passages only. */
   onMoved?: ((positions: Record<string, [number, number]>) => void) | undefined
   /** Change the nonce to center the map on `focus.id`. */
   focus?: { id: string; nonce: number } | undefined
@@ -211,8 +211,14 @@ function MapInner(props: StoryMapProps) {
 
   const onDragStop: OnNodeDrag = useCallback(
     (_e, _node, dragged) => {
-      for (const n of dragged) if (n.type === "passage") positions.current[n.id] = [n.position.x, n.position.y]
-      onMoved?.({ ...positions.current })
+      const moved: Record<string, [number, number]> = {}
+      for (const n of dragged) {
+        if (n.type !== "passage") continue
+        const pos: [number, number] = [Math.round(n.position.x), Math.round(n.position.y)]
+        positions.current[n.id] = pos
+        moved[n.id] = pos
+      }
+      if (Object.keys(moved).length > 0) onMoved?.(moved)
     },
     [onMoved],
   )

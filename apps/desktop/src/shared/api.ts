@@ -67,7 +67,7 @@ export interface StoryDTO {
   passages: PassageDTO[]
   /** Parse diagnostics plus lint results. */
   diagnostics: Diagnostic[]
-  /** passage id -> [x, y] from <story>.layout.json. */
+  /** passage id -> [x, y] from the passage header metadata {"position":"x,y"}. Passages without one are absent. */
   positions: Record<string, [number, number]>
   schema: StateSchema
 }
@@ -164,7 +164,8 @@ export interface RiverApi {
   loadStory(rel: string): Promise<StoryDTO>
   savePassage(rel: string, passageId: string, rawText: string): Promise<StoryDTO>
   renamePassage(rel: string, passageId: string, newName: string): Promise<StoryDTO>
-  saveLayout(rel: string, positions: Record<string, [number, number]>): Promise<void>
+  /** Write card positions (passage id -> [x, y]) into the story file passage headers. Only the given passages change. */
+  savePositions(rel: string, positions: Record<string, [number, number]>): Promise<void>
   paths(rel: string): Promise<PathDTO[]>
   openState(rel: string, state: GameState): Promise<OpenStateDTO>
   // playtest

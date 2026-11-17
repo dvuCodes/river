@@ -258,7 +258,11 @@ export function App() {
             storyError={storyError}
             selectedId={selectedId}
             onSelect={setSelectedId}
-            onStoryChanged={setStory}
+            onStoryChanged={(s) => {
+              // River's own writes are not echoed by the watcher, so mark an open playtest stale here.
+              setStory(s)
+              setStoryStale(true)
+            }}
             onPlayFrom={(name) => {
               setPlayReq((r) => ({ from: name, nonce: r.nonce + 1 }))
               setStoryStale(false)

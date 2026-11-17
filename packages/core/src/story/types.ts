@@ -72,6 +72,44 @@ export interface Passage {
   /** The full original passage text, for a lossless write. */
   rawText: string
   span: SourceSpan
+  /** Verbatim source, set by parseTwee3. Lets writeTwee3 keep unchanged headers and spacing byte for byte. */
+  source?: PassageSource
+}
+
+/** How one passage was written in the file. Fields that still match the passage are written back verbatim. */
+export interface PassageSource {
+  /** The header line as written, without its line ending. */
+  header: string
+  /** Index in `header` where the metadata JSON starts, or -1 when the header has none. */
+  metaStart: number
+  /** Body lines as written (escapes kept), up to the next header, with trailing blank lines. */
+  body: string[]
+  /** What the source parsed to. */
+  name: string
+  tags: string[]
+  /** JSON.stringify of the parsed metadata. */
+  metadataJson: string
+  rawText: string
+}
+
+/** A StoryTitle or StoryData block as written. `index` is the number of passages before it in the file. */
+export interface StoryBlockSource {
+  kind: "title" | "data"
+  lines: string[]
+  index: number
+}
+
+/** How the story file was written, set by parseTwee3, so writeTwee3 can keep everything unchanged byte for byte. */
+export interface StorySource {
+  eol: "\n" | "\r\n"
+  bom: boolean
+  /** Lines before the first header. */
+  preamble: string[]
+  blocks: StoryBlockSource[]
+  /** The title the source parsed to. */
+  title: string
+  /** JSON.stringify of { ifid, start, ...storyData } as parsed. */
+  storyDataJson: string
 }
 
 export interface Story {
@@ -86,6 +124,8 @@ export interface Story {
   /** Passages in file order. Excludes StoryTitle and StoryData. Includes [script]/[stylesheet] passages. */
   passages: Passage[]
   file: string
+  /** Verbatim source, set by parseTwee3, for a byte-preserving write. */
+  source?: StorySource
 }
 
 /** The declared type of one state variable, from the project's state file (stories/state.json). */

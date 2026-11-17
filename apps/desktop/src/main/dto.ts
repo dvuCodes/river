@@ -6,6 +6,7 @@ import {
   contentPassages,
   formatCond,
   formatEffects,
+  passagePosition,
   resolveTarget,
 } from "@river/core"
 import type { PassageDTO, StoryDTO } from "../shared/api"
@@ -40,9 +41,13 @@ export function passageDTO(story: Story, p: Passage): PassageDTO {
 export function storyDTO(
   story: Story,
   diagnostics: Diagnostic[],
-  positions: Record<string, [number, number]>,
   schema: StateSchema,
 ): StoryDTO {
+  const positions: Record<string, [number, number]> = {}
+  for (const p of contentPassages(story)) {
+    const pos = passagePosition(p)
+    if (pos) positions[p.id] = pos
+  }
   return {
     file: story.file,
     title: story.title,

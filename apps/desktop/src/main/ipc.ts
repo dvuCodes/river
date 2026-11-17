@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { userInfo } from "node:os"
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { isAbsolute, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
 import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, PermissionDecision } from "@river/agent"
 import { createGodotAdapter } from "@river/adapter-godot"
@@ -25,7 +25,6 @@ import {
   listPlans,
   listStories,
   listThreads,
-  loadLayout,
   loadProject,
   loadSchema,
   loadStory,
@@ -35,11 +34,13 @@ import {
   reply,
   resolveTarget,
   restoreCheckpoint,
-  saveLayout,
+  safePath,
   saveStory,
+  setPassagePositions,
   setPlanStatus,
   setStatus,
   updatePassageText,
+  writeTwee3,
 } from "@river/core"
 import type {
   AgentPrefsUpdate,
@@ -56,7 +57,7 @@ import type {
 import { loadAgent } from "./agent"
 import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
-import { watchProject } from "./watch"
+import { noteOwnWrite, watchProject } from "./watch"
 
 let project: Project | null = null
 let projectError: { root: string; message: string } | null = null
@@ -112,15 +113,28 @@ async function readStory(rel: string): Promise<{ story: Story; schema: StateSche
   return {
     story,
     schema,
-    dto: async () => {
-      const layout = await loadLayout(join(p.root, rel))
-      return storyDTO(story, [...diagnostics, ...lint(story, schema)], layout.positions, schema)
-    },
+    dto: async () => storyDTO(story, [...diagnostics, ...lint(story, schema)], schema),
   }
 }
 
+const storyWritten = new Set<(rel: string) => void>()
+
+/** Call `cb` after River writes a story file (used by smoke mode). Returns an unsubscribe function. */
+export function onStoryWritten(cb: (rel: string) => void): () => void {
+  storyWritten.add(cb)
+  return () => storyWritten.delete(cb)
+}
+
+/** Write a story file, telling the watcher first so it does not report River's own write as an outside change. */
+async function writeStory(rel: string, story: Story): Promise<void> {
+  const p = need()
+  noteOwnWrite(safePath(p, rel), writeTwee3(story))
+  await saveStory(p, rel, story)
+  for (const cb of storyWritten) cb(rel)
+}
+
 async function storyAfterWrite(rel: string, story: Story): Promise<StoryDTO> {
-  await saveStory(need(), rel, story)
+  await writeStory(rel, story)
   return (await readStory(rel)).dto()
 }
 
@@ -250,12 +264,10 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
     const { story } = await readStory(rel)
     return storyAfterWrite(rel, renamePassage(story, id, trimmed))
   })
-  handle("story:saveLayout", async (rel: string, positions: Record<string, [number, number]>) => {
-    const p = need()
-    const round = (n: number) => Math.round(n)
-    const clean: Record<string, [number, number]> = {}
-    for (const [id, [x, y]] of Object.entries(positions)) clean[id] = [round(x), round(y)]
-    await saveLayout(join(p.root, rel), { version: 1, positions: clean })
+  handle("story:savePositions", async (rel: string, positions: Record<string, [number, number]>) => {
+    const { story } = await loadStory(need(), rel)
+    const next = setPassagePositions(story, positions)
+    if (next !== story) await writeStory(rel, next)
   })
   handle("story:paths", async (rel: string): Promise<PathDTO[]> => {
     const { story, schema } = await readStory(rel)

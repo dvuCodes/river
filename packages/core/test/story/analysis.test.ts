@@ -1,11 +1,9 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
-import { readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { exportStory, proseText } from "../../src/export/export"
 import { parseTwee3, writeTwee3 } from "../../src/formats/twee3"
-import { layoutPathFor, loadLayout, saveLayout } from "../../src/layout/layout"
 import { lint } from "../../src/lint/lint"
 import { satisfiable } from "../../src/lint/sat"
 import { createPlaytest } from "../../src/play/playtest"
@@ -232,16 +230,8 @@ describe("project", () => {
   })
 })
 
-describe("layout", () => {
-  it("saves sorted and loads, missing file is empty", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "river-layout-"))
-    const file = join(dir, "a.twee")
-    expect(layoutPathFor("stories/a.twee")).toBe("stories/a.layout.json")
-    expect(await loadLayout(file)).toEqual({ version: 1, positions: {} })
-    await saveLayout(file, { version: 1, positions: { zeta: [1, 2], alpha: [3.5, -4] } })
-    const text = await readFile(join(dir, "a.layout.json"), "utf8")
-    expect(text.indexOf("alpha")).toBeLessThan(text.indexOf("zeta"))
-    expect(await loadLayout(file)).toEqual({ version: 1, positions: { alpha: [3.5, -4], zeta: [1, 2] } })
+describe("passageById", () => {
+  it("finds a passage by id", () => {
     expect(passageById(loadExample().story, "gate")?.name).toBe("Gate")
   })
 })

@@ -11,7 +11,7 @@ export function estimateHeight(p: PassageDTO): number {
 }
 
 /**
- * Positions for every passage: positions already on screen (`keep`), then the saved layout, else BFS columns from the start
+ * Positions for every passage: positions already on screen (`keep`), then positions saved in the story file, else BFS columns from the start
  * (column = distance from the start). Passages the start cannot reach go in a last column.
  */
 export function autoLayout(story: StoryDTO, keep: Record<string, [number, number]> = {}): Record<string, [number, number]> {
