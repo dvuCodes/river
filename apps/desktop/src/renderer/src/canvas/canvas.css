@@ -18,10 +18,6 @@
   background: var(--board);
   color: var(--ink);
 }
-/* Holds everything but the review, so it can all go inert at once; it draws no box of its own. */
-.canvas-behind {
-  display: contents;
-}
 .canvas-view .react-flow {
   /* React Flow puts "light dark" on itself (in its own layer); the board takes the canvas theme instead. */
   color-scheme: inherit;
@@ -407,99 +403,6 @@
   50% {
     opacity: 0.55;
   }
-}
-.concept-warn {
-  margin: 0;
-  padding: 6px 8px;
-  border-radius: 4px;
-  background: var(--cond-soft);
-  color: var(--cond);
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-/* The agent writes the caption, so the header wraps rather than widen the review past the window. */
-.concept-script-head {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 2px 8px;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--line-soft);
-  font-size: 10.5px;
-  color: var(--muted);
-}
-.concept-script-head > * {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.concept-script-text {
-  margin: 0;
-  max-height: 220px;
-  overflow: auto;
-  padding: 6px 8px 6px 0;
-  font: 11px/16px var(--mono);
-  font-variant-ligatures: none;
-  font-feature-settings: "liga" 0, "calt" 0;
-  tab-size: 4;
-  user-select: text;
-  cursor: text;
-}
-.review-kit,
-.concept-script-text {
-  --wrap-hook: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='16' viewBox='0 0 12 16'%3E%3Cpath d='M3 3.5v5.5h6.5M7 6.5 9.5 9 7 11.5' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-}
-.script-row {
-  position: relative;
-  isolation: isolate;
-  display: grid;
-  grid-template-columns: var(--ln-w, 6ch) minmax(0, 1fr);
-}
-.script-ln {
-  padding-right: 1.5ch;
-  text-align: right;
-  color: var(--muted);
-  user-select: none;
-}
-.script-row.is-read .script-ln {
-  color: var(--cond);
-  font-weight: 600;
-}
-/* Wrap rather than scroll sideways: code pushed far right after a run of spaces must still be in view. */
-.script-code {
-  min-width: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-/* The rows a long line wraps onto, from its second row down: a hook in the gutter for each, a tint behind them. */
-.script-row::before,
-.script-row::after {
-  content: "";
-  position: absolute;
-  top: 16px;
-  bottom: 0;
-  pointer-events: none;
-}
-.script-row::before {
-  left: var(--ln-w, 6ch);
-  right: 0;
-  z-index: -1;
-  background: color-mix(in srgb, var(--muted) 12%, transparent);
-}
-.script-row::after {
-  left: 0;
-  width: var(--ln-w, 6ch);
-  background: var(--muted);
-  mask: var(--wrap-hook) right 4px top / 12px 16px repeat-y;
-}
-/* The same hook in the review's legend, so the legend shows exactly what a wrapped row looks like. */
-.wrap-hook {
-  display: inline-block;
-  width: 12px;
-  height: 16px;
-  vertical-align: -4px;
-  background: var(--muted);
-  mask: var(--wrap-hook) center / 12px 16px no-repeat;
 }
 .concept-error {
   margin: 0;
@@ -1423,50 +1326,6 @@
   font-size: 10.5px;
   color: var(--text-2);
 }
-/* Scoped: the Frames view has a ".review" side panel too. */
-/* When the warning and legend alone overfill a small or zoomed window, the dialog scrolls to its note and buttons. */
-.canvas-modal > .review {
-  width: min(760px, 92%);
-  max-height: calc(100% - 48px);
-  overflow: auto;
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
-  gap: 10px;
-  padding: 16px;
-  background: var(--chrome);
-  border: 1px solid var(--chrome-line);
-  border-radius: 12px;
-  box-shadow: var(--chrome-shadow), 0 20px 60px rgb(0 0 0 / 0.18);
-}
-.review-list {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
-  min-height: 0;
-  overflow: auto;
-}
-.review-script {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
-}
-.review-script .concept-script-head {
-  font-size: 11.5px;
-  color: var(--text-2);
-}
-.review-script .concept-script-head b {
-  color: var(--ink);
-}
-.review-caption {
-  color: var(--cap);
-}
-.review-blocked {
-  flex: 1;
-  margin: 0;
-}
-.review-script .concept-script-text {
-  max-height: none;
-}
 .mark-claim {
   margin: 6px 0 0;
   color: var(--agent);
@@ -1523,22 +1382,6 @@
   background: var(--card);
   color: var(--ink);
   font-size: 12.5px;
-}
-.review-kit {
-  margin: 0;
-  font-size: 11.5px;
-  color: var(--text-2);
-}
-.review-kit .link-btn {
-  font-size: 11.5px;
-}
-.read-line {
-  background: var(--cond-soft);
-  color: inherit;
-  border-radius: 2px;
-  box-shadow: inset 2px 0 0 var(--cond);
-  -webkit-box-decoration-break: clone;
-  box-decoration-break: clone;
 }
 .job-line.is-looking {
   color: var(--agent);

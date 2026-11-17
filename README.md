@@ -24,7 +24,7 @@ Both use the same permission policy: reads stay inside the game repo, every writ
 
 The storyboard is a canvas of passage cards, notes and images. You leave requests on it as marks: circle a card and write what you want. Agents answer beside the mark, with an arrow from your request to their answer:
 
-- **River's concept artist** answers "draw it" requests with options drawn by small Godot scripts. You read and approve the scripts before anything runs. Every line is the agent's code and runs on your computer with your permissions once you approve; `Kit.name(...)` calls use River's drawing helpers, but River cannot prove a script only draws, so read all of it. Then keep the options you like or dismiss the answer with a reason that goes into `.river/brief.md`.
+- **River's concept artist** answers "draw it" requests with options drawn by small Godot scripts. You read the scripts in a separate review window and approve them there before anything runs. Every line is the agent's code and runs on your computer with your permissions once you approve; `Kit.name(...)` calls use River's drawing helpers, but River cannot prove a script only draws, so read all of it. Then keep the options you like or dismiss the answer with a reason that goes into `.river/brief.md`.
 - **Claude Code**, through `river-mcp`, takes the other requests: it claims a mark, reads the story and the brief, answers with notes and images, and hands drawing requests to the concept artist. See [packages/mcp/README.md](packages/mcp/README.md) to set it up, including on Windows and for headless `claude -p` runs.
 
 From the terminal: `river card add`, `river mark add`, `river mark reply`, `river board show` and `river job ...` (`pnpm river --help` lists them).

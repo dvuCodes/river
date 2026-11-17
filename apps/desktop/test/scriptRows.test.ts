@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { linesToRead } from "@river/adapter-godot"
-import { scriptRows } from "../src/renderer/src/canvas/scriptRows"
+import { scriptRows } from "../src/renderer/src/approval/scriptRows"
 
 describe("scriptRows", () => {
   it("gives a comment that fills the row and the code line after it a numbered row each", () => {

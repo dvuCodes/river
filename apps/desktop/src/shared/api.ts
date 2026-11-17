@@ -5,14 +5,12 @@
 import type {
   AgentBackend,
   AgentEvent,
-  JobScript,
   AgentMode,
   AgentModel,
   ClaudeCodeStatus,
   PermissionDecision,
   PermissionRequest,
 } from "@river/agent"
-import type { LineToRead } from "@river/adapter-godot"
 import type {
   Card,
   ChangePlan,
@@ -201,14 +199,8 @@ export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error" | "scri
   log?: boolean
 }
 
-/** A job and, while it waits for approval, the exact bytes of every script it wants to run. */
 export interface JobDTO {
   job: Job
-  /**
-   * Each with the sha256 of exactly these bytes: approving sends them back, so only the shown scripts can run.
-   * `toRead` marks lines worth a slow read; it is a reading aid, and an unmarked line is not checked.
-   */
-  scripts?: (JobScript & { toRead: LineToRead[] })[]
   revisable: boolean
 }
 
@@ -327,7 +319,12 @@ export interface RiverApi {
   /** Ask the concept artist about a mark. Runs in the background; progress shows on the mark and its concept card. */
   jobStart(board: string, markId: string): Promise<void>
   jobGet(jobId: string): Promise<JobDTO>
-  /** Run every script, each only if its bytes still hash to the sha256 shown (file -> sha256, from jobGet). */
+  /** Open the approval window for a job waiting for approval: main reads its scripts and shows them there. */
+  jobReview(jobId: string): Promise<void>
+  /**
+   * Always refused: main runs a job's scripts only on a Run from the approval window. River's window keeps the call so
+   * the refusal is checked through the same channel the approval window uses.
+   */
   jobApprove(jobId: string, shas: Record<string, string>): Promise<void>
   /** Keep the rendered options `variants` ("a".."e"), or all of them. */
   jobAccept(jobId: string, variants?: string[]): Promise<void>
@@ -339,8 +336,6 @@ export interface RiverApi {
   jobStopLook(jobId: string): Promise<void>
   /** The runner's output for a job started outside the app (.river/logs/<job>.log); null when there is none. */
   jobLog(jobId: string): Promise<string | null>
-  /** River's drawing kit (concepts/kit.gd as River writes it), from the installed Godot adapter. */
-  jobKit(): Promise<string>
   // agent
   agentStatus(): Promise<AgentStatus>
   agentStart(req: AgentStartRequest): Promise<string>

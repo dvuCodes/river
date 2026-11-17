@@ -29,6 +29,7 @@ import {
   listThreads,
   loadBoard,
   loadJob,
+  loadMark,
   loadProject,
   loadSchema,
   loadStory,
@@ -60,7 +61,9 @@ import type {
   ProjectInfo,
   StoryDTO,
 } from "../shared/api"
+import { asciiLine } from "../shared/approval"
 import { type JobApi, loadAgent } from "./agent"
+import { type Approvals, registerApproval } from "./approval"
 import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
 import { boardHandlers, closeRowGap, jobLogFile, jobRevisable, lookingJobs } from "./board"
@@ -72,6 +75,7 @@ let project: Project | null = null
 let projectError: { root: string; message: string } | null = null
 let projectWatch: ProjectWatch | null = null
 let getWindow: () => BrowserWindow | null = () => null
+let approvals: Approvals | null = null
 
 export function currentProject(): Project | null {
   return project
@@ -90,13 +94,17 @@ function need(): Project {
 /** Open a project folder (the one with river.json). Remembers it unless `remember` is false. */
 export async function openProject(root: string, remember = true): Promise<void> {
   const abs = resolve(root)
+  approvals?.closeAll()
   await projectWatch?.stop()
   projectWatch = null
   try {
     project = await loadProject(abs)
     projectError = null
     if (remember) settings.setLastProject(project.root)
-    projectWatch = watchProject(project, (changes) => send("fs:change", changes))
+    projectWatch = watchProject(project, (changes) => {
+      approvals?.changed(changes)
+      send("fs:change", changes)
+    })
     const opened = project.root
     // Fails only jobs whose owning process is gone, so a job this app or the CLI is running survives a re-open.
     void loadAgent()
@@ -288,8 +296,16 @@ const approving = new Map<string, Promise<void>>()
 /** Tell the canvas a job's cards changed although its file did not (the look started or ended). */
 const jobTouched = (jobId: string) => send("fs:change", [{ kind: "job", rel: `.river/jobs/${jobId}.json` }])
 
-/** `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn); `onApprove` lets a smoke count approve calls. */
-export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: JobDeps; onApprove?: () => void } = {}): void {
+/** The approval window open now, if any (smoke mode drives it). */
+export function approvalWindow(): BrowserWindow | null {
+  return approvals?.window() ?? null
+}
+
+/**
+ * `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn); `onApprove` lets a smoke count
+ * approve calls; `smoke` gives the approval window smoke mode's window settings.
+ */
+export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: JobDeps; onApprove?: () => void; smoke?: boolean } = {}): void {
   getWindow = windowGetter
   const handle = <A extends unknown[], R>(channel: string, fn: (...args: A) => Promise<R> | R) =>
     ipcMain.handle(channel, (_e, ...args) => fn(...(args as A)))
@@ -473,20 +489,14 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
   handle("job:get", async (jobId: string): Promise<JobDTO> => {
     const p = need()
     const job = await loadJob(p.root, jobId)
-    const revisable = await jobRevisable(p.root, job)
-    if (job.status !== "approval") return { job, revisable }
-    // The committed bytes, hashed as read: the only bytes approveJobScripts will run.
-    const scripts = await (await jobApi()).readJobScripts(p.root, jobId)
-    return { job, scripts: scripts.map((s) => ({ ...s, toRead: linesToRead(s.text) })), revisable }
+    return { job, revisable: await jobRevisable(p.root, job) }
   })
   /**
    * Approving renders the scripts and then lets the agent look at the renders. During approve only that look runs an
    * agent turn, so the turn is wrapped here: the canvas shows it, and jobStopLook aborts it. Returns once the job has
    * started rendering; a refusal (changed bytes) comes before that and is thrown here.
    */
-  handle("job:approve", async (jobId: string, shas: Record<string, string>) => {
-    opts.onApprove?.()
-    const p = need()
+  const approve = async (root: string, jobId: string, shas: Record<string, string>) => {
     const jobs = await jobApi()
     const agent = await loadAgent()
     const selfCheck = await lookSettings()
@@ -504,7 +514,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
           jobTouched(jobId)
         }
       })
-    const run = jobs.approveJobScripts(p.root, jobId, shas, { ...opts.jobDeps, selfCheck, ...(runTurn ? { runTurn } : {}) })
+    const run = jobs.approveJobScripts(root, jobId, shas, { ...opts.jobDeps, selfCheck, ...(runTurn ? { runTurn } : {}) })
     const settled = run.then(
       () => undefined,
       (err: unknown) => console.warn("river: approving the scripts failed", err),
@@ -512,6 +522,32 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     approving.set(jobId, settled)
     void settled.finally(() => approving.delete(jobId))
     await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
+  }
+  approvals = registerApproval({
+    parent: getWindow,
+    root: () => project?.root ?? null,
+    async read(root, jobId) {
+      const job = await loadJob(root, jobId)
+      if (job.status !== "approval") throw new Error(`This job is ${job.status} now; there is nothing to run.`)
+      const [scripts, mark] = await Promise.all([(await jobApi()).readJobScripts(root, jobId), loadMark(root, job.board, job.markId).catch(() => undefined)])
+      return {
+        jobId,
+        board: asciiLine(job.board),
+        request: asciiLine(mark?.thread[0]?.text ?? "").slice(0, 300),
+        scripts: scripts.map((s) => ({
+          file: s.file,
+          text: s.text,
+          sha256: s.sha256,
+          ...(s.variant ? { variant: s.variant } : {}),
+          ...(s.caption ? { caption: asciiLine(s.caption) } : {}),
+          toRead: linesToRead(s.text),
+        })),
+      }
+    },
+    run: approve,
+    kit: kitFileText,
+    ...(opts.onApprove ? { onApprove: opts.onApprove } : {}),
+    smoke: opts.smoke ?? false,
   })
   handle("job:stopLook", (jobId: string) => {
     lookingJobs.get(jobId)?.abort()
@@ -524,7 +560,6 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
       throw err
     }
   })
-  handle("job:kit", () => kitFileText())
   handle("job:accept", async (jobId: string, variants?: string[]) => {
     const p = need()
     const { board } = await loadJob(p.root, jobId)

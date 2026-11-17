@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { type ReviewLayout, allInView } from "../src/renderer/src/canvas/inView"
+import { type ReviewLayout, allInView } from "../src/renderer/src/approval/inView"
 
 const fits: ReviewLayout = {
   lines: 2,
