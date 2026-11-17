@@ -56,7 +56,7 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     const second = await commitJobFile(game, "j_test0001", "game/concepts/k1/concept.png", PNG, "river: render k1")
     expect(git(top, "diff", "--name-only", job.baseSha, second).trim().split("\n").sort()).toEqual(["game/concepts/k1/concept.png", "game/concepts/k1/draw.gd"])
 
-    const undo = await applyJobFiles(game, second, "game/concepts/k1")
+    const undo = await applyJobFiles(game, second, ["game/concepts/k1"])
     expect(read(top, "game/concepts/k1/draw.gd").toString()).toBe(DRAW)
     expect(read(top, "game/concepts/k1/concept.png").equals(PNG)).toBe(true)
     expect(existsSync(path.join(top, "game/concepts/k1/scratch.txt"))).toBe(false)
@@ -67,7 +67,7 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     const lines = (text: string) => text.trim().split("\n").sort()
     expect(lines(git(top, "status", "--porcelain"))).toEqual(lines(status + "?? game/concepts/\n"))
 
-    const again = await applyJobFiles(game, second, "game/concepts/k1")
+    const again = await applyJobFiles(game, second, ["game/concepts/k1"])
     await again()
     expect(read(top, "game/concepts/k1/draw.gd").toString()).toBe(DRAW)
     await undo()
@@ -90,7 +90,7 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     const sha = await commitJobFile(top, "j_test0002", "concepts/k2/draw.gd", Buffer.from(DRAW), "river: concept k2")
 
     write(top, "concepts/k2/draw.gd", "the user's own file\n")
-    await expect(applyJobFiles(top, sha, "concepts/k2")).rejects.toThrow(/already in your project/)
+    await expect(applyJobFiles(top, sha, ["concepts/k2"])).rejects.toThrow(/already in your project/)
     expect(read(top, "concepts/k2/draw.gd").toString()).toBe("the user's own file\n")
 
     for (const id of ["..", "../..", "", "a/b"]) await expect(removeJobWorktree(top, id)).rejects.toThrow(/invalid job id/)
@@ -101,5 +101,21 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     await removeJobWorktree(top, "j_test0002")
     expect(git(top, "worktree", "list", "--porcelain")).not.toContain("j_test0002")
     expect(git(top, "branch", "--list", job.branch)).toBe("")
+  })
+
+  it("applies only the listed files of a job, and refuses an empty list", async () => {
+    write(top, "river.json", "{}\n")
+    git(top, "add", "-A")
+    git(top, "commit", "-q", "-m", "init")
+    await createJobWorktree(top, "j_test0003")
+    for (const name of ["draw_a.gd", "concept_a.png", "draw_b.gd", "concept_b.png"]) await commitJobFile(top, "j_test0003", `concepts/k3/${name}`, Buffer.from(name), name)
+    const sha = git(top, "rev-parse", "river/job/j_test0003").trim()
+    await expect(applyJobFiles(top, sha, [])).rejects.toThrow(/no job files/)
+    await applyJobFiles(top, sha, ["concepts/k3/draw_b.gd", "concepts/k3/concept_b.png"])
+    expect(read(top, "concepts/k3/draw_b.gd").toString()).toBe("draw_b.gd")
+    expect(read(top, "concepts/k3/concept_b.png").toString()).toBe("concept_b.png")
+    expect(existsSync(path.join(top, "concepts/k3/draw_a.gd"))).toBe(false)
+    expect(existsSync(path.join(top, "concepts/k3/concept_a.png"))).toBe(false)
+    await removeJobWorktree(top, "j_test0003")
   })
 })

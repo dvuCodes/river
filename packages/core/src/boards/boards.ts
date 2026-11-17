@@ -248,6 +248,55 @@ export function openMarks(board: Board): Mark[] {
   return board.marks.filter((m) => m.status === "open").sort(byCreated)
 }
 
+const clipText = (text: string, max: number) => {
+  const flat = text.replace(/\s*\n\s*/g, " / ").trim()
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+/** What a card shows, in a few words. */
+function cardWhat(card: Card): string {
+  switch (card.kind) {
+    case "note":
+      return JSON.stringify(clipText(card.text ?? "", 400))
+    case "concept":
+      return `concepts/${card.ref}/${card.variant ? ` option ${card.variant}` : ""}`
+    case "frame":
+      return `shot ${card.ref}${card.rev ? ` rev ${card.rev}` : ""}`
+    case "ref":
+      return `${card.ref}${card.source ? ` (${[card.source.title, card.source.licence].filter(Boolean).join(", ")})` : ""}`
+    case "passage":
+      return card.ref
+  }
+}
+
+/** One mark's header and thread, as formatBoard and marks_open print it. */
+export function formatMark(mark: Mark, indent = ""): string[] {
+  const on = mark.anchors.length > 0 ? ` on ${mark.anchors.join(", ")}` : ""
+  const job = mark.jobId ? ` job ${mark.jobId}` : ""
+  const claimed = mark.claimedBy ? ` claimed by ${mark.claimedBy}` : ""
+  return [
+    `${indent}${mark.id}  ${mark.shape} ${mark.status}${job}${claimed}${on}`,
+    ...mark.thread.map((m) => `${indent}  ${m.by}: ${clipText(m.text, 600)}`),
+  ]
+}
+
+/** A board as compact text for agents and `river board show`: one line per card, a few per mark, one per edge. */
+export function formatBoard(board: Board): string {
+  const lines = [`board ${board.name}: ${board.cards.length} cards, ${board.marks.length} marks, ${board.edges.length} edges`]
+  if (board.cards.length > 0) lines.push("cards:")
+  for (const c of board.cards) {
+    const label = c.label ? ` [${c.label}]` : ""
+    const caption = c.caption ? ` "${clipText(c.caption, 200)}"` : ""
+    const pending = c.pending ? ` (pending, job ${c.pending.jobId})` : ""
+    lines.push(`  ${c.id}  ${c.kind} at ${Math.round(c.x)},${Math.round(c.y)} w${Math.round(c.w)}${label}${caption}  ${cardWhat(c)}${pending}  by ${c.madeBy}`)
+  }
+  if (board.marks.length > 0) lines.push("marks:")
+  for (const m of board.marks) lines.push(...formatMark(m, "  "))
+  if (board.edges.length > 0) lines.push("edges:")
+  for (const e of board.edges) lines.push(`  ${e.id}  ${e.from} -> ${e.to}${e.label ? ` "${clipText(e.label, 80)}"` : ""}  by ${e.madeBy}`)
+  return lines.join("\n")
+}
+
 /** Jobs: .river/jobs/<id>.json in the workspace. A job without an id gets one ("j_" + 8 base36). */
 export async function saveJob(workspaceRoot: string, job: Job): Promise<Job> {
   const full: Job = { ...job, id: job.id || newBoardId("j_") }

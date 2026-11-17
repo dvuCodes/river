@@ -92,15 +92,17 @@ const exists = (file: string) => access(file).then(
 )
 
 /**
- * Write the files under `pathPrefix` (relative to the git top level) in commit `sha` into the user's
- * working tree as the committed bytes, so no .gitattributes filter or line-ending rule can change
+ * Write the files at `paths` (files or folders, relative to the git top level) in commit `sha` into the
+ * user's working tree as the committed bytes, so no .gitattributes filter or line-ending rule can change
  * them, and the index stays as it is. Only creates files: one that is already there must hold the
  * same bytes, which makes a second run a no-op. On any failure it removes the files and folders it
  * created and throws. Returns undo(), which removes them later, for when the step after this fails.
  */
-export async function applyJobFiles(workspaceRoot: string, sha: string, pathPrefix: string): Promise<() => Promise<void>> {
+export async function applyJobFiles(workspaceRoot: string, sha: string, paths: readonly string[]): Promise<() => Promise<void>> {
+  // An empty pathspec would list the whole commit.
+  if (paths.length === 0) throw new Error("river: no job files to apply")
   const top = await gitTop(workspaceRoot)
-  const listing = await git(top, ["-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--full-tree", sha, "--", pathPrefix])
+  const listing = await git(top, ["-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--full-tree", sha, "--", ...paths])
   const files: { file: string; bytes: Buffer }[] = []
   for (const entry of listing.split("\0").filter(Boolean)) {
     const tab = entry.indexOf("\t")
