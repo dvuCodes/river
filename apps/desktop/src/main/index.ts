@@ -581,7 +581,31 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   }, 15_000)
   console.log(`river smoke: reply ${replied ? "saved in the thread" : "NOT saved"}; revise ${revised ? "started a job revising " + jobId : "did NOT start"}`)
 
-  const ok = keptOk && stopped && kept1st && dismissed && reasoned && replied && revised
+  // Dismissing the revision while the agent looks at its renders: the look ends and the job stays dismissed.
+  const revJob = (await loadBoard(p.root, "main")).marks.find((x) => x.id === mark.id)?.jobId ?? ""
+  await key(w, "Escape")
+  let revNote: Card | undefined
+  await until(async () => {
+    revNote = (await loadBoard(p.root, "main")).cards.find((c) => c.pending?.jobId === revJob && c.kind === "note")
+    return revNote !== undefined
+  }, 60_000)
+  const revSel = `.react-flow__node[data-id="${revNote?.id}"]`
+  await key(w, "1", ["shift"])
+  await sleep(500)
+  let lateDismiss = false
+  if (revNote && (await clickEl(w, `${revSel} [data-action="review"]`, 120_000))) {
+    await until(async () => (await w.webContents.executeJavaScript(`document.querySelectorAll(".review .review-script").length`)) === 3, 5_000)
+    await clickEl(w, `.review [data-action="run"]`, 5_000)
+    const lookOn = Boolean(await waitRect(w, `${revSel} .job-line.is-looking`, 120_000))
+    const asked = lookOn && (await clickEl(w, `${revSel} [data-action="dismiss"]`, 3_000)) && (await clickEl(w, `[data-action="dismiss-confirm"]`, 3_000))
+    const gone = asked && (await until(async () => (await loadJob(p.root, revJob)).status === "dismissed", 15_000))
+    await sleep(2_000)
+    const b = await loadBoard(p.root, "main")
+    lateDismiss = gone && (await loadJob(p.root, revJob)).status === "dismissed" && !b.cards.some((c) => c.pending?.jobId === revJob)
+    console.log(`river smoke: dismissing ${revJob} while the agent looked ${lateDismiss ? "ended the look; the job stayed dismissed and its cards are gone" : `did NOT hold (look shown ${lookOn}, dismissed ${gone})`}`)
+  } else console.error("river smoke: the revision did not reach review")
+
+  const ok = keptOk && stopped && kept1st && dismissed && reasoned && replied && revised && lateDismiss
   console.log(`river smoke: job checks ${ok ? "PASSED" : "FAILED"}`)
   return ok
 }

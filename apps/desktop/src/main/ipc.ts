@@ -286,6 +286,9 @@ async function lookSettings(): Promise<false | JobAgentSettings> {
 /** A short turn, as core's own look at the renders runs it. */
 const LOOK_LIMITS = { maxTurns: 6, effort: "low" } as const
 
+/** Approve runs still going (rendering, then the look), settled either way. */
+const approving = new Map<string, Promise<void>>()
+
 /** Tell the canvas a job's cards changed although its file did not (the look started or ended). */
 const jobTouched = (jobId: string) => send("fs:change", [{ kind: "job", rel: `.river/jobs/${jobId}.json` }])
 
@@ -508,7 +511,12 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
         }
       })
     const run = jobs.approveJobScripts(p.root, jobId, shas, { ...opts.jobDeps, selfCheck, ...(runTurn ? { runTurn } : {}) })
-    run.catch((err: unknown) => console.warn("river: approving the scripts failed", err))
+    const settled = run.then(
+      () => undefined,
+      (err: unknown) => console.warn("river: approving the scripts failed", err),
+    )
+    approving.set(jobId, settled)
+    void settled.finally(() => approving.delete(jobId))
     await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
   })
   handle("job:stopLook", (jobId: string) => {
@@ -531,7 +539,9 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     if (options.length > 1) await closeRowGap(p.root, board, options).catch((err: unknown) => console.warn("river: could not close the row after accepting", err))
   })
   handle("job:dismiss", async (jobId: string, reason?: string) => {
+    // Core's dismissJob does not wait for an approve run, whose last write ("answered") could land after "dismissed".
     lookingJobs.get(jobId)?.abort()
+    await approving.get(jobId)
     await (await jobApi()).dismissJob(need().root, jobId, typeof reason === "string" ? reason : undefined)
   })
 }
