@@ -80,6 +80,9 @@ export function setLastProject(root: string): void {
   write({ ...read(), lastProject: root })
 }
 
+/** A smoke run on the user's own app data leaves their canvas look and last boards alone, as it leaves their last project. */
+const keepUserSettings = Boolean(process.env["RIVER_SMOKE_DIR"]) && !process.env["RIVER_SMOKE_USERDATA"]
+
 /** Paper unless the user picked another; the canvas does not follow the OS unless asked to. */
 export function getCanvasTheme(): CanvasTheme {
   const t = read().canvasTheme
@@ -88,6 +91,7 @@ export function getCanvasTheme(): CanvasTheme {
 
 export function setCanvasTheme(t: CanvasTheme): void {
   if (!CANVAS_THEMES.includes(t)) throw new Error(`Unknown canvas theme ${String(t)}`)
+  if (keepUserSettings) return
   write({ ...read(), canvasTheme: t })
 }
 
@@ -97,7 +101,7 @@ export function getLastBoard(root: string): string | undefined {
 
 export function setLastBoard(root: string, board: string): void {
   const s = read()
-  if (s.lastBoards?.[root] === board) return
+  if (keepUserSettings || s.lastBoards?.[root] === board) return
   write({ ...s, lastBoards: { ...s.lastBoards, [root]: board } })
 }
 

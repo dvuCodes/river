@@ -9,7 +9,7 @@ import { type Card, type Mark, loadBoard, loadCard, loadJob, saveCard, saveEdge 
 import { type BoardEntity, onBoardWritten } from "./board"
 import { currentProject, onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
 import { getLastProject } from "./settings"
-import { STRIP_FRAMES, STRIP_SHOT, scenePng, seedPerfBoard, seedRichBoard, seedStripCapture } from "./smokeBoard"
+import { STILL_SHOT, STRIP_FRAMES, STRIP_SHOT, scenePng, seedPerfBoard, seedRichBoard, seedStripCapture } from "./smokeBoard"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const smokeDir = process.env["RIVER_SMOKE_DIR"]
@@ -697,11 +697,24 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   } else check("beats 3 and 4 are on screen", false)
 
   await key(w, "Escape")
-  await clipboard.write([new ClipboardItem({ "image/png": new Blob([new Uint8Array(scenePng(4242, 640, 400))], { type: "image/png" }) })])
+  const png = scenePng(4242, 640, 400)
+  // The clipboard belongs to the OS, and another program can hold it: check the image really landed.
+  await clipboard.write([new ClipboardItem({ "image/png": new Blob([new Uint8Array(png)], { type: "image/png" }) })])
+  const onClipboard = (await clipboard.read()).some((item) => item.types.includes("image/png"))
   const pane = await rectOf(w, ".react-flow__pane")
   if (pane) w.webContents.sendInputEvent({ type: "mouseMove", x: Math.round(pane.x + pane.w * 0.62), y: Math.round(pane.y + pane.h * 0.18) })
   await sleep(100)
-  await key(w, "V", ["control"])
+  if (onClipboard) await key(w, "V", ["control"])
+  else {
+    // Without the OS clipboard, a paste event carrying the image as a File goes through the same handler.
+    console.warn("river smoke: the OS clipboard did not take the image; pasting with a synthetic paste event")
+    await w.webContents.executeJavaScript(`(() => {
+      const bytes = Uint8Array.from(atob(${JSON.stringify(png.toString("base64"))}), (c) => c.charCodeAt(0))
+      const dt = new DataTransfer()
+      dt.items.add(new File([bytes], "image.png", { type: "image/png" }))
+      window.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }))
+    })()`)
+  }
   const form = await waitRect(w, ".ref-form", 4_000)
   const licence = form ? ((await w.webContents.executeJavaScript(`[...document.querySelectorAll(".ref-form input")].pop()?.value ?? null`)) as string | null) : null
   const pasted = waitBoardWrite("card", (c) => c.kind === "ref" && !Object.values(ids).includes(c.id), 6_000)
@@ -1162,6 +1175,15 @@ async function smokePremium(w: BrowserWindow, dir: string, phase: "1" | "2", wai
     const below = second.every((c) => c.y > row[0]!.y + 100)
     check(`sending all six puts a second row of ${second.length} below the first, with ${b2.edges.length - 2} more connectors`, all && second.length === 6 && below && b2.edges.length === 7)
 
+    await w.webContents.executeJavaScript(`[...document.querySelectorAll(".shot")].find((b) => b.textContent.includes(${JSON.stringify(STILL_SHOT)}))?.setAttribute("data-smoke", "still")`)
+    await clickEl(w, `.shot[data-smoke="still"]`, 2_000)
+    const before = await loadBoard(p.root, "arena")
+    await clickEl(w, `[data-action="send-frame"]`, 3_000)
+    const one = await until(async () => (await loadBoard(p.root, "arena")).cards.length === before.cards.length + 1, 5_000)
+    const after = await loadBoard(p.root, "arena")
+    const still = after.cards.find((c) => c.ref === STILL_SHOT)
+    check(`a one-frame capture shows "Send to board" and adds one card (${JSON.stringify(still?.caption)}) and no connector`, one && still !== undefined && after.edges.length === before.edges.length)
+
     await clickEl(w, `[data-action="open-board"]`, 2_000)
     forget("canvas")
     await toCanvas()
@@ -1175,6 +1197,9 @@ async function smokePremium(w: BrowserWindow, dir: string, phase: "1" | "2", wai
     const bg = await bgOf(w, ".canvas-wrap")
     check(`after a restart the canvas opens the last board (${board}) and stays dark (${bg})`, board === "arena" && bg === DARK_BG)
 
+    await pickTheme("system")
+    const system = await bgOf(w, ".canvas-wrap")
+    check(`"System" follows the OS, dark here (${system})`, system === DARK_BG && (await savedSettings()).canvasTheme === "system")
     await pickTheme("paper")
     const paper = await bgOf(w, ".canvas-wrap")
     check(`switching back to paper (${paper}) is saved`, paper === PAPER_BG && (await savedSettings()).canvasTheme === "paper")
@@ -1246,6 +1271,8 @@ async function smokePremium(w: BrowserWindow, dir: string, phase: "1" | "2", wai
     await openBoardMenu(w)
     const lastLocked = (await w.webContents.executeJavaScript(`Boolean(document.querySelector('[data-action="delete-board"][data-board="arena"]')?.disabled)`)) as boolean
     await closeBoardMenu(w)
+    const refusal = (await w.webContents.executeJavaScript(`window.river.boardDelete("arena").then(() => "deleted", (e) => e.message)`)) as string
+    check(`main refuses to delete the last board too (${JSON.stringify(refusal)})`, refusal.includes("only board") && (await exists(join(p.root, ".river", "boards", "arena", "board.json"))))
     check(`deleting a board asks first, sends it to the trash and opens the one left; the last board cannot be deleted`, made && asked && stillThere && gone && back && lastLocked)
   }
   const ok = results.every(([, r]) => r)

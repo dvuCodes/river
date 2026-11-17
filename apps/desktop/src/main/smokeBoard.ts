@@ -213,28 +213,36 @@ export async function seedPerfBoard(root: string, board: string): Promise<{ card
 
 export const STRIP_SHOT = "shadow_step"
 export const STRIP_FRAMES = 6
+export const STILL_SHOT = "gate_still"
 
 /**
- * A multi-frame shot in river.json and one capture of it, laid out the way core's captureShot writes one
- * (.river/captures/<shot>/<stamp>/ with capture.json listing absolute PNG paths). The frames are one scene with the sun
- * crossing the sky, so the strip reads as a sequence.
+ * Two shots in river.json and one capture of each, laid out the way core's captureShot writes one
+ * (.river/captures/<shot>/<stamp>/ with capture.json listing absolute PNG paths): six frames of one scene with the sun
+ * crossing the sky, so the strip reads as a sequence, and a one-frame still.
  */
 export async function seedStripCapture(root: string): Promise<void> {
   const manifest = join(root, "river.json")
   const m = JSON.parse(await readFile(manifest, "utf8")) as { shots: { id: string }[] }
   if (!m.shots.some((x) => x.id === STRIP_SHOT)) {
-    m.shots.push({ id: STRIP_SHOT, scene: "res://arena/arena.tscn", setup: "res://tools/shots/shadow_step.gd", count: STRIP_FRAMES, ticks: 6, note: "Shadow step: he sinks into his shadow and rises ahead" } as { id: string })
+    m.shots.push(
+      { id: STRIP_SHOT, scene: "res://arena/arena.tscn", setup: "res://tools/shots/shadow_step.gd", count: STRIP_FRAMES, ticks: 6, note: "Shadow step: he sinks into his shadow and rises ahead" } as { id: string },
+      { id: STILL_SHOT, scene: "res://park/gate.tscn", count: 1, note: "The gate at dusk" } as { id: string },
+    )
     await writeFile(manifest, JSON.stringify(m, null, 2) + "\n")
   }
   const at = "2026-11-17T09:30:00.000Z"
-  const out = join(root, ".river", "captures", STRIP_SHOT, at.replace(/:/g, "-"))
-  await mkdir(out, { recursive: true })
-  const files: string[] = []
-  for (let i = 0; i < STRIP_FRAMES; i++) {
-    const t = i / (STRIP_FRAMES - 1)
-    const file = join(out, `frame_${String(i).padStart(3, "0")}.png`)
-    await writeFile(file, scenePng(311, 960, 540, [0.14 + t * 0.72, 0.42 - Math.sin(t * Math.PI) * 0.3]))
-    files.push(file)
+  const capture = async (shotId: string, frames: Buffer[]) => {
+    const out = join(root, ".river", "captures", shotId, at.replace(/:/g, "-"))
+    await mkdir(out, { recursive: true })
+    const files: string[] = []
+    for (const [i, png] of frames.entries()) {
+      const file = join(out, `frame_${String(i).padStart(3, "0")}.png`)
+      await writeFile(file, png)
+      files.push(file)
+    }
+    await writeFile(join(out, "capture.json"), JSON.stringify({ shotId, rev: "a1b2c3d", at, files }, null, 2))
   }
-  await writeFile(join(out, "capture.json"), JSON.stringify({ shotId: STRIP_SHOT, rev: "a1b2c3d", at, files }, null, 2))
+  const t = (i: number) => i / (STRIP_FRAMES - 1)
+  await capture(STRIP_SHOT, Array.from({ length: STRIP_FRAMES }, (_v, i) => scenePng(311, 960, 540, [0.14 + t(i) * 0.72, 0.42 - Math.sin(t(i) * Math.PI) * 0.3])))
+  await capture(STILL_SHOT, [scenePng(211, 960, 540)])
 }
