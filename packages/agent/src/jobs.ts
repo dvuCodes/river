@@ -21,6 +21,7 @@ import {
   conceptPath,
   createJobWorktree,
   deleteCard,
+  gitTop,
   JOB_NEXT,
   listJobs,
   loadBoard,
@@ -189,6 +190,9 @@ export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}
   const root = project.root
   const mark = await loadMark(root, req.board, req.markId)
   if (!mark) throw new Error(`river: no mark ${req.markId} on board ${req.board}`)
+  await gitTop(root).catch(() => {
+    throw new Error(`river: concept jobs work on a git branch, but ${root} is not in a git repository`)
+  })
   if (mark.jobId) {
     const previous = await loadJob(root, mark.jobId).catch(() => undefined)
     // Asking again replaces a failed attempt (its card and worktree go); anything else still in flight blocks.

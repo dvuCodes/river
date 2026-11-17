@@ -202,6 +202,17 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect((await loadJob(game, job.id)).status).toBe("approval")
   })
 
+  it("refuses before creating a job when the project is not in a git repository", async () => {
+    const loose = realpathSync.native(mkdtempSync(path.join(tmpdir(), "river-nogit-")))
+    try {
+      cpSync(game, loose, { recursive: true })
+      await expect(startConceptJob({ workspaceRoot: loose, board: "main", markId: mark.id, model: "claude-sonnet-5-5", backend: "claude-code" }, { runTurn: fakeTurn(DRAW) })).rejects.toThrow(/not in a git repository/)
+      expect(existsSync(path.join(loose, ".river", "jobs"))).toBe(false)
+    } finally {
+      removeDir(loose)
+    }
+  })
+
   it("recovers jobs a stopped process left queued, running or rendering as failed", async () => {
     const job = await start({ runTurn: fakeTurn(DRAW) })
     const at = new Date().toISOString()
