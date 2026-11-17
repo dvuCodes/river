@@ -531,6 +531,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     if (options.length > 1) await closeRowGap(p.root, board, options).catch((err: unknown) => console.warn("river: could not close the row after accepting", err))
   })
   handle("job:dismiss", async (jobId: string, reason?: string) => {
+    lookingJobs.get(jobId)?.abort()
     await (await jobApi()).dismissJob(need().root, jobId, typeof reason === "string" ? reason : undefined)
   })
 }
