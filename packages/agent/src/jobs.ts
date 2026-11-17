@@ -10,7 +10,8 @@
  * Those bytes are read once, from the job's commit, then hashed, rendered and later applied.
  */
 import { createHash } from "node:crypto"
-import { readFile, rm } from "node:fs/promises"
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { hostname } from "node:os"
 import path from "node:path"
 import { godotSettings, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
 import {
@@ -111,6 +112,57 @@ async function transition(root: string, job: Job, to: JobStatus, patch: Partial<
   await saveJob(root, next)
   await syncMark(root, next, message)
   return next
+}
+
+const HEARTBEAT_MS = 10_000
+const OWNER_STALE_MS = 60_000
+
+/** The process working on a job: .river/jobs/<id>/owner.json. Apart from the job file, so a heartbeat never overwrites a state change. */
+interface JobOwner {
+  pid: number
+  host: string
+  /** Last heartbeat, ISO time. */
+  at: string
+}
+
+const ownerFile = (root: string, jobId: string) => path.join(root, ".river", "jobs", jobId, "owner.json")
+
+/**
+ * Record this process as the job's owner and refresh the record until stop() runs, so recoverJobs in
+ * another process (the app opening the project while the CLI runs a job) leaves the job alone.
+ */
+async function claimJob(root: string, jobId: string): Promise<() => void> {
+  const file = ownerFile(root, jobId)
+  const beat = async () => {
+    const owner: JobOwner = { pid: process.pid, host: hostname(), at: now() }
+    const tmp = `${file}.${process.pid}.tmp`
+    await writeFile(tmp, JSON.stringify(owner))
+    await rename(tmp, file)
+  }
+  await mkdir(path.dirname(file), { recursive: true })
+  await beat()
+  // Later beats never create the folder, so once a dismiss removes it, it stays gone.
+  const timer = setInterval(() => void beat().catch(() => undefined), HEARTBEAT_MS)
+  timer.unref()
+  return () => clearInterval(timer)
+}
+
+/** A heartbeat within the last minute from a process that still exists (the pid is checked on the owner's host only). */
+async function ownerAlive(root: string, jobId: string): Promise<boolean> {
+  let owner: JobOwner
+  try {
+    owner = JSON.parse(await readFile(ownerFile(root, jobId), "utf8")) as JobOwner
+  } catch {
+    return false
+  }
+  if (!(Date.now() - Date.parse(owner.at) < OWNER_STALE_MS)) return false
+  if (owner.host !== hostname()) return true
+  try {
+    process.kill(owner.pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM"
+  }
 }
 
 /** Fail the job unless it already ended (dismissed meanwhile, or failed already); returns it as it is now. */
@@ -221,7 +273,14 @@ export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}
   }
   const abort = new AbortController()
   // In `live` before the job file exists, so a dismiss from this process always waits for the run.
-  const run = saveJob(root, queued).then((job) => runConceptTurn(project, req, mark, job, abort.signal, deps))
+  // Claimed before it exists too, so recoverJobs elsewhere never sees it queued without an owner.
+  const run = claimJob(root, id).then(async (stop) => {
+    try {
+      return await runConceptTurn(project, req, mark, await saveJob(root, queued), abort.signal, deps)
+    } finally {
+      stop()
+    }
+  })
   live.set(id, { abort, run })
   try {
     return await run
@@ -312,15 +371,20 @@ export async function approveJobScript(workspaceRoot: string, jobId: string, sha
   }
   const bin = godotBin(project, deps.env ?? process.env)
 
-  job = await transition(root, job, "rendering", { scripts: [{ ...job.scripts![0]!, approved: true }] })
+  const stop = await claimJob(root, job.id)
   try {
-    const png = path.join(root, ".river", "jobs", job.id, "render.png")
-    await (deps.render ?? renderConcept)({ bin, script: bytes, outPng: png })
-    const render = conceptPath(job.conceptId, CONCEPT_RENDER)
-    const headSha = await commitJobFile(root, job.id, inRepo(job, render), await readFile(png), `river: render ${job.conceptId}`)
-    return await transition(root, job, "answered", { headSha })
-  } catch (err) {
-    return fail(root, job, errMsg(err))
+    job = await transition(root, job, "rendering", { scripts: [{ ...job.scripts![0]!, approved: true }] })
+    try {
+      const png = path.join(root, ".river", "jobs", job.id, "render.png")
+      await (deps.render ?? renderConcept)({ bin, script: bytes, outPng: png })
+      const render = conceptPath(job.conceptId, CONCEPT_RENDER)
+      const headSha = await commitJobFile(root, job.id, inRepo(job, render), await readFile(png), `river: render ${job.conceptId}`)
+      return await transition(root, job, "answered", { headSha })
+    } catch (err) {
+      return await fail(root, job, errMsg(err))
+    }
+  } finally {
+    stop()
   }
 }
 
@@ -390,15 +454,17 @@ export async function dismissJob(workspaceRoot: string, jobId: string): Promise<
 }
 
 /**
- * Call when a project opens. Jobs a crashed or closed process left queued, running or rendering
- * become "failed", and what an accept or dismiss left unsettled is finished. Returns the failed ones.
+ * Call when a project opens. Jobs left queued, running or rendering by a process that is gone (no
+ * heartbeat for a minute, or its pid no longer exists) become "failed"; jobs a live process works on,
+ * in this process or another, are left alone. What an accept or dismiss left unsettled is finished.
+ * Returns the jobs it failed.
  */
 export async function recoverJobs(workspaceRoot: string): Promise<Job[]> {
   const root = await projectRoot(workspaceRoot)
   const jobs = await listJobs(root)
   const recovered: Job[] = []
   for (const job of jobs) {
-    if (INTERRUPTIBLE.includes(job.status)) {
+    if (INTERRUPTIBLE.includes(job.status) && !(await ownerAlive(root, job.id))) {
       recovered.push(await transition(root, job, "failed", { error: `interrupted: River stopped while this job was ${job.status}` }))
     }
   }

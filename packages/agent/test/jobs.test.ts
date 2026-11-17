@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { lintConceptScript, type RenderConceptRequest } from "@river/adapter-godot"
 import { ensureBoard, listCheckpoints, listJobs, loadBoard, loadJob, loadMark, saveCard, saveJob, saveMark, type Job, type Mark } from "@river/core"
 import { acceptJob, approveJobScript, dismissJob, readJobScript, recoverJobs, startConceptJob, type JobDeps, type RunTurn } from "../src/jobs"
@@ -372,6 +372,72 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect(recovered[0]!.error).toMatch(/interrupted/)
     expect((await loadJob(game, job.id)).status).toBe("approval")
     expect((await loadMark(game, "main", mark.id))!.status).toBe("open")
+  })
+
+  it("recoverJobs leaves alone a job this process is still running", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let started = false
+    const run = start({
+      runTurn: async (req, h) => {
+        started = true
+        await gate
+        await fakeTurn(DRAW)(req, h)
+      },
+    })
+    while (!started) await new Promise((r) => setTimeout(r, 20))
+    const [job] = await listJobs(game)
+    expect(await recoverJobs(game)).toEqual([])
+    expect((await loadJob(game, job!.id)).status).toBe("running")
+    release()
+    expect((await run).status).toBe("approval")
+  })
+
+  it("recoverJobs leaves alone a job another live process runs, and fails it once that process is gone", async () => {
+    const signals = mkdtempSync(path.join(tmpdir(), "river-child-"))
+    const child = spawn(process.execPath, ["--import", "tsx", path.join(import.meta.dirname, "job-in-child.ts"), game, mark.id, signals], {
+      cwd: path.join(import.meta.dirname, "..", "..", ".."),
+      stdio: "ignore",
+    })
+    try {
+      const until = Date.now() + 60_000
+      while (!existsSync(path.join(signals, "started")) && Date.now() < until) await new Promise((r) => setTimeout(r, 50))
+      const [job] = await listJobs(game)
+      expect((await loadJob(game, job!.id)).status).toBe("running")
+      expect(await recoverJobs(game)).toEqual([])
+      expect((await loadJob(game, job!.id)).status).toBe("running")
+
+      const exited = new Promise((r) => child.once("exit", r))
+      child.kill()
+      await exited
+      expect((await recoverJobs(game)).map((j) => [j.id, j.status])).toEqual([[job!.id, "failed"]])
+    } finally {
+      child.kill()
+      removeDir(signals)
+    }
+  })
+
+  it("recoverJobs fails a job whose owner has not checked in for over a minute, even if its process is alive", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let started = false
+    const run = start({
+      runTurn: async (req, h) => {
+        started = true
+        await gate
+        await fakeTurn(DRAW)(req, h)
+      },
+    })
+    while (!started) await new Promise((r) => setTimeout(r, 20))
+    vi.useFakeTimers({ toFake: ["Date"] })
+    try {
+      vi.setSystemTime(Date.now() + 2 * 60_000)
+      expect((await recoverJobs(game)).map((j) => j.status)).toEqual(["failed"])
+    } finally {
+      vi.useRealTimers()
+      release()
+    }
+    expect((await run).status).toBe("failed")
   })
 
   it.skipIf(!process.env.GODOT_BIN)("renders the approved script with real Godot and accepts the PNG", async () => {
