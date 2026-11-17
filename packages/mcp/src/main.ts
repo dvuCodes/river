@@ -2,7 +2,7 @@
 /**
  * river-mcp: the River MCP server over stdio.
  *
- *   river-mcp --root <game repo> [--tools a,b,c] [--approval-pipe <name>]
+ *   river-mcp --root <game repo> [--tools a,b,c] [--approval-pipe <name>] [--concept <id>]
  *
  * stdout carries MCP messages only; everything else goes to stderr.
  */
@@ -10,13 +10,15 @@ import { parseArgs } from "node:util"
 import { RIVER_TOOL_NAMES } from "./tools"
 import { startServer } from "./server"
 
-const USAGE = `river-mcp --root <dir> [--tools name,name,...] [--approval-pipe <name>]
+const USAGE = `river-mcp --root <dir> [--tools name,name,...] [--approval-pipe <name>] [--concept <id>]
 
   --root   the game repo (the folder with river.json). Required.
   --tools  only serve these tools. Default: all.
            ${RIVER_TOOL_NAMES.join(", ")}
   --approval-pipe  also serve approval_prompt (the Claude Code permission prompt
            tool), answered by the River agent host on this local pipe/socket.
+  --concept  serve concept_write for this concept job; it writes only in
+           concepts/<id>/.
 `
 
 async function main(): Promise<number> {
@@ -29,6 +31,7 @@ async function main(): Promise<number> {
         root: { type: "string" },
         tools: { type: "string" },
         "approval-pipe": { type: "string" },
+        concept: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     }).values
@@ -50,6 +53,7 @@ async function main(): Promise<number> {
       root: values.root,
       ...(tools ? { tools } : {}),
       ...(values["approval-pipe"] ? { approvalPipe: values["approval-pipe"] } : {}),
+      ...(values.concept !== undefined ? { conceptId: values.concept } : {}),
     })
     process.stderr.write(`river-mcp: serving ${values.root}\n`)
   } catch (e) {
