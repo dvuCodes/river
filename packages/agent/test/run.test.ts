@@ -122,7 +122,7 @@ describe("startAgentTurn", () => {
     const { query, calls } = fakeQuery(okRun)
     const { h } = handlers()
     await startAgentTurn(req({ mode: "concept", conceptId: "k_run00001" }), h, { query, mcpLaunch: launch })
-    expect(String(calls[0]!.prompt)).toContain("Concept id: k_run00001 (write concepts/k_run00001/draw.gd)")
+    expect(String(calls[0]!.prompt)).toContain("Concept id: k_run00001 (write concepts/k_run00001/draw.gd, or options draw_a.gd..draw_e.gd)")
     expect(execFileSync("git", ["for-each-ref", "refs/river/"], { cwd: root, encoding: "utf8" }).trim()).toBe("")
   })
 

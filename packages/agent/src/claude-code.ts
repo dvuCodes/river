@@ -17,7 +17,7 @@ import { createInterface } from "node:readline"
 import type { MessageMapper } from "./events"
 import { DISALLOWED_BUILTINS, defaultMcpLaunch, preAllowedTools, riverMcpServer, type McpLaunch } from "./options"
 import { BUILTIN_READ_TOOLS, MCP_PREFIX } from "./policy"
-import { SYSTEM_PROMPTS, turnContext } from "./prompts"
+import { systemPrompt, turnContext } from "./prompts"
 import type { AgentTurnRequest, ClaudeCodeStatus } from "./types"
 
 export const APPROVAL_TOOL = `${MCP_PREFIX}approval_prompt`
@@ -154,7 +154,7 @@ export function buildClaudeCodeArgs(req: AgentTurnRequest, o: ClaudeArgsOptions)
     // Read/Glob/Grep are not pre-allowed on purpose (see options.ts); in-root reads need no approval anyway.
     `--allowedTools=${preAllowedTools(req.mode).join(",")}`,
     `--disallowedTools=${DISALLOWED_BUILTINS.join(",")}`,
-    `--append-system-prompt=${SYSTEM_PROMPTS[req.mode]}`,
+    `--append-system-prompt=${systemPrompt(req)}`,
     // A resumed session may change mode; render the mode prompt fresh.
     "--system-prompt-snapshot=off",
     `--max-turns=${o.maxTurns ?? 40}`,

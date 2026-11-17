@@ -82,7 +82,7 @@ describe("claude-code arguments", () => {
       "--root",
       "/game",
       "--tools",
-      "project_info,story_list,story_read,story_lint,story_paths,playtest_run,frames_list,review_list,plan_list,plan_read,story_write_passage,story_add_passage",
+      "project_info,story_list,story_read,story_lint,story_paths,playtest_run,frames_list,review_list,plan_list,plan_read,board_read,marks_open,brief_read,story_write_passage,story_add_passage",
       "--approval-pipe",
       "\\\\.\\pipe\\river-test",
     ])
@@ -98,6 +98,14 @@ describe("claude-code arguments", () => {
     expect(river[river.indexOf("--tools") + 1]!.split(",")).toContain("concept_write")
     expect(String(flag(args, "--allowedTools")).split(",")).toContain("mcp__river__concept_write")
     expect(flag(args, "--append-system-prompt")).toBe(SYSTEM_PROMPTS.concept)
+  })
+
+  it("adds the project brief to the system prompt, cut short so the command line stays under Windows' limit", () => {
+    const brief = (text: string) => String(flag(buildClaudeCodeArgs(req({ mode: "concept", conceptId: "k_cli00001", brief: text }), opts), "--append-system-prompt"))
+    expect(brief("Warm palette.\n")).toBe(`${SYSTEM_PROMPTS.concept}\n\nThe project brief (.river/brief.md), written by the user:\nWarm palette.`)
+    const long = brief("x".repeat(50_000))
+    expect(long.length).toBeLessThan(SYSTEM_PROMPTS.concept.length + 6200)
+    expect(long).toContain("read it with brief_read")
   })
 
   it("resumes a session", () => {

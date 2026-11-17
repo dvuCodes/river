@@ -73,7 +73,7 @@ function fakeRender(seen: Buffer[] = []): JobDeps["render"] {
 }
 
 const start = (deps: JobDeps) => startConceptJob({ workspaceRoot: game, board: "main", markId: mark.id, model: "claude-sonnet-5-5", backend: "claude-code" }, deps)
-const pending = async (job: Job) => (await loadBoard(game, "main")).cards.find((c) => c.pending?.jobId === job.id)
+const pending = async (job: Job) => (await loadBoard(game, "main")).cards.find((c) => c.pending?.jobId === job.id && c.kind === "concept")
 const branchExists = (job: Job) => git("branch", "--list", `river/job/${job.id}`).trim() !== ""
 
 async function answeredJob(): Promise<Job> {
@@ -121,7 +121,14 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     let m = (await loadMark(game, "main", mark.id))!
     expect(m).toMatchObject({ status: "working", jobId: job.id })
     expect(m.thread.at(-1)).toMatchObject({ by: "concept-artist", text: SUMMARY })
-    expect(await pending(job)).toMatchObject({ kind: "concept", ref: job.conceptId, x: 400, y: 30, w: 260, madeBy: "concept-artist", pending: { markId: mark.id, jobId: job.id } })
+    // The answer beside the mark, level with its top: the agent's note, then the drawing; edges mark -> note -> drawing.
+    const answer = (await loadBoard(game, "main")).cards.filter((c) => c.pending?.jobId === job.id)
+    const note = answer.find((c) => c.kind === "note")!
+    expect(note).toMatchObject({ x: 400, y: 30, w: 320, text: SUMMARY, madeBy: "concept-artist", pending: { markId: mark.id, jobId: job.id } })
+    const drawing = answer.find((c) => c.kind === "concept")!
+    expect(drawing).toMatchObject({ ref: job.conceptId, x: 760, y: 30, w: 260, madeBy: "concept-artist", pending: { markId: mark.id, jobId: job.id } })
+    expect(drawing.label).toBeUndefined()
+    expect((await loadBoard(game, "main")).edges.map((e) => [e.from, e.to])).toEqual([[mark.id, note.id], [note.id, drawing.id]])
 
     const script = await readJobScript(game, job.id)
     expect(script).toEqual({ file: `concepts/${job.id}/draw.gd`, text: DRAW, sha256: sha(DRAW) })
@@ -141,9 +148,8 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect(accepted.status).toBe("accepted")
     expect(readFileSync(path.join(game, "concepts", job.id, "draw.gd"), "utf8")).toBe(DRAW)
     expect(readFileSync(path.join(game, "concepts", job.id, "concept.png")).equals(FAKE_PNG)).toBe(true)
-    const card = (await loadBoard(game, "main")).cards.find((c) => c.kind === "concept")!
-    expect(card.ref).toBe(job.conceptId)
-    expect(card.pending).toBeUndefined()
+    const settled = (await loadBoard(game, "main")).cards.filter((c) => c.id === note.id || c.id === drawing.id)
+    expect(settled.map((c) => [c.kind, c.pending]).sort()).toEqual([["concept", undefined], ["note", undefined]])
     m = (await loadMark(game, "main", mark.id))!
     expect(m.status).toBe("accepted")
     expect(existsSync(job.worktree)).toBe(false)

@@ -7,7 +7,7 @@
  * - "implement": runs an APPROVED ChangePlan. It can edit only the files the plan names
  *                (core `assertEditAllowed`), then capture the plan's shots again.
  * - "concept":   a concept job's turn, run in the job's worktree. It can write only in
- *                concepts/<conceptId>/ (one script, draw.gd). Nothing runs that script here.
+ *                concepts/<conceptId>/ (draw.gd, or options draw_a.gd..draw_e.gd). Nothing runs them here.
  *
  * Every "story" and "implement" turn starts with a git checkpoint of the game repo.
  */
@@ -40,6 +40,8 @@ export interface AgentTurnRequest {
   conceptId?: string
   /** Continue an earlier conversation. */
   sessionId?: string
+  /** The project brief (.river/brief.md), added to the system prompt. */
+  brief?: string
   backend: AgentBackend
   /** ANTHROPIC_API_KEY for the "api-key" backend. The app passes it in; the agent never reads it from disk. */
   apiKey?: string
@@ -108,6 +110,9 @@ export const READ_TOOLS = [
   "review_list",
   "plan_list",
   "plan_read",
+  "board_read",
+  "marks_open",
+  "brief_read",
 ] as const
 
 export const WRITE_TOOLS = [
@@ -119,11 +124,21 @@ export const WRITE_TOOLS = [
   "plan_mark_implemented",
   "frames_capture",
   "concept_write",
+  "mark_claim",
+  "mark_reply",
+  "board_add_note",
+  "board_add_card",
+  "board_connect",
+  "board_place_row",
 ] as const
 
 export type RiverToolName = (typeof READ_TOOLS)[number] | (typeof WRITE_TOOLS)[number]
 
-/** Which tools each mode can see. Built-in SDK tools allowed in every mode: Read, Glob, Grep (inside root). */
+/**
+ * Which tools each mode can see. Built-in SDK tools allowed in every mode: Read, Glob, Grep (inside root).
+ * The board write tools are for agents working the board from outside (Claude Code with river-mcp); no
+ * mode has them, and a concept job's runner lays its own answer out.
+ */
 export const MODE_TOOLS: Record<AgentMode, readonly RiverToolName[]> = {
   story: [...READ_TOOLS, "story_write_passage", "story_add_passage"],
   plan: [...READ_TOOLS, "review_reply", "plan_save"],
