@@ -3,7 +3,7 @@
 River is a game dev harness for branching stories and game frames. It works with any engine.
 
 - **Story map.** Stories are Twee 3 text files in your game repo. The map shows passages and branches, the path list shows every route to each ending, and the linter catches broken links, dead ends and conditions that can never be true.
-- **Typed game state.** You declare variables once (`stories/state.json`). Passages and choices read them with `@when` and change them with `@set`.
+- **Typed game state.** You declare variables once (`stories/state.json`). Passages and choices read them with `@when` and change them with `@set` and `@cost`; variables the game moves on its own are marked `engine`.
 - **Playtest and export.** Play a story as text with live state, then export JSON that your engine loads.
 - **Frame review.** Capture deterministic shots from your engine, comment on a frame, and compare before and after.
 - **In-app agent.** The agent drafts branches and writes change plans for frame comments. An implementer edits only the files that the approved plan names. Every turn starts from a git checkpoint.
@@ -28,6 +28,10 @@ The storyboard is a canvas of passage cards, notes and images. You leave request
 - **Claude Code**, through `river-mcp`, takes the other requests: it claims a mark, reads the story and the brief, answers with notes and images, and hands drawing requests to the concept artist. See [packages/mcp/README.md](packages/mcp/README.md) to set it up, including on Windows and for headless `claude -p` runs.
 
 From the terminal: `river card add`, `river mark add`, `river mark reply`, `river board show` and `river job ...` (`pnpm river --help` lists them).
+
+## Set up a game
+
+[docs/godot-setup.md](docs/godot-setup.md) makes an existing Godot repo a River project: `river.json`, the state schema, shots and their setup scripts, what to commit and what to ignore, and the story rules (`@when`, `@set`, `@cost`, `@hint`, `*=`, engine variables, `[interrupt]` passages and `@return`).
 
 ## Status
 

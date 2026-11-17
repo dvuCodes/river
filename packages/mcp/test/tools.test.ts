@@ -64,7 +64,7 @@ describe("read tools", () => {
     expect(info).toContain(`story files: ${STORY}`)
     expect(info).toContain("state variables (stories/state.json):\n  energy: number 0..100, initial 80\n")
     expect(info).toContain("  treats: int 0..10, initial 2")
-    expect((await call("story_list")).text).toContain(`${STORY}  "Park Walk"  8 passages, start: Gate`)
+    expect((await call("story_list")).text).toContain(`${STORY}  "Park Walk"  9 passages, start: Gate`)
   })
 
   it("story_read returns the raw text and the passages", async () => {
@@ -80,8 +80,8 @@ describe("read tools", () => {
   it("story_lint reports the planted problems", async () => {
     const r = await call("story_lint", { file: STORY })
     expect(r.text).toContain("error  Pond → Splash: no passage has this name")
-    expect(r.text).toContain("1 error, 3 warnings in 8 passages")
-    expect((await call("story_lint")).text).toContain("1 error, 3 warnings in 8 passages")
+    expect(r.text).toContain("1 error, 3 warnings in 9 passages")
+    expect((await call("story_lint")).text).toContain("1 error, 3 warnings in 9 passages")
     expect(r.text).toContain(
       "warn   Long path → Fetch: the choice can show while Fetch's @when energy >= 20 is false. Give the choice @when energy >= 20, or loosen Fetch's @when.",
     )

@@ -206,7 +206,7 @@ describe("export", () => {
     const out = exportStory(fixed, schema, "park_walk")
     expect(out.schema).toBe(1)
     expect(out.start).toBe("gate")
-    expect(Object.keys(out.passages)).toEqual(["gate", "pond", "long_path", "calm_down", "treat", "fetch", "home_happy", "home_grumpy"])
+    expect(Object.keys(out.passages)).toEqual(["gate", "pond", "long_path", "calm_down", "treat", "fetch", "home_happy", "home_grumpy", "loud_bang"])
     expect(out.passages.gate!.text).toBe("The park gate creaks open. The dog pulls toward the pond.")
     expect(out.passages.pond!.choices[1]).toEqual({
       label: "Throw a treat",

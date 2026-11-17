@@ -44,7 +44,7 @@ describe("river-mcp over stdio", () => {
       const lint = await client.callTool({ name: "story_lint", arguments: { file: "stories/park_walk.twee" } })
       expect(lint.isError).toBeFalsy()
       const text = (lint.content as { type: string; text: string }[])[0]!.text
-      expect(text).toContain("1 error, 3 warnings in 8 passages")
+      expect(text).toContain("1 error, 3 warnings in 9 passages")
 
       const bad = await client.callTool({ name: "story_read", arguments: { file: "../x" } })
       expect(bad.isError).toBe(true)

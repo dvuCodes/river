@@ -66,3 +66,12 @@ A good walk.
 @end
 --
 A walk. Technically.
+
+:: Loud bang [interrupt]
+@id loud_bang
+@when noise >= 80
+--
+A car backfires. The dog freezes, then tugs toward home.
+
+[[Kneel and wait->@return]] @set excitement -= 20, bond += 5 @hint "Takes a moment"
+[[Head home now->Home grumpy]] @set bond *= 0.5 @hint "Keeps half the bond"
