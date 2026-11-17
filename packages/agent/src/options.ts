@@ -92,7 +92,8 @@ export function buildQueryOptions(req: AgentTurnRequest, deps: QueryOptionDeps):
         command: launch.command,
         args: [...launch.args, "--root", root, "--tools", modeTools.join(",")],
         // The River server needs no Anthropic key; make sure it does not inherit one.
-        env: { ANTHROPIC_API_KEY: "" },
+        // Inside Electron, process.execPath is the app itself; ELECTRON_RUN_AS_NODE makes it run the script as Node.
+        env: { ANTHROPIC_API_KEY: "", ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}) },
         alwaysLoad: true,
       },
     },

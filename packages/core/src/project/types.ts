@@ -9,7 +9,7 @@ export interface ShotDef {
   id: string
   /** Engine path of the scene, e.g. "res://src/game/walk/walk.tscn". */
   scene: string
-  /** Engine path of the setup script, e.g. "res://tools/shots/leash_surge_taut.gd". */
+  /** Engine path of the setup script, e.g. "res://tools/shots/intro_frozen.gd". */
   setup?: string
   /** 1 = a single screenshot. More than 1 = consecutive frames. */
   count: number
