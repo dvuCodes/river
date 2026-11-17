@@ -30,7 +30,7 @@ const pen = (x: number) => ({ shape: "pen" as const, path: [x, 0, x + 5, 5], anc
 
 describe("boards", () => {
   it("creates, reads, updates and deletes cards and marks", async () => {
-    expect(await loadBoard(root, "main")).toEqual({ name: "main", cards: [], marks: [] })
+    expect(await loadBoard(root, "main")).toEqual({ name: "main", cards: [], marks: [], edges: [] })
     await ensureBoard(root, "main")
     expect(JSON.parse(readFileSync(path.join(boardDir(root, "main"), "board.json"), "utf8")).name).toBe("main")
     expect(await listBoards(root)).toEqual(["main"])
@@ -159,5 +159,16 @@ describe("jobs", () => {
     expect((await listJobs(root, (f) => errors.push(path.basename(f)))).map((j) => j.id)).toEqual([b.id, a.id])
     expect(errors).toEqual(["j_bad00000.json"])
     await expect(loadJob(root, "j_missing0")).rejects.toThrow(/no job/)
+  })
+})
+
+describe("edges", () => {
+  it("saves, lists and deletes connectors between cards and marks", async () => {
+    const { saveEdge, deleteEdge } = await import("../../src/boards/boards")
+    const e = await saveEdge(root, "edgy", { from: "m_aaaaaaaa", to: "c_bbbbbbbb", madeBy: "concept-artist" })
+    expect(e.id).toMatch(/^e_/)
+    expect((await loadBoard(root, "edgy")).edges).toEqual([e])
+    await deleteEdge(root, "edgy", e.id)
+    expect((await loadBoard(root, "edgy")).edges).toEqual([])
   })
 })
