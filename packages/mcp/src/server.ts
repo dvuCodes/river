@@ -1,0 +1,60 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+import { loadProject } from "@river/core"
+import type { Project } from "@river/core"
+import { createRiverTools, RIVER_TOOL_NAMES } from "./tools"
+import type { RiverTool, RiverToolsOptions } from "./tools"
+
+export const SERVER_NAME = "river"
+export const SERVER_VERSION = "0.1.0"
+
+export interface ServerOptions extends RiverToolsOptions {
+  /** Only register these tools. Default: all of them. */
+  tools?: readonly string[]
+}
+
+/** Pick tools by name. Throws on a name River does not have. */
+export function selectTools(all: RiverTool[], names?: readonly string[]): RiverTool[] {
+  if (!names) return all
+  const unknown = names.filter((n) => !(RIVER_TOOL_NAMES as readonly string[]).includes(n))
+  if (unknown.length > 0) throw new Error(`unknown tools: ${unknown.join(", ")}. Known: ${RIVER_TOOL_NAMES.join(", ")}`)
+  return all.filter((t) => names.includes(t.name))
+}
+
+/** An MCP server named "river" with the River tools registered. Errors become isError results. */
+export function createServer(project: Project, opts: ServerOptions = {}): McpServer {
+  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION })
+  for (const tool of selectTools(createRiverTools(project, opts), opts.tools)) {
+    server.registerTool(
+      tool.name,
+      {
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        annotations: { readOnlyHint: !tool.mutating, destructiveHint: false, openWorldHint: false },
+      },
+      async (input: unknown) => {
+        try {
+          const result = await tool.handler(input)
+          const content = [{ type: "text" as const, text: result.text }]
+          // Plain-object data also goes out as structuredContent (plan ids, capture files, diffs).
+          const data = result.data
+          if (data !== null && typeof data === "object" && !Array.isArray(data)) {
+            return { content, structuredContent: data as Record<string, unknown> }
+          }
+          return { content }
+        } catch (e) {
+          return { content: [{ type: "text" as const, text: `Error: ${(e as Error).message}` }], isError: true }
+        }
+      },
+    )
+  }
+  return server
+}
+
+/** Load the project at root and serve the River tools over stdio. Nothing but MCP goes to stdout. */
+export async function startServer(opts: ServerOptions & { root: string }): Promise<McpServer> {
+  const project = await loadProject(opts.root)
+  const server = createServer(project, opts)
+  await server.connect(new StdioServerTransport())
+  return server
+}

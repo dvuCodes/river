@@ -2,12 +2,15 @@ import { readFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, resolve } from "node:path"
 import { parseArgs } from "node:util"
+import { createGodotAdapter } from "@river/adapter-godot"
 import {
+  captureShot,
   contentPassages,
   createPlaytest,
   exportStory,
   formatCond,
   lint,
+  listCaptures,
   listStories,
   loadProject,
   loadSchema,
@@ -20,7 +23,7 @@ import {
   saveStory,
   slug,
 } from "@river/core"
-import type { Diagnostic, Project, StateSchema, Story } from "@river/core"
+import type { Diagnostic, EngineAdapter, Project, StateSchema, Story } from "@river/core"
 import { mkdir, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 
@@ -43,7 +46,8 @@ Commands:
   play [dir] [--story rel] [--from name]   play a story as text
   export [dir]                             write <export>/<story>.json for each story
   import-twine <file.html> [dir] [--force] import a Twine 2 archive or published story
-  capture, shots                           not implemented in this build
+  shots [dir]                              list the shots in river.json and their latest capture
+  capture <shotId> [dir] | --all [dir]     run the engine to capture a shot into .river/captures
 `
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
@@ -85,6 +89,7 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
         story: { type: "string" },
         from: { type: "string" },
         force: { type: "boolean" },
+        all: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     })
@@ -109,10 +114,12 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
         if (!rest[0]) { err.line("river import-twine: missing <file.html>"); return 2 }
         return await cmdImport(resolve(cwd, rest[0]), resolve(cwd, rest[1] ?? "."), values.force ?? false, out, err)
       }
-      case "capture":
-      case "shots":
-        out.line(`river ${cmd}: not implemented in this build`)
-        return 1
+      case "shots": return await cmdShots(resolve(cwd, rest[0] ?? "."), out)
+      case "capture": {
+        if (values.all) return await cmdCapture(resolve(cwd, rest[0] ?? "."), undefined, out, err)
+        if (!rest[0]) { err.line("river capture: missing <shotId> (or --all)"); return 2 }
+        return await cmdCapture(resolve(cwd, rest[1] ?? "."), rest[0], out, err)
+      }
       default:
         err.line(`river: unknown command "${cmd}"`)
         out.write(HELP)
@@ -122,6 +129,53 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
     err.line(`river ${cmd}: ${(e as Error).message}`)
     return 1
   }
+}
+
+/** The engine adapter named by manifest.engine. */
+export function adapterFor(project: Project): EngineAdapter {
+  const engine = project.manifest.engine
+  if (engine === "godot") return createGodotAdapter()
+  if (engine === "none" || engine === "") {
+    throw new Error(`this project has engine "${engine}" in river.json, so it cannot capture frames (set "engine": "godot" and adapter.godot.bin)`)
+  }
+  throw new Error(`unknown engine "${engine}" in river.json; supported: godot`)
+}
+
+async function cmdShots(dir: string, out: Out): Promise<number> {
+  const project = await loadProject(dir)
+  const shots = project.manifest.shots
+  if (shots.length === 0) {
+    out.line("no shots in river.json")
+    return 0
+  }
+  for (const s of shots) {
+    const latest = (await listCaptures(project, s.id))[0]
+    const last = latest ? `last capture ${latest.at} (rev ${latest.rev}, ${plural(latest.files.length, "frame")})` : "never captured"
+    out.line(`${s.id}  ${s.scene}  ${plural(s.count, "frame")}  ${last}${s.note ? `  ${s.note}` : ""}`)
+  }
+  return 0
+}
+
+async function cmdCapture(dir: string, shotId: string | undefined, out: Out, err: Out): Promise<number> {
+  const project = await loadProject(dir)
+  const adapter = adapterFor(project)
+  const ids = shotId !== undefined ? [shotId] : project.manifest.shots.map((s) => s.id)
+  if (ids.length === 0) {
+    err.line("river capture: no shots in river.json")
+    return 1
+  }
+  let failed = 0
+  for (const id of ids) {
+    try {
+      const capture = await captureShot(project, id, adapter)
+      out.line(`captured ${id} at rev ${capture.rev} (${plural(capture.files.length, "frame")})`)
+      for (const f of capture.files) out.line(`  ${f}`)
+    } catch (e) {
+      failed++
+      err.line(`error  ${(e as Error).message}`)
+    }
+  }
+  return failed > 0 ? 1 : 0
 }
 
 async function cmdLint(dir: string, storyOpt: string | undefined, out: Out): Promise<number> {

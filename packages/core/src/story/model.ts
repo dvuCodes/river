@@ -39,7 +39,23 @@ export function updatePassageText(story: Story, passageId: string, rawText: stri
   return { ...story, passages: story.passages.map((p) => (p === target ? reparse(p, rawText) : p)) }
 }
 
-/** Rename a passage and rewrite every link to it in every other passage. Returns a new Story. */
+/**
+ * Give a passage text an `@id` rule. Adds it to the top of the rules block, or adds a new
+ * rules block (`@id ...` then `--`) when the text has none.
+ */
+function withIdRule(rawText: string, id: string): string {
+  const lines = rawText.split("\n")
+  let i = 0
+  while (i < lines.length && lines[i]!.startsWith("@")) i++
+  const hasRules = i < lines.length && lines[i] === "--"
+  return hasRules ? `@id ${id}\n${rawText}` : `@id ${id}\n--\n${rawText}`
+}
+
+/**
+ * Rename a passage and rewrite every link to it in every other passage. Returns a new Story.
+ * The passage id never changes: when the id came from the old name (no `@id` rule), an
+ * `@id <old id>` rule is added, so layouts and anything else keyed by id still match.
+ */
 export function renamePassage(story: Story, passageId: string, newName: string): Story {
   const target = passageById(story, passageId)
   if (!target) throw new Error(`no passage with id "${passageId}"`)
@@ -49,7 +65,12 @@ export function renamePassage(story: Story, passageId: string, newName: string):
   const oldName = target.name
   const passages = story.passages.map((p) => {
     const raw = isCodePassage(p) ? p.rawText : rewriteLinks(p.rawText, oldName, newName)
-    if (p === target) return reparse(p, raw, newName)
+    if (p === target) {
+      const renamed = reparse(p, raw, newName)
+      // Code passages have no rules block, so their id follows the name.
+      if (renamed.id === target.id || isCodePassage(p)) return renamed
+      return reparse(p, withIdRule(raw, target.id), newName)
+    }
     return raw === p.rawText ? p : reparse(p, raw)
   })
   return { ...story, start: story.start === oldName ? newName : story.start, passages }

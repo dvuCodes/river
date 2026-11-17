@@ -74,8 +74,33 @@ describe("river CLI", () => {
     expect(json.start).toBe("gate")
   })
 
-  it("capture and shots are stubs", async () => {
-    expect((await cli(["capture"])).out).toContain("not implemented in this build")
-    expect((await cli(["shots"])).out).toContain("not implemented in this build")
+  it("shots lists the manifest shots", async () => {
+    const empty = await cli(["shots", example])
+    expect(empty.code).toBe(0)
+    expect(empty.out).toContain("no shots in river.json")
+    const dir = tempProject()
+    const manifest = JSON.parse(readFileSync(join(dir, "river.json"), "utf8"))
+    manifest.shots = [{ id: "gate_open", scene: "res://gate.tscn", count: 1, note: "first frame" }]
+    writeFileSync(join(dir, "river.json"), JSON.stringify(manifest))
+    const r = await cli(["shots", dir])
+    expect(r.code).toBe(0)
+    expect(r.out).toContain("gate_open  res://gate.tscn  1 frame  never captured  first frame")
+  })
+
+  it("capture picks the adapter by engine and explains a missing one", async () => {
+    expect((await cli(["capture"])).code).toBe(2)
+    const none = await cli(["capture", "gate_open", example])
+    expect(none.code).toBe(1)
+    expect(none.err).toContain('engine "none"')
+    const dir = tempProject()
+    const manifest = JSON.parse(readFileSync(join(dir, "river.json"), "utf8"))
+    manifest.engine = "godot"
+    manifest.shots = [{ id: "gate_open", scene: "res://gate.tscn", count: 1 }]
+    writeFileSync(join(dir, "river.json"), JSON.stringify(manifest))
+    const godot = await cli(["capture", "gate_open", dir])
+    expect(godot.code).toBe(1)
+    expect(godot.err).toContain("adapter.godot.bin is not set")
+    const unknown = await cli(["capture", "nope", dir])
+    expect(unknown.err).toContain('no shot "nope"')
   })
 })
