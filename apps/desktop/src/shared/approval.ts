@@ -19,7 +19,7 @@ export interface ApprovalScript {
 export interface ApprovalPayload {
   jobId: string
   board: string
-  /** The first message on the mark the job answers. */
+  /** Your first message on the mark the job answers, or "" when there is none. */
   request: string
   scripts: ApprovalScript[]
 }

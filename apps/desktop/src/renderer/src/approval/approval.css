@@ -78,6 +78,9 @@ body {
 .review-caption {
   color: var(--cap);
 }
+.review-window > .dialog-foot {
+  justify-content: flex-end;
+}
 .review-blocked {
   flex: 1;
   margin: 0;

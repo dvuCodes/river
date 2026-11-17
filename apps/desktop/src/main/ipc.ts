@@ -533,7 +533,8 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
       return {
         jobId,
         board: asciiLine(job.board),
-        request: asciiLine(mark?.thread[0]?.text ?? "").slice(0, 300),
+        // Only your own words: a mark can carry an agent's messages too.
+        request: asciiLine(mark?.thread.find((t) => t.by === YOU)?.text ?? "").slice(0, 300),
         scripts: scripts.map((s) => ({
           file: s.file,
           text: s.text,

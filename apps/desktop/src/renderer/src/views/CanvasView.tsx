@@ -201,8 +201,8 @@ function CanvasInner(props: CanvasProps) {
 
   const fail = useCallback((err: unknown) => setActionError(errorText(err)), [])
   /**
-   * A file drag over the board: enters and leaves are counted, and dragover (sent every ~50 ms while a drag is over the
-   * board) keeps the drop hint up, so the hint goes as soon as the drag leaves the window, even if a leave never comes.
+   * A file drag over the board: enters and leaves are counted, and dragover (sent many times a second while a drag is
+   * over the board) keeps the drop hint up, so the hint goes once the drag leaves the window, even if a leave never comes.
    */
   const drag = useRef({ depth: 0, timer: 0 })
   const endDrag = useCallback(() => {
@@ -797,7 +797,7 @@ function CanvasInner(props: CanvasProps) {
           e.dataTransfer.dropEffect = "copy"
           setDropping(true)
           window.clearTimeout(drag.current.timer)
-          drag.current.timer = window.setTimeout(endDrag, 400)
+          drag.current.timer = window.setTimeout(endDrag, 1_000)
         }}
         onDragLeave={(e) => {
           if (!e.dataTransfer.types.includes("Files")) return

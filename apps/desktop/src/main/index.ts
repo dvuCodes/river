@@ -325,7 +325,7 @@ async function smokeCanvas(w: BrowserWindow, dir: string, waitFor: (view: ViewId
     fire(pane, "dragenter")
     fire(pane, "dragover")
     const again = await on()
-    return { shown, overCard, left, again, lapsed: !(await on(800)) }
+    return { shown, overCard, left, again, lapsed: !(await on(1_500)) }
   })()`)) as Record<string, boolean>
   const dropOk = Object.values(drop).every(Boolean)
   console.log(`river smoke: the drop hint ${dropOk ? "shows over the board and goes when the drag leaves or stops" : `is WRONG: ${JSON.stringify(drop)}`}`)
@@ -855,7 +855,8 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const changedSha = createHash("sha256").update(changed).digest("hex")
   const callsBefore = approveCalls
   const headSha = await commitJobFile(p.root, goneJob, posix.join(before.projectSub, recA.file), Buffer.from(changed), "smoke: draw_a.gd changes under the open review")
-  await saveJob(p.root, { ...before, headSha, scripts: before.scripts!.map((s) => (s === recA ? { ...s, sha256: changedSha } : s)), updatedAt: new Date().toISOString() })
+  // The rewritten job file also gives A a raw Zalgo caption, which only the display side can clean.
+  await saveJob(p.root, { ...before, headSha, scripts: before.scripts!.map((s) => (s === recA ? { ...s, sha256: changedSha, caption: ZALGO_CAPTION } : s)), updatedAt: new Date().toISOString() })
   if (runAt) {
     const [x, y] = [Math.round(runAt.x + runAt.w / 2), Math.round(runAt.y + runAt.h / 2)]
     a2.webContents.sendInputEvent({ type: "mouseMove", x, y })
@@ -876,8 +877,9 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   if (!(await clickEl(w, `${goneSel} [data-action="review"]`, 10_000))) return false
   const a3 = await approvalShown(3, 15_000)
   const freshShown = a3 !== null && (await shasShown(a3))[recA.file] === changedSha
+  const rawCaption = a3 !== null && ((await a3.webContents.executeJavaScript(`document.querySelector('.review-script[data-variant="a"] .review-caption')?.textContent ?? ""`)) as string) === ` · ${ZALGO_CAPTION_ASCII}`
   const freshRan = a3 !== null && (await until(async () => (await reviewSeen(a3)).run, 5_000)) && (await clickEl(a3, `[data-action="run"]`, 3_000)) && (await closedApproval())
-  console.log(`river smoke: the review opened again shows the new draw_a.gd ${freshShown ? "" : "NOT "}and ${freshRan ? "ran" : "did NOT run"}`)
+  console.log(`river smoke: the review opened again shows the new draw_a.gd ${freshShown ? "" : "NOT "}and A's raw Zalgo caption from the job file ${rawCaption ? "as printable ASCII" : "NOT as printable ASCII"}, and ${freshRan ? "ran" : "did NOT run"}`)
   w.focus()
   w.webContents.focus()
   const lookShown = Boolean(await waitRect(w, `${goneSel} .job-line.is-looking`, 120_000))
@@ -937,7 +939,7 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
     console.log(`river smoke: dismissing ${revJob} while the agent looked ${lateDismiss ? "ended the look; the job stayed dismissed and its cards are gone" : `did NOT hold (look shown ${lookOn}, dismissed ${gone})`}`)
   } else console.error("river smoke: the revision did not reach review")
 
-  const ok = keptOk && staleRefused && freshShown && freshRan && stopped && kept1st && dismissed && reasoned && replied && revised && lateDismiss
+  const ok = keptOk && staleRefused && freshShown && rawCaption && freshRan && stopped && kept1st && dismissed && reasoned && replied && revised && lateDismiss
   console.log(`river smoke: job checks ${ok ? "PASSED" : "FAILED"}`)
   return ok
 }
