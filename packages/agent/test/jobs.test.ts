@@ -1,6 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process"
 import { createHash } from "node:crypto"
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
@@ -76,6 +76,11 @@ const start = (deps: JobDeps) => startConceptJob({ workspaceRoot: game, board: "
 const pending = async (job: Job) => (await loadBoard(game, "main")).cards.find((c) => c.pending?.jobId === job.id)
 const branchExists = (job: Job) => git("branch", "--list", `river/job/${job.id}`).trim() !== ""
 
+async function answeredJob(): Promise<Job> {
+  const job = await start({ runTurn: fakeTurn(DRAW) })
+  return approveJobScript(game, job.id, sha(DRAW), { render: fakeRender(), env: { GODOT_BIN: "godot-not-run" } })
+}
+
 /** Rename the repo folder, as a user moving their project does. */
 function moveRepo(): void {
   const moved = `${top}-moved`
@@ -149,6 +154,50 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect(git("ls-files", "-s")).toBe(index)
     expect(git("rev-parse", "HEAD")).toBe(head)
     await expect(acceptJob(game, job.id)).rejects.toThrow(/only an answered job/)
+  })
+
+  it("accepts the approved bytes whatever the repo's .gitattributes say, and leaves the index alone", async () => {
+    writeFileSync(path.join(top, ".gitattributes"), "*.gd text eol=crlf ident\n*.png text eol=crlf\n")
+    git("add", ".gitattributes")
+    git("commit", "-q", "-m", "attributes")
+    const index = git("ls-files", "-s")
+    const job = await answeredJob()
+    expect((await acceptJob(game, job.id)).status).toBe("accepted")
+    expect(readFileSync(path.join(game, "concepts", job.id, "draw.gd"), "utf8")).toBe(DRAW)
+    expect(readFileSync(path.join(game, "concepts", job.id, "concept.png")).equals(FAKE_PNG)).toBe(true)
+    expect(git("ls-files", "-s")).toBe(index)
+  })
+
+  it("will not overwrite the user's file: removes what it wrote, stays answered, and accepts once the file is gone", async () => {
+    const job = await answeredJob()
+    const folder = path.join(game, "concepts", job.id)
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(path.join(folder, "draw.gd"), "the user's own script\n")
+    await expect(acceptJob(game, job.id)).rejects.toThrow()
+    expect(readFileSync(path.join(folder, "draw.gd"), "utf8")).toBe("the user's own script\n")
+    expect(existsSync(path.join(folder, "concept.png"))).toBe(false)
+    expect((await loadJob(game, job.id)).status).toBe("answered")
+    expect(await pending(job)).toBeDefined()
+
+    rmSync(path.join(folder, "draw.gd"))
+    expect((await acceptJob(game, job.id)).status).toBe("accepted")
+    expect(readFileSync(path.join(folder, "draw.gd"), "utf8")).toBe(DRAW)
+  })
+
+  it("stays accepted when removing the branch fails, and recoverJobs finishes the cleanup", async () => {
+    const job = await answeredJob()
+    const lock = path.join(top, ".git", "refs", "heads", "river", "job", `${job.id}.lock`)
+    writeFileSync(lock, "")
+    expect((await acceptJob(game, job.id)).status).toBe("accepted")
+    expect(readFileSync(path.join(game, "concepts", job.id, "draw.gd"), "utf8")).toBe(DRAW)
+    expect(await pending(job)).toBeUndefined()
+    expect((await loadBoard(game, "main")).cards.some((c) => c.kind === "concept" && c.ref === job.conceptId)).toBe(true)
+    expect(branchExists(job)).toBe(true)
+
+    rmSync(lock)
+    expect(await recoverJobs(game)).toEqual([])
+    expectNoTrace(job)
+    expect((await loadJob(game, job.id)).status).toBe("accepted")
   })
 
   it("dismisses from approval: card, worktree and branch go, and a dismissed job stays dismissed", async () => {

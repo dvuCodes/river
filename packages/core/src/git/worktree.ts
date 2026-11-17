@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rm } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { snapshotCommit } from "./checkpoint"
 import { git, gitBytes, gitTry, identityEnv, RAW, withTempIndex, type GitOptions } from "./exec"
@@ -83,35 +83,54 @@ export async function readCommittedFile(dir: string, sha: string, file: string):
   return gitBytes(dir, ["cat-file", "blob", `${sha}:${file}`])
 }
 
-/** True when every file already has headSha's content in the working tree (an earlier apply finished). */
-async function alreadyApplied(top: string, headSha: string, files: string[]): Promise<boolean> {
-  for (const f of files) {
-    const want = await gitTry(top, ["rev-parse", "--verify", "-q", `${headSha}:${f}`])
-    const have = await gitTry(top, [...RAW, "hash-object", "--", f])
-    if (!want || !have || want.trim() !== have.trim()) return false
+/**
+ * Write the files under `pathPrefix` (relative to the git top level) in commit `sha` into the user's
+ * working tree as the committed bytes, so no .gitattributes filter or line-ending rule can change
+ * them, and the index stays as it is. Only creates files: one that is already there must hold the
+ * same bytes, which makes a second run a no-op. On any failure it removes the files and folders it
+ * created and throws. Returns the files, relative to the git top level.
+ */
+export async function applyJobFiles(workspaceRoot: string, sha: string, pathPrefix: string): Promise<string[]> {
+  const top = await gitTop(workspaceRoot)
+  const listing = await git(top, ["-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--full-tree", sha, "--", pathPrefix])
+  const files: { file: string; bytes: Buffer }[] = []
+  for (const entry of listing.split("\0").filter(Boolean)) {
+    const tab = entry.indexOf("\t")
+    const [mode, type, object] = entry.slice(0, tab).split(" ")
+    const file = entry.slice(tab + 1)
+    if (type !== "blob" || (mode !== "100644" && mode !== "100755")) throw new Error(`river: ${file} on the job branch is not a plain file`)
+    files.push({ file, bytes: await gitBytes(top, ["cat-file", "blob", object!]) })
   }
-  return true
+  const created: string[] = []
+  const madeDirs: string[] = []
+  try {
+    for (const { file, bytes } of files) {
+      const abs = path.join(top, file)
+      const first = await mkdir(path.dirname(abs), { recursive: true })
+      if (first) for (let dir = path.dirname(abs); dir.length >= first.length; dir = path.dirname(dir)) madeDirs.push(dir)
+      try {
+        await writeFile(abs, bytes, { flag: "wx" })
+        created.push(abs)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
+        if (!(await readFile(abs)).equals(bytes)) throw new Error(`river: ${file} is already in your project with other content; move it away, then accept again`)
+      }
+    }
+    for (const { file, bytes } of files) {
+      if (!(await readFile(path.join(top, file))).equals(bytes)) throw new Error(`river: ${file} did not arrive byte for byte`)
+    }
+  } catch (err) {
+    for (const abs of created) await rm(abs, { force: true })
+    for (const dir of madeDirs.sort((a, b) => b.length - a.length)) await rmdir(dir).catch(() => {})
+    throw err
+  }
+  return files.map((f) => f.file)
 }
 
-/**
- * Apply baseSha..headSha, limited to `pathPrefix` (relative to the git top level), onto the user's
- * working tree. Plain `git apply` (never --3way, which stages into the user's index), so the index
- * and every other file stay as they are. Returns the changed files. Running it again is a no-op.
- */
-export async function applyJobPaths(workspaceRoot: string, baseSha: string, headSha: string, pathPrefix: string): Promise<string[]> {
-  const top = await gitTop(workspaceRoot)
-  const range = [baseSha, headSha, "--", pathPrefix]
-  const names = await git(top, ["-c", "core.quotepath=false", "diff", "--name-only", "-z", "--no-renames", "--no-relative", ...range])
-  const files = names.split("\0").filter(Boolean)
-  if (files.length === 0 || (await alreadyApplied(top, headSha, files))) return files
-  const patch = await gitBytes(top, [
-    ...RAW, "diff", "--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative",
-    "--src-prefix=a/", "--dst-prefix=b/", ...range,
-  ])
-  const apply = [...RAW, "apply", "--whitespace=nowarn"]
-  await git(top, [...apply, "--check", "-"], { input: patch })
-  await git(top, [...apply, "-"], { input: patch })
-  return files
+/** Ids of the jobs that still have a branch. */
+export async function listJobBranches(dir: string): Promise<string[]> {
+  const out = await gitTry(dir, ["for-each-ref", "--format=%(refname:lstrip=4)", "refs/heads/river/job/"])
+  return (out ?? "").split(/\r?\n/).filter(Boolean)
 }
 
 /**

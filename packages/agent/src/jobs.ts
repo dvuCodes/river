@@ -14,7 +14,7 @@ import { readFile } from "node:fs/promises"
 import path from "node:path"
 import { godotSettings, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
 import {
-  applyJobPaths,
+  applyJobFiles,
   commitJobFile,
   CONCEPT_RENDER,
   CONCEPT_SCRIPT,
@@ -23,6 +23,7 @@ import {
   deleteCard,
   gitTop,
   JOB_NEXT,
+  listJobBranches,
   listJobs,
   loadBoard,
   loadJob,
@@ -325,24 +326,37 @@ export async function approveJobScript(workspaceRoot: string, jobId: string, sha
 }
 
 /**
- * Apply the job's concept folder to the user's checkout (index and other files untouched), check
- * the script arrived byte for byte, keep the card, and remove the worktree and branch.
+ * Once a job is accepted or dismissed: its card keeps the concept (accepted) or goes (dismissed),
+ * and its worktree and branch go. Safe to repeat, so recoverJobs can finish it.
+ */
+async function settle(root: string, job: Job, card: Card | undefined): Promise<void> {
+  if (card?.pending && job.status === "accepted") {
+    const { pending: _pending, ...kept } = card
+    await saveCard(root, job.board, kept)
+  } else if (card?.pending) {
+    await deleteCard(root, job.board, card.id)
+  }
+  await removeJobWorktree(root, job.id)
+}
+
+/**
+ * Write the job's concept folder into the user's checkout as the committed bytes (index and other
+ * files untouched) and mark the job accepted. Throws, leaving the job answered and the checkout as it
+ * was, when a file is in the way. Settling the card and removing the worktree follow; if they fail
+ * the job stays accepted and recoverJobs finishes them.
  */
 export async function acceptJob(workspaceRoot: string, jobId: string): Promise<Job> {
   const root = await projectRoot(workspaceRoot)
   const job = await loadJob(root, jobId)
   if (job.status !== "answered") throw new Error(`river: job ${jobId} is ${job.status}; only an answered job can be accepted`)
-  const script = job.scripts![0]!
-  await applyJobPaths(root, job.baseSha, job.headSha!, inRepo(job, conceptPath(job.conceptId)))
-  const applied = await readFile(path.join(root, script.file))
-  if (hash(applied) !== script.sha256) return fail(root, job, `${script.file} in your project differs from the approved script; River did not accept it.`)
-  const card = await findPendingCard(root, job)
-  if (card) {
-    const { pending: _pending, ...kept } = card
-    await saveCard(root, job.board, kept)
-  }
-  await removeJobWorktree(root, job.id)
-  return transition(root, job, "accepted")
+  const { bytes } = await committedScript(root, job)
+  if (hash(bytes) !== job.scripts![0]!.sha256) throw new Error(`river: refused: the script on job ${jobId}'s branch is not the approved one`)
+  await applyJobFiles(root, job.headSha!, inRepo(job, conceptPath(job.conceptId)))
+  const accepted = await transition(root, job, "accepted")
+  await findPendingCard(root, accepted)
+    .then((card) => settle(root, accepted, card))
+    .catch((err: unknown) => console.warn(`river: job ${jobId} is accepted, but tidying up failed (retried when the project next opens): ${errMsg(err)}`))
+  return accepted
 }
 
 /** Worktree, branch and card go first, then the job is dismissed. */
@@ -369,14 +383,36 @@ export async function dismissJob(workspaceRoot: string, jobId: string): Promise<
   return owned && job.status === "dismissed" ? job : dismiss(root, job)
 }
 
-/** Jobs a crashed or closed process left queued, running or rendering become "failed". Call once at startup. */
+/**
+ * Call when a project opens. Jobs a crashed or closed process left queued, running or rendering
+ * become "failed", and what an accept or dismiss left unsettled is finished. Returns the failed ones.
+ */
 export async function recoverJobs(workspaceRoot: string): Promise<Job[]> {
   const root = await projectRoot(workspaceRoot)
+  const jobs = await listJobs(root)
   const recovered: Job[] = []
-  for (const job of await listJobs(root)) {
+  for (const job of jobs) {
     if (INTERRUPTIBLE.includes(job.status)) {
       recovered.push(await transition(root, job, "failed", { error: `interrupted: River stopped while this job was ${job.status}` }))
     }
   }
+  await settleEnded(root, jobs)
   return recovered
+}
+
+/** Accepted and dismissed jobs that still have a pending card or a branch: the process stopped, or a cleanup step failed. */
+async function settleEnded(root: string, jobs: Job[]): Promise<void> {
+  const ended = jobs.filter((j) => j.status === "accepted" || j.status === "dismissed")
+  if (ended.length === 0) return
+  const branches = new Set(await listJobBranches(root))
+  const cards = new Map<string, Card[]>()
+  for (const job of ended) {
+    try {
+      if (!cards.has(job.board)) cards.set(job.board, (await loadBoard(root, job.board)).cards)
+      const card = cards.get(job.board)!.find((c) => c.pending?.jobId === job.id)
+      if (card || branches.has(job.id)) await settle(root, job, card)
+    } catch (err) {
+      console.warn(`river: could not tidy up job ${job.id}: ${errMsg(err)}`)
+    }
+  }
 }

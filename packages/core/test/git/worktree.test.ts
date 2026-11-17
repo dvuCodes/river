@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { applyJobPaths, commitJobFile, createJobWorktree, gitTop, removeJobWorktree } from "../../src/git/worktree"
+import { applyJobFiles, commitJobFile, createJobWorktree, gitTop, removeJobWorktree } from "../../src/git/worktree"
 import { git, initRepo, removeDir, tempDir } from "../project/helpers"
 
 let top: string
@@ -56,7 +56,7 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     const second = await commitJobFile(game, "j_test0001", "game/concepts/k1/concept.png", PNG, "river: render k1")
     expect(git(top, "diff", "--name-only", job.baseSha, second).trim().split("\n").sort()).toEqual(["game/concepts/k1/concept.png", "game/concepts/k1/draw.gd"])
 
-    const files = await applyJobPaths(game, job.baseSha, second, "game/concepts/k1")
+    const files = await applyJobFiles(game, second, "game/concepts/k1")
     expect(files.sort()).toEqual(["game/concepts/k1/concept.png", "game/concepts/k1/draw.gd"])
     expect(read(top, "game/concepts/k1/draw.gd").toString()).toBe(DRAW)
     expect(read(top, "game/concepts/k1/concept.png").equals(PNG)).toBe(true)
@@ -68,7 +68,7 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     const lines = (text: string) => text.trim().split("\n").sort()
     expect(lines(git(top, "status", "--porcelain"))).toEqual(lines(status + "?? game/concepts/\n"))
 
-    expect((await applyJobPaths(game, job.baseSha, second, "game/concepts/k1")).length).toBe(2)
+    expect((await applyJobFiles(game, second, "game/concepts/k1")).length).toBe(2)
     expect(read(top, "game/concepts/k1/draw.gd").toString()).toBe(DRAW)
 
     await removeJobWorktree(game, "j_test0001")
@@ -87,7 +87,7 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     const sha = await commitJobFile(top, "j_test0002", "concepts/k2/draw.gd", Buffer.from(DRAW), "river: concept k2")
 
     write(top, "concepts/k2/draw.gd", "the user's own file\n")
-    await expect(applyJobPaths(top, job.baseSha, sha, "concepts/k2")).rejects.toThrow(/apply/)
+    await expect(applyJobFiles(top, sha, "concepts/k2")).rejects.toThrow(/already in your project/)
     expect(read(top, "concepts/k2/draw.gd").toString()).toBe("the user's own file\n")
 
     for (const id of ["..", "../..", "", "a/b"]) await expect(removeJobWorktree(top, id)).rejects.toThrow(/invalid job id/)
