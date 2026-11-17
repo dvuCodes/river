@@ -2,7 +2,7 @@ import { mkdir, readdir, readFile, rename, rm, unlink, writeFile } from "node:fs
 import { randomBytes } from "node:crypto"
 import path from "node:path"
 import { newId } from "../review/store"
-import type { Board, Card, Job, Mark } from "./types"
+import type { Board, Card, Edge, Job, Mark } from "./types"
 
 const SAFE_BOARD = /^[a-z0-9_-]{1,64}$/
 /** Card, mark and job ids: our own are "c_"/"m_"/"j_" + 8 base36, but any plain file-safe name is read. */
@@ -21,7 +21,7 @@ function assertEntityId(kind: string, id: string): void {
 }
 
 /** Ids for new cards ("c_"), marks ("m_") and jobs ("j_"): the prefix plus 8 random base36 characters. */
-export function newBoardId(prefix: "c_" | "m_" | "j_"): string {
+export function newBoardId(prefix: "c_" | "m_" | "j_" | "e_"): string {
   return newId(prefix)
 }
 
@@ -44,6 +44,11 @@ export function cardFile(workspaceRoot: string, board: string, cardId: string): 
 export function markFile(workspaceRoot: string, board: string, markId: string): string {
   assertEntityId("mark", markId)
   return path.join(boardDir(workspaceRoot, board), "marks", `${markId}.json`)
+}
+
+export function edgeFile(workspaceRoot: string, board: string, edgeId: string): string {
+  assertEntityId("edge", edgeId)
+  return path.join(boardDir(workspaceRoot, board), "edges", `${edgeId}.json`)
 }
 
 const jobsDir = (workspaceRoot: string) => path.join(workspaceRoot, ".river", "jobs")
@@ -118,6 +123,14 @@ function checkMark(v: unknown): Mark {
   return m
 }
 
+function checkEdge(v: unknown): Edge {
+  const e = v as Edge
+  if (!e || typeof e !== "object" || typeof e.id !== "string" || typeof e.from !== "string" || typeof e.to !== "string") {
+    throw new Error("not an edge (needs id, from, to)")
+  }
+  return e
+}
+
 async function readEntities<T>(dir: string, check: (v: unknown) => T, onError?: (file: string, err: unknown) => void): Promise<T[]> {
   const out: T[] = []
   for (const name of await jsonFiles(dir)) {
@@ -156,11 +169,12 @@ export async function loadMark(workspaceRoot: string, board: string, markId: str
 /** Read a whole board. A missing board is empty. Skips (and reports via onError) files that fail to parse. */
 export async function loadBoard(workspaceRoot: string, name: string, onError?: (file: string, err: unknown) => void): Promise<Board> {
   const dir = boardDir(workspaceRoot, name)
-  const [cards, marks] = await Promise.all([
+  const [cards, marks, edges] = await Promise.all([
     readEntities(path.join(dir, "cards"), checkCard, onError),
     readEntities(path.join(dir, "marks"), checkMark, onError),
+    readEntities(path.join(dir, "edges"), checkEdge, onError),
   ])
-  return { name, cards: cards.sort(byCreated), marks: marks.sort(byCreated) }
+  return { name, cards: cards.sort(byCreated), marks: marks.sort(byCreated), edges: edges.sort(byCreated) }
 }
 
 /** Create the board folder and board.json if missing. Returns the board folder. */
@@ -168,6 +182,7 @@ export async function ensureBoard(workspaceRoot: string, name: string): Promise<
   const dir = boardDir(workspaceRoot, name)
   await mkdir(path.join(dir, "cards"), { recursive: true })
   await mkdir(path.join(dir, "marks"), { recursive: true })
+  await mkdir(path.join(dir, "edges"), { recursive: true })
   const meta = path.join(dir, "board.json")
   try {
     await writeFile(meta, boardJsonText({ name, createdAt: new Date().toISOString() }), { encoding: "utf8", flag: "wx" })
@@ -215,6 +230,17 @@ export async function saveMark(workspaceRoot: string, board: string, mark: Omit<
 
 export async function deleteMark(workspaceRoot: string, board: string, markId: string): Promise<void> {
   await removeFile(markFile(workspaceRoot, board, markId))
+}
+
+/** Write one edge (atomic). New edges get an id ("e_" + 8 base36) and createdAt. */
+export async function saveEdge(workspaceRoot: string, board: string, edge: Omit<Edge, "id" | "createdAt"> & Partial<Pick<Edge, "id" | "createdAt">>): Promise<Edge> {
+  const full: Edge = { ...edge, id: edge.id ?? newBoardId("e_"), createdAt: edge.createdAt ?? new Date().toISOString() }
+  await writeAtomic(edgeFile(workspaceRoot, board, full.id), boardJsonText(full))
+  return full
+}
+
+export async function deleteEdge(workspaceRoot: string, board: string, edgeId: string): Promise<void> {
+  await removeFile(edgeFile(workspaceRoot, board, edgeId))
 }
 
 /** Marks with status "open", oldest first. */

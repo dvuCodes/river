@@ -4,6 +4,7 @@
  *   .river/boards/<board>/board.json        { name, createdAt }
  *   .river/boards/<board>/cards/<id>.json   Card
  *   .river/boards/<board>/marks/<id>.json   Mark
+ *   .river/boards/<board>/edges/<id>.json   Edge
  *
  * One file per entity means the app, an agent's river-mcp and Claude Code can all
  * write the same board at once without losing each other's changes (each write is
@@ -33,7 +34,14 @@ export interface Card {
    */
   ref: string
   rev?: string
+  /** A note's text. */
   text?: string
+  /** One or two lines shown under an image card ("storage jar (Met, PD)", "B - Stand: wrapped in the shadow"). */
+  caption?: string
+  /** Short option label shown as a badge, e.g. "A". Agents label the options in a row of answers. */
+  label?: string
+  /** Concept cards: which variant of the concept's scripts this card shows ("a".."e"); absent for a single draw.gd. */
+  variant?: string
   /** Where a reference image came from. Required for kind "ref". */
   source?: { url?: string; title?: string; licence: string }
   /** "you", a role name such as "concept-artist", or "claude-code". */
@@ -75,10 +83,26 @@ export interface Mark {
   createdAt: string
 }
 
+/**
+ * A connector drawn as a curved arrow from one card or mark to another. Users draw them with the arrow tool;
+ * agents draw them from a request to their answer, and between the frames of a sequence.
+ */
+export interface Edge {
+  id: string
+  /** Card or mark id. */
+  from: string
+  /** Card or mark id. */
+  to: string
+  label?: string
+  madeBy: string
+  createdAt: string
+}
+
 export interface Board {
   name: string
   cards: Card[]
   marks: Mark[]
+  edges: Edge[]
 }
 
 /**
@@ -150,8 +174,13 @@ export interface Job {
   sessionId?: string
   /** The agent's closing message, shown on the card. */
   summary?: string
-  /** The script the job wants to run and whether the user approved exactly these bytes. */
-  scripts?: { file: string; sha256: string; approved: boolean }[]
+  /**
+   * The scripts the job wants to run and whether the user approved exactly these bytes. One `draw.gd`, or up to
+   * five variants `draw_a.gd`..`draw_e.gd`; `variant` is "a".."e" for those, and each variant gets its own card.
+   */
+  scripts?: { file: string; sha256: string; approved: boolean; variant?: string }[]
+  /** The job this one revises (the user replied on the mark after that job answered). */
+  parentJobId?: string
   error?: string
   createdAt: string
   updatedAt: string
