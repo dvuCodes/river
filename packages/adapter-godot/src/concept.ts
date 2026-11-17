@@ -3,10 +3,11 @@
  * `func draw(img: Image) -> void`. River renders it headless in a throwaway sandbox project.
  *
  * Nothing here may run Godot on a script the user has not approved: even `--check-only` runs
- * static initialisers. `lintConceptScript` is plain text matching that tells the agent what to
- * rewrite; it is not a security boundary. The boundary is the user's approval of the exact bytes
- * that `renderConcept` is given, and `conceptScriptProblem` keeps what the review shows true of
- * them: the text reads as it runs, and every Kit call in it is River's.
+ * static initialisers. The boundary is the user reading and approving the exact bytes that
+ * `renderConcept` is given; every line of them is the agent's code. Text matching cannot prove
+ * what GDScript does, so the Kit rule and `lintConceptScript` only refuse the plain forms and tell
+ * the agent what to rewrite. The byte rule is the one hard rule: it makes what the user reads
+ * what runs.
  */
 import { execFile, spawn } from "node:child_process"
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
@@ -55,11 +56,13 @@ const FORBIDDEN: readonly [token: string, find: RegExp][] = [
 ]
 
 /**
- * The rules on draw.gd, checked before River writes, commits, shows or runs it, so the review shows what runs.
- * Its bytes are printable ASCII, tabs and LF line ends only: an escape code, a lone CR or a bidi control cannot
- * hide or reorder code. And the word Kit, in any case, appears only as Kit.<name>( for one of River's Kit
- * functions: no variable, constant, parameter, binding or class can take the name, so a line that reads as a
- * Kit call is one. Returns where a rule breaks, or undefined when the script passes.
+ * The rules on draw.gd, checked before River writes, commits, shows or runs it. Returns where a rule breaks, or
+ * undefined when the script passes.
+ * - Bytes: printable ASCII, tabs and LF line ends only, so an escape code, a lone CR or a bidi control cannot hide
+ *   or reorder code. This rule holds: what the review shows is what runs.
+ * - Kit: the word, in any case, appears only as Kit.<name>( for one of River's Kit functions. This refuses the
+ *   plain ways to give something else the name, but it is a text scan and cannot prove that a Kit line calls
+ *   River's Kit, so the review never says it does.
  */
 export function conceptScriptProblem(bytes: Uint8Array): string | undefined {
   return bytesProblem(bytes) ?? kitNameProblem(Buffer.from(bytes).toString("latin1"))
@@ -93,7 +96,7 @@ function kitNameProblem(text: string): string | undefined {
     while (before >= 0 && /[\s\\]/.test(text[before]!)) before--
     if (KIT_CALL.test(text) && !".$%".includes(text[before] ?? " ")) continue
     const line = text.slice(0, m.index).split("\n").length
-    return `Line ${line}: "${m[0]}" may appear only as a call to River's Kit, written Kit.name(...) with nothing between, so the review can show every Kit line as River's code. Give nothing else the name kit (in any case), and leave the word out of comments and strings.`
+    return `Line ${line}: "${m[0]}" may appear only as a call to River's Kit, written Kit.name(...) with nothing between. Give nothing else the name kit (in any case), and leave the word out of comments and strings.`
   }
   return undefined
 }

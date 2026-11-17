@@ -701,7 +701,8 @@ function conceptWrite(project: Project, conceptId: string): RiverTool {
     description:
       `Write one file in this job's folder, ${folder}/ (path relative to the project root). The scripts are ${folder}/draw.gd for one drawing, ` +
       "or draw_a.gd..draw_e.gd for up to five options; pass caption with each script (one line shown under its card). " +
-      "Replaces the whole file; empty content removes a script. Scripts may hold only printable ASCII, tabs and LF line ends, and may write Kit only as Kit.name(...) calls; anything else is refused. " +
+      "Replaces the whole file; empty content removes a script. River refuses a script with bytes other than printable ASCII, tabs and LF line ends, or with the word Kit anywhere but in Kit.name(...) calls. " +
+      "The user reads and approves every line before anything runs. " +
       "For a script the result lists lint problems; fix them and write the file again until there are none.",
     inputSchema: {
       file: relPath,

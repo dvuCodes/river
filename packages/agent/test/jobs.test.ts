@@ -338,6 +338,28 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect((await loadJob(game, job.id)).status).toBe("approval")
   })
 
+  it("a script the refusals miss waits for the user's approval, and only its exact bytes render", async () => {
+    const missed = [
+      DRAW + "\tvar tools = {}\n\tvar sun = [tools.  # the sun\n\t\tKit.glow(img, Vector2(180, 60), 40.0, Color.YELLOW)]\n",
+      DRAW + '\tvar o = OS\n\to.execute("cmd", ["/c", "echo"])\n\t["C:/x.png"].map(img.get("sa" + "ve_png"))\n',
+    ]
+    for (const script of missed) {
+      expect(conceptScriptProblem(Buffer.from(script))).toBeUndefined()
+      expect(lintConceptScript(script)).toEqual([])
+      const rendered: Buffer[] = []
+      const job = await start({ runTurn: fakeTurn(script), render: fakeRender(rendered) })
+      expect(job.status).toBe("approval")
+      expect(rendered).toEqual([])
+      await expect(approveJobScript(game, job.id, sha(DRAW), { render: fakeRender(rendered), env: { GODOT_BIN: "godot-not-run" } })).rejects.toThrow(/refused/)
+      expect(rendered).toEqual([])
+      expect((await loadJob(game, job.id)).status).toBe("approval")
+      const answered = await approveJobScript(game, job.id, sha(script), { render: fakeRender(rendered), env: { GODOT_BIN: "godot-not-run" } })
+      expect(answered.status).toBe("answered")
+      expect(rendered.map((b) => b.toString("utf8"))).toEqual([script])
+      await dismissJob(game, job.id)
+    }
+  })
+
   it("accepts nothing from a crafted job commit whose tree names paths out of the concept folder", async () => {
     const job = await answeredJob()
     const object = (type: string, input: Buffer) =>

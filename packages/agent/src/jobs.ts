@@ -479,7 +479,7 @@ async function committedScripts(root: string, job: Job): Promise<{ record: JobSc
     }
     const bytes = await readCommittedFile(root, job.headSha, inRepo(job, record.file))
     const refused = conceptScriptProblem(bytes)
-    if (refused) throw new Error(`river: refused: ${record.file} cannot be shown as it would run. ${refused} Dismiss the job and ask again.`)
+    if (refused) throw new Error(`river: refused: ${record.file} breaks River's rules for concept scripts. ${refused} Dismiss the job and ask again.`)
     out.push({ record, bytes })
   }
   return out

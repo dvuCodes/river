@@ -59,7 +59,7 @@ The server sends Claude Code this loop as its instructions:
 4. Answer with `board_add_note` and `answers: <markId>`, then each image with `board_add_card` and the same `answers`. River puts the note beside the mark, the images in a row beside the note labelled A, B, C, and draws the arrows mark -> note -> each image. A later answer to the same mark goes under the earlier one.
 5. `mark_reply` with `status: "answered"`, `"dismissed"` (the text says why), or `"open"` to give the mark back.
 
-When the request asks to draw, show or picture something, call `concept_request` instead. It starts River's concept job for the mark in its own process and returns the job id at once. The concept artist writes small Godot drawing scripts; the user reads and approves them in River before anything runs, and accepts or dismisses the answer there. The mark follows the job from then on, so `mark_reply` takes no status on it.
+When the request asks to draw, show or picture something, call `concept_request` instead. It starts River's concept job for the mark in its own process and returns the job id at once. The concept artist writes small Godot drawing scripts; the user reads and approves them in River before anything runs, since every line runs with the user's permissions once approved, and accepts or dismisses the answer there. The mark follows the job from then on, so `mark_reply` takes no status on it.
 
 When the user replies on a mark you answered or dismissed (`river mark reply`, or the app), it opens again and shows up in `marks_open`, still claimed by you. Iterate with a new note and a new row; `answers` puts them under the first.
 

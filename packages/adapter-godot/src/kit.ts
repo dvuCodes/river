@@ -2,8 +2,9 @@ import { createHash } from "node:crypto"
 
 /**
  * Kit: River's drawing helpers for concept scripts, written into every concept sandbox as
- * res://kit.gd. It is part of River, reviewed here, so the user approves only the agent's script,
- * which calls Kit.ellipse(...) and the rest instead of carrying its own copies.
+ * res://kit.gd. It is part of River, reviewed here. The agent's script calls Kit.ellipse(...) and the
+ * rest instead of carrying its own copies, so there is less to read; the user still reads and approves
+ * every line of the script.
  */
 
 export const KIT_GD = `class_name Kit

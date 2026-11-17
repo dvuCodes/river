@@ -270,7 +270,9 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
         out.write(script.text.endsWith("\n") ? script.text : `${script.text}\n`)
         out.line("-".repeat(60))
       }
-      out.line(`Not run. Running a script executes its code on this computer. Read ${scripts.length === 1 ? "it" : `all ${scripts.length}`}; to run exactly these bytes:`)
+      out.line("Not run. Every line is the agent's code and runs on this computer with your permissions once you approve.")
+      out.line("Kit.name(...) calls use River's drawing helpers, but River cannot prove that a line only draws.")
+      out.line(`Read ${scripts.length === 1 ? "all of it" : `all ${scripts.length}`}; to run exactly these bytes:`)
       out.line(`  river job approve --root ${root} --job ${a.job} ${shaArgs(scripts)} --yes`)
       return 0
     }

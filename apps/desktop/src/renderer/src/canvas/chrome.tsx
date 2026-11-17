@@ -491,9 +491,13 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
           <h2>{!dto ? "Review" : scripts.length > 1 ? `Review ${scripts.length} scripts` : "Review the script"}</h2>
           <span className="mono sec-hint">{props.jobId}</span>
         </header>
-        <p className="concept-warn">Running a script executes its code on this computer. Read each one before you run them.</p>
+        <p className="concept-warn">
+          Every line below is the agent's code. When you run it, it runs on this computer with your permissions. Read all of it first.
+        </p>
         <p className="review-kit">
-          <code>Kit.name(…)</code> calls run River's own drawing helpers; their arguments and every other line are the agent's code. River refuses a script that uses the name Kit any other way.{" "}
+          <code>Kit.name(…)</code> calls use River's drawing helpers, but River cannot prove that a line only draws.{" "}
+          <mark className="read-line">Highlighted</mark> lines use names beyond Kit, the Image API and plain math. The highlight is a reading aid, not
+          a check: read the other lines too.{" "}
           <button type="button" className="link-btn" data-action="view-kit" onClick={() => setKit(true)}>
             Read the Kit
           </button>
@@ -510,7 +514,7 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
                   {s.file.split("/").pop()} · {s.sha256.slice(0, 12)}
                 </span>
               </header>
-              <pre className="concept-script-text">{s.text}</pre>
+              <ScriptText text={s.text} toRead={s.toRead} />
             </section>
           ))}
           {dto && !dto.scripts && <p className="sec-hint">This job is {dto.job.status} now; there is nothing to run.</p>}
@@ -528,6 +532,29 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
       </div>
       {kit && <TextPanel title="River's drawing kit" sub="concepts/kit.gd, as River writes it on Accept" load={loadKit} onClose={() => setKit(false)} />}
     </div>
+  )
+}
+
+/** The script exactly as its bytes read, with the lines worth a slow read highlighted. */
+function ScriptText(props: { text: string; toRead: { line: number; reason: string }[] }) {
+  const reasons = new Map(props.toRead.map((r) => [r.line, r.reason]))
+  const lines = props.text.split("\n")
+  return (
+    <pre className="concept-script-text">
+      {lines.map((line, i) => {
+        const end = i < lines.length - 1 ? "\n" : ""
+        const reason = reasons.get(i + 1)
+        if (!reason) return line + end
+        return (
+          <span key={i}>
+            <mark className="read-line" data-line={i + 1} title={`Read this line: it ${reason}`}>
+              {line}
+            </mark>
+            {end}
+          </span>
+        )
+      })}
+    </pre>
   )
 }
 

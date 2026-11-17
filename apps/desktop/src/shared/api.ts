@@ -12,6 +12,7 @@ import type {
   PermissionDecision,
   PermissionRequest,
 } from "@river/agent"
+import type { LineToRead } from "@river/adapter-godot"
 import type {
   Card,
   ChangePlan,
@@ -203,8 +204,11 @@ export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error" | "scri
 /** A job and, while it waits for approval, the exact bytes of every script it wants to run. */
 export interface JobDTO {
   job: Job
-  /** Each with the sha256 of exactly these bytes: approving sends them back, so only the shown scripts can run. */
-  scripts?: JobScript[]
+  /**
+   * Each with the sha256 of exactly these bytes: approving sends them back, so only the shown scripts can run.
+   * `toRead` marks lines worth a slow read; it is a reading aid, and an unmarked line is not checked.
+   */
+  scripts?: (JobScript & { toRead: LineToRead[] })[]
   revisable: boolean
 }
 

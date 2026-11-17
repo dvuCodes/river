@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { conceptScriptProblem, lintConceptScript, renderConcept } from "../src/index"
+import { conceptScriptProblem, lintConceptScript, linesToRead, renderConcept } from "../src/index"
 
 const DRAW = `extends RefCounted
 
@@ -136,6 +136,93 @@ describe("the name Kit", () => {
     const png = path.join(out, "never.png")
     await expect(renderConcept({ bin: path.join(out, "no-such-godot.exe"), script, outPng: png })).rejects.toThrow(/refused to render: Line 9: [\s\S]*Kit/)
     expect(existsSync(png)).toBe(false)
+  })
+})
+
+/**
+ * Scripts from the second PR review that pass every refusal and, in real Godot, wrote a file. The text rules
+ * cannot prove what GDScript does, so River does not claim they do: the user's approval of the exact bytes is
+ * the gate (see "a script the refusals miss" in the agent's jobs tests).
+ */
+const MISSED: [string, string][] = [
+  [
+    "a comment between a member dot and Kit",
+    `extends RefCounted
+
+class Brush:
+	var canvas: Image
+	func glow(a, b, c, d) -> void:
+		["C:/x.png"].map(canvas.get("sa" + "ve_png"))
+
+func draw(img: Image) -> void:
+	var tools = {}
+	tools["K" + "it"] = Brush.new()
+	tools.values()[0].canvas = img
+	Kit.vgradient(img, Rect2i(0, 0, 256, 256), Color.BLUE, Color.ORANGE)
+	var sun = [tools.  # the sun
+		Kit.glow(img, Vector2(180, 60), 40.0, Color.YELLOW)]
+`,
+  ],
+  [
+    "OS through a variable, and save_png by a built name",
+    `extends RefCounted
+
+func draw(img: Image) -> void:
+	img.fill(Color.RED)
+	var o = OS
+	o.execute("cmd", ["/c", "echo"])
+	["C:/x.png"].map(img.get("sa" + "ve_png"))
+`,
+  ],
+]
+
+describe("what the refusals do not catch", () => {
+  it("passes the review's bypasses: the byte rule, the Kit rule and the lint are a refusal list, not a proof", () => {
+    for (const [name, script] of MISSED) {
+      expect(conceptScriptProblem(Buffer.from(script)), name).toBeUndefined()
+      expect(lintConceptScript(script), name).toEqual([])
+    }
+  })
+})
+
+describe("linesToRead", () => {
+  const marked = (text: string) => linesToRead(text).map((l) => l.line)
+
+  it("marks the bypasses' lines that reach past the image", () => {
+    const [split, alias] = MISSED.map(([, s]) => linesToRead(s))
+    expect(split!.map((l) => l.line)).toEqual([3, 6, 10, 11, 13])
+    expect(split!.find((l) => l.line === 13)!.reason).toBe("continues on the next line")
+    expect(alias!.map((l) => [l.line, l.reason])).toEqual([
+      [5, "uses OS"],
+      [6, "uses execute"],
+      [7, "uses map, get"],
+    ])
+  })
+
+  it("leaves a drawing made of Kit calls, the Image API, math and its own names unmarked", () => {
+    const park = `${DRAW}	var w := img.get_width()
+	var ink := Color("#1b1626")
+	var r := Kit.rng(7)
+	Kit.vgradient(img, Rect2i(0, 0, w, 180), Color("#2e2a5c"), Color.ORANGE) # sky
+	for i in range(4):
+		Kit.ellipse(img, Vector2(40 + i * 60, r.randf_range(50, 90)), Vector2(46, 4), Color("#e88a7a", 0.45))
+	Kit.polygon(img, [Vector2(120, 186), Vector2(150, 186),
+		Vector2(230, 256), Vector2(40, 256)], ink.lightened(0.2))
+	Kit.person(img, Vector2(118, 236), 46, ink)
+	Kit.stamp(img, [".a.", "aba"], {"a": "#3d7a4a", "b": Color.BROWN}, Vector2i(60, 2), 4)
+	img.set_pixel(clampi(w - 1, 0, 255), 0, Color(1, 1, 1).lerp(Color.RED, 0.5))
+	var fog := 1e-3 * sin(PI / 4.0)
+`
+    expect(linesToRead(park)).toEqual([])
+  })
+
+  it("marks other names, members outside the Image API and the Kit, and a string that does not close", () => {
+    expect(marked(`${DRAW}\tvar d = self.get("x")\n`)).toEqual([9])
+    expect(marked(`${DRAW}\tKit.no_such(img)\n`)).toEqual([9])
+    expect(marked(`${DRAW}\tvar t = Time.get_ticks_msec()\n`)).toEqual([9])
+    expect(marked(`${DRAW}\tvar s = "a\n\timg.fill(Color.RED)\n`)).toEqual([9])
+    expect(marked(`@tool\n${DRAW}`)).toEqual([1])
+    expect(marked(`${DRAW}\tvar s = """\nOS\n"""\n`)).toEqual([])
   })
 })
 

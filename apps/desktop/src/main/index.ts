@@ -494,6 +494,11 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   if (!(await clickEl(w, `${noteSel} [data-action="review"]`, 120_000))) return false
   const sections = await until(async () => (await w.webContents.executeJavaScript(`document.querySelectorAll(".review .review-script").length`)) === 3, 5_000)
   console.log(`river smoke: review shows ${sections ? "all three" : "NOT all three"} scripts`)
+  // Option B calls img.no_such_method(, outside the Image API, so the review highlights that line and no other.
+  const highlighted = (await w.webContents.executeJavaScript(
+    `[...document.querySelectorAll(".review .review-script .concept-script-text .read-line")].map((m) => m.closest(".review-script").dataset.variant + ":" + m.dataset.line).join(" ")`,
+  )) as string
+  console.log(`river smoke: the review highlights ${highlighted === "b:4" ? "option B's unknown call" : `"${highlighted}", not just option B's unknown call`}`)
   await shoot(w, dir, "job-review.png")
   const kitShown =
     (await clickEl(w, `.review [data-action="view-kit"]`, 3_000)) &&
@@ -539,7 +544,7 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   const closed = await until(async () => (await loadCard(p.root, "main", optionC.id))?.x === rowStart, 5_000)
   const markNow = (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)
   console.log(`river smoke: concepts/${job.conceptId}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}; kept card ${closed ? "moved to the row start" : "did NOT close the gap"}`)
-  const keptOk = kitShown && looking && looked && sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
+  const keptOk = highlighted === "b:4" && kitShown && looking && looked && sections && rendered && brokenShown && files["draw_c.gd"] && files["concept_c.png"] && !files["draw_a.gd (not kept)"] && job.status === "accepted" && closed
 
   await key(w, "Escape")
   await key(w, "1", ["shift"])

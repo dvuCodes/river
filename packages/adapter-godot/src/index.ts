@@ -5,6 +5,7 @@ import type { EngineAdapter, Project, ShotDef } from "@river/core"
 
 export { conceptScriptProblem, lintConceptScript, renderConcept, type RenderConceptRequest } from "./concept"
 export { KIT_API, KIT_FILE, kitFileAction, kitFileText } from "./kit"
+export { linesToRead, type LineToRead } from "./reading"
 
 /** Godot settings read from manifest.adapter.godot. */
 export interface GodotSettings {

@@ -3,7 +3,7 @@ import { mkdir, readFile } from "node:fs/promises"
 import { join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
 import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobAgentSettings, JobDeps, PermissionDecision, RunTurn } from "@river/agent"
-import { createGodotAdapter, kitFileText } from "@river/adapter-godot"
+import { createGodotAdapter, kitFileText, linesToRead } from "@river/adapter-godot"
 import {
   type Capture,
   type ChangePlan,
@@ -476,7 +476,8 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     const revisable = await jobRevisable(p.root, job)
     if (job.status !== "approval") return { job, revisable }
     // The committed bytes, hashed as read: the only bytes approveJobScripts will run.
-    return { job, scripts: await (await jobApi()).readJobScripts(p.root, jobId), revisable }
+    const scripts = await (await jobApi()).readJobScripts(p.root, jobId)
+    return { job, scripts: scripts.map((s) => ({ ...s, toRead: linesToRead(s.text) })), revisable }
   })
   /**
    * Approving renders the scripts and then lets the agent look at the renders. During approve only that look runs an
