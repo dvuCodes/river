@@ -80,12 +80,13 @@ export function occupiedRects(board: Board, skip: ReadonlySet<string> = new Set(
 }
 
 /**
- * The answer area of a mark: the cards its edges lead to, and the cards those lead to (mark -> note -> options).
- * A new answer goes under all of it.
+ * The answer area of a mark: the cards agents' edges lead to, and the cards those lead to (mark -> note -> options).
+ * A new answer goes under all of it. Arrows the user drew are not answers.
  */
 export function answerRects(board: Board, markId: string): Rect[] {
-  const first = board.edges.filter((e) => e.from === markId).map((e) => e.to)
-  const second = board.edges.filter((e) => first.includes(e.from)).map((e) => e.to)
+  const edges = board.edges.filter((e) => e.madeBy !== "you")
+  const first = edges.filter((e) => e.from === markId).map((e) => e.to)
+  const second = edges.filter((e) => first.includes(e.from)).map((e) => e.to)
   const ids = new Set([...first, ...second])
   return board.cards.filter((c) => ids.has(c.id)).map(cardRect)
 }

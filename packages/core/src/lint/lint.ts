@@ -115,8 +115,8 @@ function beforeEffect(cond: Cond, effect: Effect, schema: StateSchema): Cond | u
 }
 
 /**
- * A choice shows when its @when holds, but its target can be entered only when the target's @when holds on
- * the state after the choice's @cost and @set. The message for a state that allows the first and not the second.
+ * A choice shows when its @when holds; its target's @when is meant to hold when the player arrives, on the state
+ * after the choice's @cost and @set. The message for a state that allows the first and not the second.
  */
 function blockedChoice(p: Passage, choice: Choice, target: Passage, schema: StateSchema): string | undefined {
   if (!target.when || checkCond(target.when, schema).length > 0 || (choice.when && checkCond(choice.when, schema).length > 0)) return undefined
@@ -128,12 +128,12 @@ function blockedChoice(p: Passage, choice: Choice, target: Passage, schema: Stat
   const effects = choice.cost.length + choice.set.length > 0 ? " after the choice's @cost and @set" : ""
   const where = `${p.name} → ${choice.target}`
   if (!satisfiable([...shows, needed], schema)) {
-    return `${where}: ${target.name} has @when ${formatCond(target.when)}, which is never true${effects} when this choice shows, so the move always fails. Loosen one of the two conditions.`
+    return `${where}: ${target.name}'s @when ${formatCond(target.when)} is never true${effects} when this choice shows. Loosen one of the two conditions.`
   }
   // When the needed condition already implies the choice's own, it alone is the fix.
   const keepOwn = choice.when && satisfiable([needed, { kind: "not", term: choice.when }], schema)
   return (
-    `${where}: the choice can show while ${target.name} cannot be entered (its @when ${formatCond(target.when)} is false${effects}). ` +
+    `${where}: the choice can show while ${target.name}'s @when ${formatCond(target.when)} is false${effects}. ` +
     `Give the choice @when ${formatCond(keepOwn ? join("and", [choice.when!, needed]) : needed)}, or loosen ${target.name}'s @when.`
   )
 }
@@ -141,7 +141,7 @@ function blockedChoice(p: Passage, choice: Choice, target: Passage, schema: Stat
 /**
  * Rules: broken-link (error), unknown-var (error), type-mismatch (error), duplicate-name (error),
  * duplicate-id (error), never-true (warn: a condition no value in the schema ranges satisfies),
- * blocked-choice (warn: a choice can show while its target's @when keeps the player out),
+ * blocked-choice (warn: a choice can show while its target's @when is false),
  * dead-end (warn: no choices and no @end), unreachable (warn: no route from the start).
  */
 export function lint(story: Story, schema: StateSchema): Diagnostic[] {

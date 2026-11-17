@@ -345,7 +345,8 @@ describe("the look at the renders", { timeout: 120_000 }, () => {
     const look: RunTurn = async (req, h) => {
       looks.push(req)
       for (const v of ["a", "b", "c"]) expect(readFileSync(path.join(req.root, "concepts", job.conceptId, `render_${v}.png`), "utf8")).toMatch(/^png of extends RefCounted/)
-      h.onEvent({ type: "text", text: 'Looked.\n{"note": "A: warm but muddy. B: reads as night. C: flat. Ask for a revision of A.", "captions": {"a": "Warm dusk,\\n muddy", "b": "Night, not dusk"}}' })
+      const answer = { note: "A: warm but muddy. B: reads as night. C: flat. Ask for a revision of A.", captions: { a: "Warm dusk,\n muddy", b: "Night, not dusk" } }
+      h.onEvent({ type: "text", text: `Looked at {all three}.\n${JSON.stringify(answer, null, 2)}` })
       h.onEvent({ type: "done" })
     }
     const answered = await approveJobScripts(game, job.id, await allShas(job), { render: fakeRender(), env: GODOT, runTurn: look })

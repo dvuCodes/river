@@ -752,20 +752,22 @@ function selfCheckSettings(job: Job, deps: JobDeps): JobAgentSettings | undefine
 /** One line of display text: no control or bidi characters, whitespace collapsed, at most `max` characters. */
 const displayLine = (text: string, max: number) => clip(text.replace(/[\p{Cc}‪-‮⁦-⁩]+/gu, " ").replace(/\s+/g, " ").trim(), max)
 
-/** The note and captions from the turn's last message: the last JSON object in it, or undefined. */
+/** The note and captions from the turn's text: the first {...} span ending at the last "}" that parses with a note, or undefined. */
 function parseSelfCheck(text: string): { note: string; captions: Record<string, string> } | undefined {
-  const start = text.lastIndexOf("{\"note\"")
   const end = text.lastIndexOf("}")
-  if (start < 0 || end < start) return undefined
-  try {
-    const v = JSON.parse(text.slice(start, end + 1)) as { note?: unknown; captions?: unknown }
-    if (typeof v.note !== "string" || !v.note.trim()) return undefined
+  for (let start = text.indexOf("{"); start >= 0 && start < end; start = text.indexOf("{", start + 1)) {
+    let v: { note?: unknown; captions?: unknown }
+    try {
+      v = JSON.parse(text.slice(start, end + 1)) as typeof v
+    } catch {
+      continue
+    }
+    if (typeof v.note !== "string" || !v.note.trim()) continue
     const captions: Record<string, string> = {}
     if (v.captions && typeof v.captions === "object") for (const [k, c] of Object.entries(v.captions)) if (typeof c === "string") captions[k.toLowerCase()] = c
     return { note: v.note, captions }
-  } catch {
-    return undefined
   }
+  return undefined
 }
 
 /**
@@ -864,7 +866,8 @@ export async function approveJobScripts(workspaceRoot: string, jobId: string, sh
           return undefined
         })
         if (!checked) return await transition(root, job, "answered", { headSha, scripts: done })
-        return await transition(root, job, "answered", { headSha, scripts: checked.scripts, summary: checked.summary }, checked.summary)
+        const rewritten = checked.summary !== job.summary ? checked.summary : undefined
+        return await transition(root, job, "answered", { headSha, scripts: checked.scripts, summary: checked.summary }, rewritten)
       }
       const error = done.map((s) => (s.render?.ok === false ? (done.length > 1 ? `${optionName(s)}: ${s.render.error}` : s.render.error) : "")).join("\n\n")
       return await fail(root, job, error, { headSha, scripts: done })

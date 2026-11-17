@@ -301,8 +301,8 @@ const withoutClaim = (mark: Mark): Mark => {
  * Add a message to a mark's thread (an empty `text` adds none). `status` changes the mark: an agent answers
  * ("answered"), gives it back ("open", which drops the claim) or dismisses it ("dismissed", the text says why);
  * only the user ("you") accepts. A status is refused on a mark that follows a River job, and on a mark another
- * agent holds a live claim on. A user's reply on a mark an agent answered opens it again, so that agent finds it
- * in marks_open.
+ * agent holds a live claim on. A user's reply on a mark an agent answered or dismissed opens it again, so that agent
+ * finds it in marks_open.
  */
 export async function replyToMark(workspaceRoot: string, board: string, markId: string, by: string, text: string, status?: MarkStatusChange): Promise<Mark> {
   return updateMark(workspaceRoot, board, markId, async (mark) => {
@@ -313,7 +313,8 @@ export async function replyToMark(workspaceRoot: string, board: string, markId: 
     if (status && by !== "you" && holder && holder !== by) {
       throw new Error(`river: mark ${markId} is claimed by ${holder} (since ${mark.claimedAt}); only ${holder} changes its status. Reply without a status, or claim it after the claim goes stale.`)
     }
-    const next = status ?? (by === "you" && !job && mark.status === "answered" ? "open" : mark.status)
+    const reopens = by === "you" && !job && (mark.status === "answered" || mark.status === "dismissed")
+    const next = status ?? (reopens ? "open" : mark.status)
     const at = new Date().toISOString()
     const thread = text.trim() ? [...mark.thread, { by, at, text }] : mark.thread
     // Giving a mark back releases the claim; any other reply keeps it, so the agent that answered sees it is theirs.

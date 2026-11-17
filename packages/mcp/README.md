@@ -61,7 +61,7 @@ The server sends Claude Code this loop as its instructions:
 
 When the request asks to draw, show or picture something, call `concept_request` instead. It starts River's concept job for the mark in its own process and returns the job id at once. The concept artist writes small Godot drawing scripts; the user reads and approves them in River before anything runs, and accepts or dismisses the answer there. The mark follows the job from then on, so `mark_reply` takes no status on it.
 
-When the user replies on a mark you answered (`river mark reply`, or the app), it opens again and shows up in `marks_open`, still claimed by you. Iterate with a new note and a new row; `answers` puts them under the first.
+When the user replies on a mark you answered or dismissed (`river mark reply`, or the app), it opens again and shows up in `marks_open`, still claimed by you. Iterate with a new note and a new row; `answers` puts them under the first.
 
 ## Options
 

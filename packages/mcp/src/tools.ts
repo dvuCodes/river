@@ -776,15 +776,17 @@ function boardTools(project: Project, author: string): RiverTool[] {
   }
 
   /**
-   * Where an answer's image card goes and what it hangs off: the newest note answering the mark (or the mark
-   * itself, before there is a note), in the row of cards that note already leads to.
+   * Where an answer's image card goes and what it hangs off: this author's newest note answering the mark (or the
+   * mark itself, before there is one), in the row of cards that note already leads to. River's job notes and the
+   * user's arrows are someone else's answer.
    */
   function answerRow(b: Board, markId: string): { head: string; spot: { x: number; y: number }; index: number } {
-    const notes = b.edges.filter((e) => e.from === markId).map((e) => b.cards.find((c) => c.id === e.to && c.kind === "note")).filter((c): c is Card => c !== undefined)
+    const own = b.edges.filter((e) => e.madeBy === author)
+    const notes = own.filter((e) => e.from === markId).map((e) => b.cards.find((c) => c.id === e.to && c.kind === "note" && !c.pending)).filter((c): c is Card => c !== undefined)
     const head = notes.at(-1)
     const headId = head?.id ?? markId
     const headRect = head ? cardRect(head) : markRect(needMark(b, markId))
-    const row = b.edges.filter((e) => e.from === headId).map((e) => b.cards.find((c) => c.id === e.to && c.kind !== "note")).filter((c): c is Card => c !== undefined)
+    const row = own.filter((e) => e.from === headId).map((e) => b.cards.find((c) => c.id === e.to && c.kind !== "note")).filter((c): c is Card => c !== undefined)
     const right = Math.max(headRect.x + headRect.w, ...row.map((c) => c.x + c.w))
     return { head: headId, spot: { x: right + BOARD_GAP, y: headRect.y }, index: row.length }
   }

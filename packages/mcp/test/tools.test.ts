@@ -83,7 +83,7 @@ describe("read tools", () => {
     expect(r.text).toContain("1 error, 3 warnings in 8 passages")
     expect((await call("story_lint")).text).toContain("1 error, 3 warnings in 8 passages")
     expect(r.text).toContain(
-      "warn   Long path → Fetch: the choice can show while Fetch cannot be entered (its @when energy >= 20 is false). Give the choice @when energy >= 20, or loosen Fetch's @when.",
+      "warn   Long path → Fetch: the choice can show while Fetch's @when energy >= 20 is false. Give the choice @when energy >= 20, or loosen Fetch's @when.",
     )
   })
 

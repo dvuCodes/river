@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { beforeEach, describe, expect, it } from "vitest"
-import { cardRect, ensureBoard, loadBoard, loadMark, loadProject, overlaps, replyToMark, saveCard, saveJob, saveMark, type Card, type Job, type Mark, type Project } from "@river/core"
+import { cardRect, ensureBoard, loadBoard, loadMark, loadProject, overlaps, replyToMark, saveCard, saveEdge, saveJob, saveMark, type Card, type Job, type Mark, type Project } from "@river/core"
 import { createRiverTools, type JobLaunch, type RiverTool } from "../src/index"
 import { tempProject } from "./helpers"
 
@@ -173,6 +173,20 @@ describe("board tools", () => {
     await expect(call("board_add_note", { answers: mark.id, near: mark.id, text: "x" })).rejects.toThrow(/answers or near/)
   })
 
+  it("answers: the user's arrows and River's job answer are not this agent's answer row", async () => {
+    const aside = await saveCard(dir, "main", { kind: "note", x: 2000, y: 2000, w: 200, ref: "", text: "far away", madeBy: "you" })
+    await saveEdge(dir, "main", { from: mark.id, to: aside.id, madeBy: "you" })
+    const jobNote = await saveCard(dir, "main", { kind: "note", x: 400, y: 30, w: 320, ref: "", text: "job", madeBy: "concept-artist", pending: { markId: mark.id, jobId: "j_x" } })
+    await saveEdge(dir, "main", { from: mark.id, to: jobNote.id, madeBy: "concept-artist" })
+    const note = (await call("board_add_note", { answers: mark.id, text: "mine" })).data as Card
+    expect(note.x).toBe(jobNote.x)
+    expect(note.y).toBeLessThan(aside.y)
+    mkdirSync(join(dir, "art"))
+    writeFileSync(join(dir, "art", "a.png"), "png")
+    const card = (await call("board_add_card", { answers: mark.id, file: "art/a.png", source: { licence: "own work" } })).data as Card
+    expect(card).toMatchObject({ label: "A", y: note.y, x: note.x + note.w + 40 })
+  })
+
   it("card_read and mark_read show text in full; board_read and marks_open say what a mark is on and where", async () => {
     const long = `${"word ".repeat(200)}END`
     const note = (await call("board_add_note", { answers: mark.id, text: long })).data as Card
@@ -229,6 +243,7 @@ describe("board tools", () => {
     expect((await call("mark_claim", { markId: mark.id }, other)).text).toContain("as other-agent")
     const dismissed = (await call("mark_reply", { markId: mark.id, text: "Out of scope: this is a sound request.", status: "dismissed" }, other)).data
     expect(dismissed).toMatchObject({ status: "dismissed", claimedBy: "other-agent" })
+    expect(await replyToMark(dir, "main", mark.id, "you", "It is not sound: the pond scene needs it.")).toMatchObject({ status: "open", claimedBy: "other-agent" })
     await expect(replyToMark(dir, "main", mark.id, "claude-code", "", "accepted")).rejects.toThrow(/only the user accepts/)
     expect(await replyToMark(dir, "main", mark.id, "you", "", "accepted")).toMatchObject({ status: "accepted" })
   })
