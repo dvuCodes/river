@@ -171,3 +171,14 @@ export function markBox(shape: string, path: number[]): Rect {
 export function translatePath(path: number[], dx: number, dy: number): number[] {
   return path.map((v, i) => Math.round((v + (i % 2 === 0 ? dx : dy)) * 10) / 10)
 }
+
+/** Ids in reading order: rows top to bottom, left to right within a row. A box joins the current row when its top is above that row's middle. */
+export function readingOrder(items: { id: string; rect: Rect }[]): string[] {
+  const rows: { mid: number; items: { id: string; rect: Rect }[] }[] = []
+  for (const it of [...items].sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x)) {
+    const row = rows[rows.length - 1]
+    if (row && it.rect.y < row.mid) row.items.push(it)
+    else rows.push({ mid: it.rect.y + it.rect.h / 2, items: [it] })
+  }
+  return rows.flatMap((r) => r.items.sort((a, b) => a.rect.x - b.rect.x).map((it) => it.id))
+}

@@ -1,7 +1,7 @@
 import { Handle, type Node, type NodeProps, NodeResizeControl, Position, ResizeControlVariant } from "@xyflow/react"
 import { type ReactNode, createContext, memo, useContext, useEffect, useRef, useState } from "react"
-import type { Card, Mark } from "@river/core"
-import type { CardDTO, ConceptJob, ImageSize } from "../../../shared/api"
+import type { Mark } from "@river/core"
+import type { BoardCard, CardDTO, ConceptJob, ImageSize } from "../../../shared/api"
 import { cx } from "../util"
 import { type Pt, arrowPath, bounds, markBox, pointsOf, smoothPath, strokesOf } from "./geometry"
 
@@ -13,6 +13,8 @@ export type BoardNode = CardNode | MarkNode
 
 export interface CanvasActions {
   editText(id: string, text: string): void
+  /** An empty caption goes back to what the card shows by default. */
+  editCaption(id: string, caption: string): void
   resize(id: string, w: number): void
   /** Read the card from disk again. */
   refresh(id: string): void
@@ -206,7 +208,7 @@ function JobBar({ job, cardId }: { job: ConceptJob; cardId: string }) {
 }
 
 /** One option of a job's answer: its own progress, its render or the error Godot gave, and Keep. */
-function ConceptBody({ card, view, frame }: { card: Card; view: ConceptView; frame(content: ReactNode): ReactNode }) {
+function ConceptBody({ card, view, frame }: { card: BoardCard; view: ConceptView; frame(content: ReactNode): ReactNode }) {
   const notes = useContext(AnswerNotes)
   const { busy, act } = useJobAction(card.id)
   const jobId = card.pending?.jobId
@@ -271,7 +273,7 @@ function hostOf(url: string): string {
 }
 
 /** The line under an image card: the card's own caption, else what the card shows, with the licence for a reference. */
-function captionOf(card: Card, view: CardDTO["view"]): ReactNode {
+function captionOf(card: BoardCard, view: CardDTO["view"]): ReactNode {
   if (card.caption) return card.caption
   switch (view.kind) {
     case "ref": {
@@ -282,6 +284,7 @@ function captionOf(card: Card, view: CardDTO["view"]): ReactNode {
       return (
         <>
           <span className="mono">{view.shotId}</span>
+          {view.frame !== undefined && <span> · frame {view.frame + 1}</span>}
           {view.rev && <span className="mono"> · {view.rev}</span>}
           {view.missing && <span> · {view.missing}</span>}
         </>
@@ -291,6 +294,69 @@ function captionOf(card: Card, view: CardDTO["view"]): ReactNode {
     default:
       return null
   }
+}
+
+/** The caption under an image card. Double-click writes your own; Enter or leaving the field saves it, Escape keeps the old one. */
+function Caption({ id, card, view }: { id: string; card: BoardCard; view: CardDTO["view"] }) {
+  const actions = useContext(Actions)!
+  const [draft, setDraft] = useState<string | null>(null)
+  const own = card.caption ?? ""
+  // Switching view or board, or culling, unmounts the card without a blur: save what was typed.
+  const unsaved = useRef<string | null>(null)
+  unsaved.current = draft !== null && draft.trim() !== own ? draft.trim() : null
+  useEffect(
+    () => () => {
+      if (unsaved.current !== null) actions.editCaption(id, unsaved.current)
+    },
+    [actions, id],
+  )
+  const shown = captionOf(card, view)
+  const editable = !card.pending
+  if (draft !== null) {
+    const done = (save: boolean) => {
+      if (save && unsaved.current !== null) actions.editCaption(id, unsaved.current)
+      unsaved.current = null
+      setDraft(null)
+    }
+    return (
+      <textarea
+        className="cnode-cap cnode-cap-input nodrag nowheel"
+        autoFocus
+        rows={2}
+        value={draft}
+        placeholder={typeof shown === "string" ? shown : "Write a caption"}
+        aria-label="Caption"
+        onFocus={(e) => e.currentTarget.select()}
+        onChange={(e) => setDraft(e.target.value.replace(/\n/g, " "))}
+        onBlur={() => done(true)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === "Escape") {
+            e.preventDefault()
+            e.stopPropagation()
+            done(e.key === "Enter")
+          }
+        }}
+      />
+    )
+  }
+  if (!shown) return null
+  return (
+    <div
+      className={cx("cnode-cap", editable && "is-editable")}
+      title={editable ? "Double-click to edit the caption" : card.source?.url}
+      onDoubleClick={
+        editable
+          ? (e) => {
+              // The card's own double-click opens the lightbox.
+              e.stopPropagation()
+              setDraft(own)
+            }
+          : undefined
+      }
+    >
+      {card.madeBy !== ME && <Star by={card.madeBy} />} {shown}
+    </div>
+  )
 }
 
 function Star({ by }: { by: string }) {
@@ -355,22 +421,18 @@ export const CardView = memo(function CardView({ id, data, selected }: NodeProps
       )
       break
     default: {
-      const caption = captionOf(card, view)
       body = (
         <>
           {view.kind === "concept" ? <ConceptBody card={card} view={view} frame={frame} /> : frame(<CardImage url={view.url} size={view.size} alt={card.caption ?? card.source?.title ?? view.kind} />)}
-          {caption && (
-            <div className="cnode-cap" title={card.source?.url}>
-              {agent && <Star by={card.madeBy} />} {caption}
-            </div>
-          )}
+          <Caption id={id} card={card} view={view} />
         </>
       )
     }
   }
   const imageLike = view.kind === "ref" || view.kind === "frame" || view.kind === "concept"
+  // "cnode-frame" is the image box inside every image card, so a frame card's own class cannot be that.
   return (
-    <div className={cx("cnode", `cnode-${card.kind}`, imageLike && "cnode-image", agent ? "by-agent" : "by-you", selected && "is-selected", pending && "is-pending")}>
+    <div className={cx("cnode", card.kind === "frame" ? "cnode-shot" : `cnode-${card.kind}`, imageLike && "cnode-image", agent ? "by-agent" : "by-you", selected && "is-selected", pending && "is-pending")}>
       <Anchors />
       {selected && (
         <NodeResizeControl

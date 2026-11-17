@@ -1,8 +1,8 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react"
-import type { AgentStatus, PlaySnapshot, ProjectInfo, StoryDTO, ViewId } from "../../shared/api"
+import type { AgentStatus, CanvasTheme, PlaySnapshot, ProjectInfo, StoryDTO, ViewId } from "../../shared/api"
 import { SettingsDialog } from "./components/SettingsDialog"
 import { cx, errorText, isSmoke } from "./util"
-import { CanvasView, DEFAULT_BOARD } from "./views/CanvasView"
+import { CanvasView } from "./views/CanvasView"
 import { type AgentContext, AgentView, useAgentSession } from "./views/AgentView"
 import { type AgentIntent, FramesView } from "./views/FramesView"
 import { PathsView } from "./views/PathsView"
@@ -128,18 +128,33 @@ export function App() {
   const [agentCtx, setAgentCtx] = useState<AgentContext>({ mode: "story" })
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [board, setBoard] = useState(DEFAULT_BOARD)
+  const [board, setBoard] = useState<string | null>(null)
+  const [canvasTheme, setCanvasTheme] = useState<CanvasTheme>("paper")
   const agent = useAgentSession()
   const storyRelRef = useRef(storyRel)
   storyRelRef.current = storyRel
+  const rootRef = useRef<string | null>(null)
 
   const applyProject = useCallback((p: ProjectInfo | null) => {
     setProject(p)
-    if (p && !p.error) setStoryRel((cur) => (cur && p.stories.includes(cur) ? cur : (p.stories[0] ?? "")))
+    if (!p || p.error) return
+    setStoryRel((cur) => (cur && p.stories.includes(cur) ? cur : (p.stories[0] ?? "")))
+    // A manifest change reloads the project too; only a newly opened project picks its board.
+    if (rootRef.current !== p.root) setBoard(p.board)
+    rootRef.current = p.root
   }, [])
 
+  const chooseCanvasTheme = (t: CanvasTheme) => {
+    setCanvasTheme(t)
+    void window.river.setCanvasTheme(t)
+  }
+
   useEffect(() => {
-    void window.river.getProject().then(applyProject)
+    // The first render waits for the theme too, so the canvas never flashes the wrong one.
+    void Promise.all([window.river.getProject(), window.river.canvasTheme().catch((): CanvasTheme => "paper")]).then(([p, t]) => {
+      setCanvasTheme(t)
+      applyProject(p)
+    })
     void window.river.agentStatus().then(setAgentStatus, () =>
       setAgentStatus({
         available: false,
@@ -211,7 +226,7 @@ export function App() {
     setView("agent")
   }
 
-  if (project === undefined) return <div className="boot" />
+  if (project === undefined || (project && !project.error && board === null)) return <div className="boot" />
   if (project === null || project.error) {
     return (
       <Welcome
@@ -224,6 +239,7 @@ export function App() {
   }
 
   const groups = [...new Set(NAV.map((n) => n.group))]
+  const openBoard = board ?? project.board
   return (
     <div className="app">
       <nav className="sidebar">
@@ -267,7 +283,7 @@ export function App() {
           </div>
         ) : view === "story-map" ? (
           <StoryMapView
-            board={board}
+            board={openBoard}
             stories={project.stories}
             storyRel={storyRel}
             onStory={setStoryRel}
@@ -303,9 +319,9 @@ export function App() {
             storyStale={storyStale && playSnap !== null}
           />
         ) : view === "canvas" ? (
-          <CanvasView board={board} onBoard={setBoard} storyTick={storyTick} />
+          <CanvasView board={openBoard} onBoard={setBoard} storyTick={storyTick} theme={canvasTheme} onTheme={chooseCanvasTheme} />
         ) : view === "frames" ? (
-          <FramesView tick={framesTick} board={board} onAgent={onAgentIntent} />
+          <FramesView tick={framesTick} board={openBoard} onAgent={onAgentIntent} onOpenBoard={() => setView("canvas")} />
         ) : (
           <AgentView session={agent} status={agentStatus} onStatus={setAgentStatus} ctx={agentCtx} setCtx={setAgentCtx} storyRel={storyRel || undefined} onSettings={() => setSettingsOpen(true)} />
         )}

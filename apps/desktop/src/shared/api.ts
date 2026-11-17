@@ -29,9 +29,15 @@ import type {
 export type ViewId = "story-map" | "paths" | "playtest" | "canvas" | "frames" | "agent"
 export const VIEWS: readonly ViewId[] = ["story-map", "paths", "playtest", "canvas", "frames", "agent"]
 
+/** The canvas's look: paper (the default), dark, or whatever the OS uses. The rest of the app follows the OS. */
+export type CanvasTheme = "paper" | "dark" | "system"
+export const CANVAS_THEMES: readonly CanvasTheme[] = ["paper", "dark", "system"]
+
 export interface ProjectInfo {
   root: string
   name: string
+  /** The board to open: the one last open in this project if it still exists, else "main" or the first board. */
+  board: string
   engine: string
   stories: string[]
   shots: ShotDef[]
@@ -162,7 +168,7 @@ export interface ImageSize {
 
 /** What a card shows, resolved by main (the renderer cannot read stories or captures itself). */
 export type CardView =
-  | { kind: "frame"; shotId: string; rev?: string; url?: string; size?: ImageSize; missing?: string }
+  | { kind: "frame"; shotId: string; rev?: string; frame?: number; url?: string; size?: ImageSize; missing?: string }
   | { kind: "passage"; story: string; passageId: string; title: string; tags: string[]; lines: string[]; missing?: string }
   | { kind: "ref"; url: string; size?: ImageSize }
   | {
@@ -195,9 +201,24 @@ export interface JobDTO {
   revisable: boolean
 }
 
+/**
+ * A card as River writes it. Frame cards in a strip also name their capture (its `at`) and frame index, since a rev
+ * can have several captures and a capture several frames. Core's Card does not declare these two fields yet.
+ */
+export type BoardCard = Card & { capture?: string; frame?: number }
+
 export interface CardDTO {
-  card: Card
+  card: BoardCard
   view: CardView
+}
+
+/** Frames of one capture to put on a board as a row joined by connectors. */
+export interface FrameStrip {
+  shotId: string
+  /** The capture's `at`. */
+  capture: string
+  /** Frame indices, in the order they go on the board. */
+  frames: number[]
 }
 
 export interface BoardDTO {
@@ -211,7 +232,7 @@ export interface BoardDTO {
   errors: string[]
 }
 
-export type NewCard = Omit<Card, "id" | "createdAt"> & Partial<Pick<Card, "id" | "createdAt">>
+export type NewCard = Omit<BoardCard, "id" | "createdAt"> & Partial<Pick<BoardCard, "id" | "createdAt">>
 export type NewMark = Omit<Mark, "id" | "createdAt" | "status"> & Partial<Pick<Mark, "id" | "createdAt" | "status">>
 export type NewEdge = Omit<Edge, "id" | "createdAt"> & Partial<Pick<Edge, "id" | "createdAt">>
 
@@ -271,6 +292,12 @@ export interface RiverApi {
   /** Add your message to a mark's thread (core replyToMark); returns it with the open mark count. */
   boardReply(name: string, markId: string, text: string): Promise<{ mark: Mark; openMarks: number }>
   boardOpenCount(name: string): Promise<number>
+  /** Rename a board's folder (and the jobs that point at it). Refused while one of its jobs is still working. */
+  boardRename(from: string, to: string): Promise<void>
+  /** Move a board's folder to the OS trash. Refused for the last board, or while one of its jobs is still working. Returns the boards left. */
+  boardDelete(name: string): Promise<string[]>
+  /** Frame cards for `strip.frames`, captioned, in a row at a free spot, each joined to the next by a connector. */
+  boardAddFrames(name: string, strip: FrameStrip): Promise<CardDTO[]>
   /** Add a passage ("<story>#<id>") or frame (shot id) card at the next free spot. */
   boardPin(name: string, pin: { kind: "passage" | "frame"; ref: string; rev?: string }): Promise<CardDTO>
   /** Pick an image file to import; null when cancelled. */
@@ -300,6 +327,8 @@ export interface RiverApi {
   setApiKey(key: string): Promise<AgentStatus>
   clearApiKey(): Promise<AgentStatus>
   setAgentPrefs(p: AgentPrefsUpdate): Promise<AgentStatus>
+  canvasTheme(): Promise<CanvasTheme>
+  setCanvasTheme(t: CanvasTheme): Promise<void>
   /** Re-run `claude auth status` (on window focus, or the Refresh button). */
   refreshAgentStatus(): Promise<AgentStatus>
   /** Open a new terminal window running `claude auth login`. */

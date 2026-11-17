@@ -14,16 +14,15 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import "@fontsource/caveat/600.css"
 import type { Card, Edge, Mark, MarkShape } from "@river/core"
-import type { BoardDTO, CardDTO, StagedImage } from "../../../shared/api"
-import { AskBox, BoardPill, DismissDialog, type JumpItem, Lightbox, MarkPanel, QuickJump, RefForm, ReviewDialog, SelectionBar, TOOLS, type Tool, ToolBar, ZoomControls } from "../canvas/chrome"
-import { type Pt, type Rect, anchorsFor, bounds, ellipsePoints, flatten, grow, intersects, markBox, translatePath } from "../canvas/geometry"
+import type { BoardDTO, CanvasTheme, CardDTO, StagedImage } from "../../../shared/api"
+import { AskBox, BoardPill, DismissDialog, type JumpItem, Lightbox, type LightboxItem, MarkPanel, QuickJump, RefForm, ReviewDialog, SelectionBar, TOOLS, type Tool, ToolBar, ZoomControls } from "../canvas/chrome"
+import { type Pt, type Rect, anchorsFor, bounds, ellipsePoints, flatten, grow, intersects, markBox, readingOrder, translatePath } from "../canvas/geometry"
 import { type Step, createHistory } from "../canvas/history"
 import { LinkEdge, type LinkEdgeType, linkEdge } from "../canvas/LinkEdge"
 import { Actions, AnswerNotes, type BoardNode, type CanvasActions, CardView, ME, MarkShapeView, MarkView, cardNode, markNode } from "../canvas/nodes"
 import { cx, errorText, useSmokeReady } from "../util"
 import "../canvas/canvas.css"
 
-export const DEFAULT_BOARD = "main"
 /** Pen strokes this close in time (ms) that overlap the previous stroke join its mark. */
 const STROKE_JOIN_MS = 2000
 const DRAW_TOOLS = new Set<Tool>(["pen", "circle", "arrow", "pin", "note"])
@@ -72,10 +71,70 @@ const isTyping = (el: EventTarget | null) => {
   return Boolean(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable))
 }
 
-function imageOf(dto: CardDTO | undefined): { url: string; caption: string } | undefined {
+function imageOf(dto: CardDTO | undefined): LightboxItem | undefined {
   const v = dto?.view
   if (!dto || !v || (v.kind !== "ref" && v.kind !== "frame" && v.kind !== "concept") || !v.url) return undefined
-  return { url: v.url, caption: dto.card.caption ?? dto.card.source?.title ?? (v.kind === "frame" ? v.shotId : v.kind === "concept" ? v.id : "") }
+  const fallback = v.kind === "frame" ? `${v.shotId}${v.frame !== undefined ? ` · frame ${v.frame + 1}` : ""}` : v.kind === "concept" ? v.id : ""
+  return { id: dto.card.id, url: v.url, caption: dto.card.caption || dto.card.source?.title || fallback }
+}
+
+/** Where a card sits on the board; its height from the image's own shape, so the order does not depend on what has rendered. */
+function boardRect(dto: CardDTO): Rect {
+  const { card, view } = dto
+  const size = "size" in view ? view.size : undefined
+  return { x: card.x, y: card.y, w: card.w, h: size ? (card.w * size.h) / size.w : card.w * 0.75 }
+}
+
+/** The first steps on an empty board. Drawn on the paper, out of the way of the pointer. */
+function EmptyBoard() {
+  return (
+    <div className="canvas-empty" aria-label="An empty board">
+      <div className="empty-sheet">
+        <h2 className="empty-title">A blank board</h2>
+        <p className="empty-lede">Lay out shots, passages and references, then ask for what you want right where you want it.</p>
+        <ol className="empty-steps">
+          <li>
+            <svg viewBox="0 0 48 40" aria-hidden className="empty-glyph glyph-pen">
+              <ellipse cx="18" cy="21" rx="14" ry="11" />
+              <path className="glyph-note" d="M33 6h12v9H37l-4 3z" />
+            </svg>
+            <div>
+              <b>Draw a mark, write a request</b>
+              <span>
+                Circle or scribble on anything with the pen <kbd>P</kbd> or circle <kbd>O</kbd>, then say what you want. An agent answers beside it.
+              </span>
+            </div>
+          </li>
+          <li>
+            <svg viewBox="0 0 48 40" aria-hidden className="empty-glyph glyph-strip">
+              <rect x="2" y="12" width="12" height="9" rx="1.5" />
+              <rect x="18" y="12" width="12" height="9" rx="1.5" />
+              <rect x="34" y="12" width="12" height="9" rx="1.5" />
+              <path d="M14.5 16.5h3M30.5 16.5h3" />
+              <path className="glyph-cap" d="M2 26h9M18 26h9M34 26h9" />
+            </svg>
+            <div>
+              <b>Pin passages and frames</b>
+              <span>From the Story map, or send a capture from Frames as a strip of frames joined in order.</span>
+            </div>
+          </li>
+          <li>
+            <svg viewBox="0 0 48 40" aria-hidden className="empty-glyph glyph-drop">
+              <rect x="9" y="8" width="26" height="20" rx="2" />
+              <path d="M9 24l7-6 6 5 4-3 9 7" />
+              <path className="glyph-arrow" d="M38 2v12M34 10l4 4 4-4" />
+            </svg>
+            <div>
+              <b>Drop in images</b>
+              <span>
+                Drag reference images here or paste them <kbd>Ctrl</kbd> <kbd>V</kbd>. Each one keeps its source and licence.
+              </span>
+            </div>
+          </li>
+        </ol>
+      </div>
+    </div>
+  )
 }
 
 function titleOf(dto: CardDTO): string {
@@ -106,7 +165,15 @@ async function stageFile(file: File): Promise<StagedImage> {
   return window.river.boardStageImage(new Uint8Array(await file.arrayBuffer()), name)
 }
 
-function CanvasInner(props: { board: string; onBoard(name: string): void; storyTick: { rel: string; n: number } | null }) {
+interface CanvasProps {
+  board: string
+  onBoard(name: string): void
+  storyTick: { rel: string; n: number } | null
+  theme: CanvasTheme
+  onTheme(t: CanvasTheme): void
+}
+
+function CanvasInner(props: CanvasProps) {
   const { board } = props
   const flow = useReactFlow<BoardNode, LinkEdgeType>()
   const [state, setState] = useState<BoardState | null>(null)
@@ -353,6 +420,10 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
       editText: (id, text) => {
         const card = stateRef.current?.cards[id]?.card
         if (card) void commit([{ kind: "card", id, before: { text: card.text ?? "" }, after: { text } }])
+      },
+      editCaption: (id, caption) => {
+        const card = stateRef.current?.cards[id]?.card
+        if (card && caption !== (card.caption ?? "")) void commit([{ kind: "card", id, before: { caption: card.caption ?? "" }, after: { caption } }])
       },
       resize: (id, w) => {
         const card = stateRef.current?.cards[id]?.card
@@ -689,13 +760,14 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
     const dto = state?.cards[id]
     return dto ? titleOf(dto) : id
   }
-  const box = lightbox ? imageOf(state?.cards[lightbox]) : undefined
+  const images = lightbox ? readingOrder(cardList.filter((d) => imageOf(d)).map((d) => ({ id: d.card.id, rect: boardRect(d) }))) : []
   const ref = refs[0]
 
   return (
     <div className="view canvas-view">
       <div
         className={cx("canvas-wrap", `tool-${tool}`, dropping && "is-dropping")}
+        data-canvas-theme={props.theme}
         ref={wrap}
         onPointerMove={(e) => (pointer.current = toFlow(e))}
         onDragOver={(e) => {
@@ -814,7 +886,7 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
           </ReactFlow>
           </AnswerNotes.Provider>
         </Actions.Provider>
-        <BoardPill board={board} items={cardList.length} openMarks={state?.openMarks ?? 0} onBoard={props.onBoard} />
+        <BoardPill board={board} items={cardList.length} openMarks={state?.openMarks ?? 0} onBoard={props.onBoard} theme={props.theme} onTheme={props.onTheme} />
         {selectedNodes.length + selectedLinks.length > 0 && !soleMark && (
           <SelectionBar
             count={selectedNodes.length + selectedLinks.length}
@@ -837,11 +909,7 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
             onDelete={() => deleteItems([soleMark.id])}
           />
         )}
-        {state && cardList.length === 0 && markList.length === 0 && (
-          <div className="canvas-empty">
-            <p>An empty board. Pin passages from the Story map or shots from Frames, paste or drop an image, add a note, and draw on it with the pen.</p>
-          </div>
-        )}
+        {state && cardList.length === 0 && markList.length === 0 && <EmptyBoard />}
         <ToolBar tool={tool} onTool={chooseTool} />
         {ref && (
           <RefForm
@@ -868,7 +936,9 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
             onClose={() => setJumping(false)}
           />
         )}
-        {box && <Lightbox url={box.url} caption={box.caption} onClose={() => setLightbox(null)} />}
+        {lightbox && images.includes(lightbox) && (
+          <Lightbox items={images.map((id) => imageOf(state?.cards[id])!)} at={images.indexOf(lightbox)} onAt={(i) => setLightbox(images[i]!)} onClose={() => setLightbox(null)} />
+        )}
         {reviewing && <ReviewDialog key={reviewing} jobId={reviewing} onClose={() => setReviewing(null)} />}
         {dismissing && (
           <DismissDialog
@@ -908,10 +978,10 @@ function DraftLayer({ draft }: { draft: Draft }) {
   )
 }
 
-export function CanvasView(props: { board: string; onBoard(name: string): void; storyTick: { rel: string; n: number } | null }) {
+export function CanvasView(props: CanvasProps) {
   return (
     <ReactFlowProvider>
-      <CanvasInner key={props.board} board={props.board} onBoard={props.onBoard} storyTick={props.storyTick} />
+      <CanvasInner key={props.board} {...props} />
     </ReactFlowProvider>
   )
 }

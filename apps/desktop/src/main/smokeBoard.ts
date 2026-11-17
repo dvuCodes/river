@@ -27,12 +27,13 @@ function hsl(h: number, s: number, l: number): [number, number, number] {
  * A landscape (sky, sun, ridges, film grain) as PNG bytes. The grain keeps the file near the size of real concept art,
  * so loading and decoding cost what they would on a real board.
  */
-export function scenePng(seed: number, w = 960, h = 600): Buffer {
+export function scenePng(seed: number, w = 960, h = 600, sunAt?: [number, number]): Buffer {
   const r = rng(seed)
   const hue = r() * 360
   const skyTop = hsl(hue, 0.45, 0.32 + r() * 0.2)
   const skyLow = hsl((hue + 30 + r() * 40) % 360, 0.6, 0.62 + r() * 0.18)
   const sun = { x: w * (0.2 + r() * 0.6), y: h * (0.18 + r() * 0.3), r: h * (0.05 + r() * 0.06), c: hsl((hue + 50) % 360, 0.85, 0.82) }
+  if (sunAt) [sun.x, sun.y] = [w * sunAt[0], h * sunAt[1]]
   const layers = Array.from({ length: 4 }, (_v, i) => ({
     base: h * (0.42 + i * 0.13 + r() * 0.05),
     amp: h * (0.03 + r() * 0.06),
@@ -208,4 +209,32 @@ export async function seedPerfBoard(root: string, board: string): Promise<{ card
     edges++
   }
   return { cards: cards.length, images, edges }
+}
+
+export const STRIP_SHOT = "shadow_step"
+export const STRIP_FRAMES = 6
+
+/**
+ * A multi-frame shot in river.json and one capture of it, laid out the way core's captureShot writes one
+ * (.river/captures/<shot>/<stamp>/ with capture.json listing absolute PNG paths). The frames are one scene with the sun
+ * crossing the sky, so the strip reads as a sequence.
+ */
+export async function seedStripCapture(root: string): Promise<void> {
+  const manifest = join(root, "river.json")
+  const m = JSON.parse(await readFile(manifest, "utf8")) as { shots: { id: string }[] }
+  if (!m.shots.some((x) => x.id === STRIP_SHOT)) {
+    m.shots.push({ id: STRIP_SHOT, scene: "res://arena/arena.tscn", setup: "res://tools/shots/shadow_step.gd", count: STRIP_FRAMES, ticks: 6, note: "Shadow step: he sinks into his shadow and rises ahead" } as { id: string })
+    await writeFile(manifest, JSON.stringify(m, null, 2) + "\n")
+  }
+  const at = "2026-11-17T09:30:00.000Z"
+  const out = join(root, ".river", "captures", STRIP_SHOT, at.replace(/:/g, "-"))
+  await mkdir(out, { recursive: true })
+  const files: string[] = []
+  for (let i = 0; i < STRIP_FRAMES; i++) {
+    const t = i / (STRIP_FRAMES - 1)
+    const file = join(out, `frame_${String(i).padStart(3, "0")}.png`)
+    await writeFile(file, scenePng(311, 960, 540, [0.14 + t * 0.72, 0.42 - Math.sin(t * Math.PI) * 0.3]))
+    files.push(file)
+  }
+  await writeFile(join(out, "capture.json"), JSON.stringify({ shotId: STRIP_SHOT, rev: "a1b2c3d", at, files }, null, 2))
 }

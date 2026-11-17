@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { app, safeStorage } from "electron"
 import type { AgentBackend, AgentModel } from "@river/agent"
+import { CANVAS_THEMES, type CanvasTheme } from "../shared/api"
 
 /**
  * Stored in app userData. The API key is kept only as safeStorage ciphertext (base64).
@@ -14,6 +15,9 @@ interface Settings {
   model?: AgentModel
   /** The `claude` executable, when it is not on PATH. */
   claudePath?: string
+  canvasTheme?: CanvasTheme
+  /** Project root -> the board last open in it. */
+  lastBoards?: Record<string, string>
 }
 
 const file = () => join(app.getPath("userData"), "river-settings.json")
@@ -74,6 +78,27 @@ export function getLastProject(): string | undefined {
 
 export function setLastProject(root: string): void {
   write({ ...read(), lastProject: root })
+}
+
+/** Paper unless the user picked another; the canvas does not follow the OS unless asked to. */
+export function getCanvasTheme(): CanvasTheme {
+  const t = read().canvasTheme
+  return t && CANVAS_THEMES.includes(t) ? t : "paper"
+}
+
+export function setCanvasTheme(t: CanvasTheme): void {
+  if (!CANVAS_THEMES.includes(t)) throw new Error(`Unknown canvas theme ${String(t)}`)
+  write({ ...read(), canvasTheme: t })
+}
+
+export function getLastBoard(root: string): string | undefined {
+  return read().lastBoards?.[root]
+}
+
+export function setLastBoard(root: string, board: string): void {
+  const s = read()
+  if (s.lastBoards?.[root] === board) return
+  write({ ...s, lastBoards: { ...s.lastBoards, [root]: board } })
 }
 
 export function encryptionAvailable(): Promise<boolean> {

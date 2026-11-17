@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
-import { basename, extname, join, relative, sep } from "node:path"
-import { type BrowserWindow, dialog } from "electron"
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
+import { basename, extname, join, relative, resolve, sep } from "node:path"
+import { type BrowserWindow, dialog, shell } from "electron"
 import {
   type Card,
   type Edge,
@@ -9,6 +9,8 @@ import {
   type Mark,
   type Project,
   type Story,
+  IMAGE_CARD_W,
+  boardDir,
   boardJsonText,
   cardFile,
   cardHeight,
@@ -19,6 +21,7 @@ import {
   ensureBoard,
   listBoards,
   listCaptures,
+  listJobs,
   loadBoard,
   loadCard,
   loadJob,
@@ -32,11 +35,13 @@ import {
   replyToMark,
   saveCard,
   saveEdge,
+  saveJob,
   saveMark,
 } from "@river/core"
-import type { BoardDTO, CardDTO, CardView, ConceptJob, ImageSize, NewCard, NewEdge, NewMark, StagedImage } from "../shared/api"
+import type { BoardCard, BoardDTO, CardDTO, CardView, ConceptJob, FrameStrip, ImageSize, NewCard, NewEdge, NewMark, StagedImage } from "../shared/api"
 import { loadAgent } from "./agent"
 import { imageSize } from "./imageSize"
+import { getLastBoard, setLastBoard } from "./settings"
 import { noteOwnWrite } from "./watch"
 
 const ME = "you"
@@ -46,7 +51,7 @@ export function riverFileUrl(p: Project, abs: string): string {
   return "river-file://project/" + relative(p.root, abs).split(sep).map(encodeURIComponent).join("/")
 }
 
-export type BoardEntity = { kind: "card"; value: Card } | { kind: "mark"; value: Mark } | { kind: "edge"; value: Edge }
+export type BoardEntity = { kind: "card"; value: BoardCard } | { kind: "mark"; value: Mark } | { kind: "edge"; value: Edge }
 const boardWritten = new Set<(written: BoardEntity) => void>()
 /** Call `cb` after River writes a card, mark or edge (smoke mode waits on it). Returns an unsubscribe function. */
 export function onBoardWritten(cb: (written: BoardEntity) => void): () => void {
@@ -143,7 +148,7 @@ export function cardResolver(p: Project) {
     }
     return s
   }
-  return async (card: Card): Promise<CardDTO> => {
+  return async (card: BoardCard): Promise<CardDTO> => {
     let view: CardView
     switch (card.kind) {
       case "passage": {
@@ -165,12 +170,15 @@ export function cardResolver(p: Project) {
         } catch (e) {
           err = e instanceof Error ? e.message : String(e)
         }
-        const cap = card.rev ? caps.find((c) => c.rev === card.rev) : caps[0]
-        const file = cap?.files[0]
+        const cap = card.capture ? caps.find((c) => c.at === card.capture) : card.rev ? caps.find((c) => c.rev === card.rev) : caps[0]
+        const frame = card.frame ?? 0
+        const file = cap?.files[frame]
         const size = file ? await imageSize(file) : undefined
+        const at = card.frame !== undefined ? { frame: card.frame } : {}
+        const missing = err ?? (cap ? `No frame ${frame + 1} in this capture` : card.capture || card.rev ? "That capture is gone" : "No capture yet")
         view = file
-          ? { kind: "frame", shotId: card.ref, rev: cap.rev, url: riverFileUrl(p, file), ...(size ? { size } : {}) }
-          : { kind: "frame", shotId: card.ref, ...(card.rev ? { rev: card.rev } : {}), missing: err ?? "No capture yet" }
+          ? { kind: "frame", shotId: card.ref, rev: cap.rev, ...at, url: riverFileUrl(p, file), ...(size ? { size } : {}) }
+          : { kind: "frame", shotId: card.ref, ...(card.rev ? { rev: card.rev } : {}), ...at, missing }
         break
       }
       case "ref": {
@@ -190,14 +198,46 @@ export function cardResolver(p: Project) {
   }
 }
 
-async function writeCard(p: Project, board: string, card: NewCard): Promise<Card> {
-  const full: Card = { ...card, id: card.id ?? newBoardId("c_"), createdAt: card.createdAt ?? new Date().toISOString() }
+async function writeCard(p: Project, board: string, card: NewCard): Promise<BoardCard> {
+  const full: BoardCard = { ...card, id: card.id ?? newBoardId("c_"), createdAt: card.createdAt ?? new Date().toISOString() }
   // Tell the watcher first: the content is known before the write, so the echo is dropped.
   noteOwnWrite(cardFile(p.root, board, full.id), boardJsonText(full))
   const saved = await saveCard(p.root, board, full)
   for (const cb of boardWritten) cb({ kind: "card", value: saved })
   return saved
 }
+
+async function writeEdge(p: Project, board: string, edge: NewEdge): Promise<Edge> {
+  const full: Edge = { ...edge, id: edge.id ?? newBoardId("e_"), createdAt: edge.createdAt ?? new Date().toISOString() }
+  noteOwnWrite(edgeFile(p.root, board, full.id), boardJsonText(full))
+  const saved = await saveEdge(p.root, board, full)
+  for (const cb of boardWritten) cb({ kind: "edge", value: saved })
+  return saved
+}
+
+/** Jobs still doing something on a board; renaming or deleting it under them would lose their answer. */
+const LIVE_JOB = new Set<Job["status"]>(["queued", "running", "approval", "rendering"])
+async function refuseLiveJobs(root: string, board: string, verb: string): Promise<Job[]> {
+  const jobs = (await listJobs(root)).filter((j) => j.board === board)
+  if (jobs.some((j) => LIVE_JOB.has(j.status))) throw new Error(`An answer on ${board} is still being made. ${verb} the board once it is done.`)
+  return jobs
+}
+
+/** Windows can hold a folder for a moment after its watcher lets go, or while an indexer reads it. */
+async function renameDir(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await rename(from, to)
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (attempt >= 20 || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw err
+      await new Promise((r) => setTimeout(r, 50 + attempt * 25))
+    }
+  }
+}
+
+/** Card height for a frame of this size at width `w`: the image at its own aspect, plus a two-line caption. */
+const frameCardHeight = (w: number, size: ImageSize | undefined) => Math.round(size ? (w * size.h) / size.w : (w * 9) / 16) + 40
 
 async function loadEdge(p: Project, board: string, id: string): Promise<Edge | null> {
   try {
@@ -233,7 +273,7 @@ function stage(image: { file: string } | { bytes: Buffer; fileName: string }): S
   return { token, fileName: "file" in image ? basename(image.file) : image.fileName }
 }
 
-export function boardHandlers(need: () => Project, onOpen: (dir: string) => void, getWindow: () => BrowserWindow | null) {
+export function boardHandlers(need: () => Project, watch: { add(dir: string): void; remove(dir: string): Promise<void> | undefined }, getWindow: () => BrowserWindow | null) {
   const resolveAll = async (cards: Card[]) => {
     const resolve = cardResolver(need())
     return Promise.all(cards.map(resolve))
@@ -243,7 +283,8 @@ export function boardHandlers(need: () => Project, onOpen: (dir: string) => void
     "board:open": async (name: string): Promise<BoardDTO> => {
       const p = need()
       const dir = await ensureBoard(p.root, name)
-      onOpen(dir)
+      watch.add(dir)
+      setLastBoard(p.root, name)
       const errors: string[] = []
       const board = await loadBoard(p.root, name, (file, err) => errors.push(`${relative(p.root, file).split(sep).join("/")}: ${err instanceof Error ? err.message : String(err)}`))
       return { name, cards: await resolveAll(board.cards), marks: board.marks, edges: board.edges, openMarks: openMarks(board).length, errors }
@@ -254,14 +295,7 @@ export function boardHandlers(need: () => Project, onOpen: (dir: string) => void
     },
     "board:mark": async (name: string, id: string): Promise<Mark | null> => (await loadMark(need().root, name, id)) ?? null,
     "board:edge": (name: string, id: string) => loadEdge(need(), name, id),
-    "board:saveEdge": async (name: string, edge: NewEdge): Promise<Edge> => {
-      const p = need()
-      const full: Edge = { ...edge, id: edge.id ?? newBoardId("e_"), createdAt: edge.createdAt ?? new Date().toISOString() }
-      noteOwnWrite(edgeFile(p.root, name, full.id), boardJsonText(full))
-      const saved = await saveEdge(p.root, name, full)
-      for (const cb of boardWritten) cb({ kind: "edge", value: saved })
-      return saved
-    },
+    "board:saveEdge": (name: string, edge: NewEdge): Promise<Edge> => writeEdge(need(), name, edge),
     "board:deleteEdge": (name: string, id: string) => deleteEdge(need().root, name, id),
     "board:saveCard": async (name: string, card: NewCard): Promise<CardDTO> => cardResolver(need())(await writeCard(need(), name, card)),
     "board:deleteCard": (name: string, id: string) => deleteCard(need().root, name, id),
@@ -285,6 +319,59 @@ export function boardHandlers(need: () => Project, onOpen: (dir: string) => void
       return { mark, openMarks: await countOpen(p, name) }
     },
     "board:openCount": (name: string) => countOpen(need(), name),
+    "board:rename": async (from: string, to: string): Promise<void> => {
+      const p = need()
+      const src = boardDir(p.root, from)
+      const dst = boardDir(p.root, to)
+      if (from === to) return
+      const boards = await listBoards(p.root)
+      if (!boards.includes(from)) throw new Error(`There is no board ${from}.`)
+      if (boards.includes(to)) throw new Error(`There is already a board called ${to}.`)
+      const jobs = await refuseLiveJobs(p.root, from, "Rename")
+      await watch.remove(src)
+      await renameDir(src, dst)
+      const meta = join(dst, "board.json")
+      const old = JSON.parse(await readFile(meta, "utf8").catch(() => "{}")) as { createdAt?: string }
+      await writeFile(meta, boardJsonText({ name: to, createdAt: old.createdAt ?? new Date().toISOString() }), "utf8")
+      for (const job of jobs) await saveJob(p.root, { ...job, board: to })
+      if (getLastBoard(p.root) === from) setLastBoard(p.root, to)
+    },
+    "board:delete": async (name: string): Promise<string[]> => {
+      const p = need()
+      const dir = boardDir(p.root, name)
+      const boards = await listBoards(p.root)
+      if (!boards.includes(name)) throw new Error(`There is no board ${name}.`)
+      if (boards.length === 1) throw new Error("This is the only board. Make another before you delete this one.")
+      await refuseLiveJobs(p.root, name, "Delete")
+      await watch.remove(dir)
+      await shell.trashItem(resolve(dir))
+      return listBoards(p.root)
+    },
+    "board:addFrames": async (name: string, strip: FrameStrip): Promise<CardDTO[]> => {
+      const p = need()
+      const cap = (await listCaptures(p, strip.shotId)).find((c) => c.at === strip.capture)
+      if (!cap) throw new Error(`That capture of ${strip.shotId} is gone. Capture it again.`)
+      const frames = strip.frames
+      if (!Array.isArray(frames) || frames.length === 0) throw new Error("Pick at least one frame.")
+      if (frames.some((f) => !Number.isInteger(f) || f < 0 || f >= cap.files.length) || new Set(frames).size !== frames.length) {
+        throw new Error(`Frames must be different numbers from 1 to ${cap.files.length}.`)
+      }
+      await ensureBoard(p.root, name)
+      const occupied = occupiedRects(await loadBoard(p.root, name))
+      const w = IMAGE_CARD_W
+      const sizes = await Promise.all(frames.map(async (f) => ({ w, h: frameCardHeight(w, await imageSize(cap.files[f]!)) })))
+      const start = occupied.length ? { x: Math.min(...occupied.map((r) => r.x)), y: Math.min(...occupied.map((r) => r.y)) } : { x: 0, y: 0 }
+      const spots = placeRow(start, sizes, occupied)
+      const cards: BoardCard[] = []
+      for (const [i, f] of frames.entries()) {
+        const at = spots[i]!
+        cards.push(
+          await writeCard(p, name, { kind: "frame", ref: strip.shotId, rev: cap.rev, capture: cap.at, frame: f, caption: `${strip.shotId} · frame ${f + 1}`, x: at.x, y: at.y, w, madeBy: ME }),
+        )
+      }
+      for (let i = 1; i < cards.length; i++) await writeEdge(p, name, { from: cards[i - 1]!.id, to: cards[i]!.id, madeBy: ME })
+      return Promise.all(cards.map(cardResolver(p)))
+    },
     "board:pin": async (name: string, pin: { kind: "passage" | "frame"; ref: string; rev?: string }): Promise<CardDTO> => {
       const p = need()
       if (pin.kind !== "passage" && pin.kind !== "frame") throw new Error(`Cannot pin a ${String(pin.kind)} card.`)

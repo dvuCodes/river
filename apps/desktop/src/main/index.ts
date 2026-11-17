@@ -1,18 +1,25 @@
+import { mkdirSync } from "node:fs"
 import { access, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { BrowserWindow, ClipboardItem, app, clipboard, ipcMain, nativeTheme, net, protocol } from "electron"
 import type { JobDeps } from "@river/agent"
 import { VIEWS, type ViewId } from "../shared/api"
-import { type Card, type Mark, loadBoard, loadCard, loadJob } from "@river/core"
+import { type Card, type Mark, loadBoard, loadCard, loadJob, saveCard, saveEdge } from "@river/core"
 import { type BoardEntity, onBoardWritten } from "./board"
 import { currentProject, onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
 import { getLastProject } from "./settings"
-import { scenePng, seedPerfBoard, seedRichBoard } from "./smokeBoard"
+import { STRIP_FRAMES, STRIP_SHOT, scenePng, seedPerfBoard, seedRichBoard, seedStripCapture } from "./smokeBoard"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const smokeDir = process.env["RIVER_SMOKE_DIR"]
 const isSmoke = Boolean(smokeDir)
+// Smoke runs that write settings (canvas theme, last board) keep them out of the user's own app data.
+const smokeUserData = isSmoke ? process.env["RIVER_SMOKE_USERDATA"] : undefined
+if (smokeUserData) {
+  mkdirSync(resolve(smokeUserData), { recursive: true })
+  app.setPath("userData", resolve(smokeUserData))
+}
 
 // Images of captures are served from the project root through this scheme; webSecurity stays on.
 protocol.registerSchemesAsPrivileged([
@@ -1020,6 +1027,232 @@ async function smokePerf(w: BrowserWindow, dir: string, waitFor: (view: ViewId, 
   return ready && report.fitPan.framesMoved > 0 && report.pan100.framesMoved > 0
 }
 
+/**
+ * The colour most of a row of screen pixels has, read from a capture of the window (what the user sees, not a style).
+ * The row runs along the top edge of `selector`, right of centre (clear of the board pill and fitted cards), so a stray grid dot or card cannot decide it.
+ */
+async function bgOf(w: BrowserWindow, selector: string): Promise<string> {
+  const r = await waitRect(w, selector, 3_000)
+  if (!r) return "none"
+  const img = await w.webContents.capturePage()
+  const { width } = img.getSize()
+  const k = width / ((await w.webContents.executeJavaScript("innerWidth")) as number)
+  const bmp = img.toBitmap()
+  const counts = new Map<string, number>()
+  for (let i = 0; i < 15; i++) {
+    const x = Math.round((r.x + r.w * (0.55 + i * 0.025)) * k)
+    const y = Math.round((r.y + Math.min(14, r.h * 0.02)) * k)
+    const o = (y * width + x) * 4
+    const c = `rgb(${bmp[o + 2]}, ${bmp[o + 1]}, ${bmp[o]})`
+    counts.set(c, (counts.get(c) ?? 0) + 1)
+  }
+  return [...counts].sort((a, b) => b[1] - a[1])[0]![0]
+}
+
+const PAPER_BG = "rgb(243, 241, 236)"
+const DARK_BG = "rgb(27, 26, 24)"
+
+async function savedSettings(): Promise<{ canvasTheme?: string; lastBoards?: Record<string, string> }> {
+  try {
+    return JSON.parse(await readFile(join(app.getPath("userData"), "river-settings.json"), "utf8")) as { canvasTheme?: string }
+  } catch {
+    return {}
+  }
+}
+
+async function dblClick(w: BrowserWindow, x: number, y: number): Promise<void> {
+  const [cx, cy] = [Math.round(x), Math.round(y)]
+  w.webContents.sendInputEvent({ type: "mouseMove", x: cx, y: cy })
+  for (const clickCount of [1, 2]) {
+    await sleep(40)
+    w.webContents.sendInputEvent({ type: "mouseDown", x: cx, y: cy, button: "left", clickCount })
+    await sleep(30)
+    w.webContents.sendInputEvent({ type: "mouseUp", x: cx, y: cy, button: "left", clickCount })
+  }
+  await sleep(200)
+}
+
+async function openBoardMenu(w: BrowserWindow): Promise<boolean> {
+  if (await rectOf(w, ".board-menu")) return true
+  return (await clickEl(w, ".board-pill", 3_000)) && Boolean(await waitRect(w, ".board-menu", 2_000))
+}
+
+async function closeBoardMenu(w: BrowserWindow): Promise<void> {
+  if (await rectOf(w, ".board-menu")) await clickEl(w, ".board-pill", 2_000)
+}
+
+/**
+ * RIVER_SMOKE_PREMIUM=1|2, two launches sharing RIVER_SMOKE_USERDATA and the project copy (smoke-premium.sh).
+ * Phase 1: a fresh board is paper beside the OS-dark shell and shows the three gestures; the board pill switches the
+ * canvas to dark (saved in settings) and renames the board; in Frames, unticking frames 2, 4 and 6 and sending puts
+ * three frame cards in a row joined by two connectors, and sending all six puts a second row below it.
+ * Phase 2 (after a restart): the renamed board opens again, still dark; the pill switches back to paper; a caption is
+ * edited by double-click and undone and redone; the lightbox steps to the next image with the arrow key; a scratch
+ * board is made and deleted after its confirm, and the last board cannot be deleted.
+ */
+async function smokePremium(w: BrowserWindow, dir: string, phase: "1" | "2", waitFor: (view: ViewId, ms: number) => Promise<boolean>, forget: (view: ViewId) => void): Promise<boolean> {
+  const p = currentProject()
+  if (!p) return false
+  const results: [string, boolean][] = []
+  const check = (name: string, ok: boolean) => {
+    results.push([name, ok])
+    console.log(`river smoke: ${ok ? "ok" : "FAILED"} ${name}`)
+  }
+  const pill = async () => (await w.webContents.executeJavaScript(`document.querySelector(".board-pill")?.dataset.board ?? ""`)) as string
+  const toCanvas = async () => {
+    w.webContents.send("smoke:navigate", "canvas")
+    if (!(await waitFor("canvas", 20_000))) console.warn("river smoke: canvas did not report ready")
+    w.focus()
+    w.webContents.focus()
+    await imagesSettled(w, 8_000)
+    await sleep(500)
+  }
+  const pickTheme = async (t: string) => {
+    await openBoardMenu(w)
+    await clickEl(w, `[data-theme-choice="${t}"]`, 2_000)
+    await sleep(200)
+    await closeBoardMenu(w)
+  }
+
+  if (phase === "1") {
+    await toCanvas()
+    const empty = Boolean(await waitRect(w, ".canvas-empty .empty-sheet", 3_000))
+    const steps = (await w.webContents.executeJavaScript(`document.querySelectorAll(".empty-steps li").length`)) as number
+    const canvasBg = await bgOf(w, ".canvas-wrap")
+    const shellBg = await bgOf(w, ".sidebar")
+    check(`a fresh board is paper (${canvasBg}) beside the dark shell (${shellBg}) and shows ${steps} gestures`, empty && steps === 3 && canvasBg === PAPER_BG && shellBg !== PAPER_BG)
+    await shoot(w, dir, "empty-paper.png")
+
+    await pickTheme("dark")
+    const darkBg = await bgOf(w, ".canvas-wrap")
+    check(`the board pill switches the canvas to dark (${darkBg}) and saves it`, darkBg === DARK_BG && (await savedSettings()).canvasTheme === "dark")
+    await shoot(w, dir, "empty-dark.png")
+
+    await openBoardMenu(w)
+    await clickEl(w, `[data-action="rename-board"][data-board="main"]`, 2_000)
+    await waitRect(w, ".board-rename input", 2_000)
+    await typeText(w, "arena")
+    await key(w, "Return")
+    const renamed = await until(async () => (await pill()) === "arena", 5_000)
+    const moved = (await exists(join(p.root, ".river", "boards", "arena", "board.json"))) && !(await exists(join(p.root, ".river", "boards", "main")))
+    const meta = JSON.parse(await readFile(join(p.root, ".river", "boards", "arena", "board.json"), "utf8").catch(() => "{}")) as { name?: string }
+    check(`renaming main to arena moves the folder and opens it (pill ${await pill()}, board.json name ${meta.name})`, renamed && moved && meta.name === "arena")
+    await closeBoardMenu(w)
+    if (!(await waitFor("canvas", 8_000))) console.warn("river smoke: canvas not ready after rename")
+
+    w.webContents.send("smoke:navigate", "frames")
+    await waitFor("frames", 10_000)
+    const thumbs = await until(async () => (await w.webContents.executeJavaScript(`document.querySelectorAll(".strip-thumb img").length`)) === STRIP_FRAMES, 8_000)
+    for (const i of [1, 3, 5]) await clickEl(w, `[data-pick="${i}"]`, 2_000)
+    await clickEl(w, `[data-action="send-strip"]`, 2_000)
+    await until(async () => Boolean(await rectOf(w, ".send-done")), 6_000)
+    await shoot(w, dir, "frames-strip.png")
+    const b1 = await loadBoard(p.root, "arena")
+    const row = [...b1.cards].sort((a, b) => a.x - b.x) as (Card & { frame?: number })[]
+    const linked = row.slice(1).every((c, i) => b1.edges.some((e) => e.from === row[i]!.id && e.to === c.id))
+    check(
+      `unticking frames 2, 4, 6 sends 3 cards in a row joined by ${b1.edges.length} connectors (frames ${row.map((c) => c.frame).join()}, captions ${row.map((c) => JSON.stringify(c.caption)).join(" ")})`,
+      thumbs && row.length === 3 && b1.edges.length === 2 && linked && row.map((c) => c.frame).join() === "0,2,4" && row.every((c) => c.y === row[0]!.y) && row[0]!.caption === `${STRIP_SHOT} · frame 1`,
+    )
+    for (const i of [1, 3, 5]) await clickEl(w, `[data-pick="${i}"]`, 2_000)
+    await clickEl(w, `[data-action="send-strip"]`, 2_000)
+    const all = await until(async () => (await loadBoard(p.root, "arena")).cards.length === 9, 6_000)
+    const b2 = await loadBoard(p.root, "arena")
+    const second = b2.cards.filter((c) => !b1.cards.some((x) => x.id === c.id))
+    const below = second.every((c) => c.y > row[0]!.y + 100)
+    check(`sending all six puts a second row of ${second.length} below the first, with ${b2.edges.length - 2} more connectors`, all && second.length === 6 && below && b2.edges.length === 7)
+
+    await clickEl(w, `[data-action="open-board"]`, 2_000)
+    forget("canvas")
+    await toCanvas()
+    await key(w, "1", ["shift"])
+    await sleep(700)
+    await imagesSettled(w, 8_000)
+    await shoot(w, dir, "strip-dark.png")
+  } else {
+    await toCanvas()
+    const board = await pill()
+    const bg = await bgOf(w, ".canvas-wrap")
+    check(`after a restart the canvas opens the last board (${board}) and stays dark (${bg})`, board === "arena" && bg === DARK_BG)
+
+    await pickTheme("paper")
+    const paper = await bgOf(w, ".canvas-wrap")
+    check(`switching back to paper (${paper}) is saved`, paper === PAPER_BG && (await savedSettings()).canvasTheme === "paper")
+
+    // A note of yours pointing at one frame, written from outside like an agent would, so the screenshot reads like a real board.
+    const strip = [...(await loadBoard(p.root, "arena")).cards].sort((a, b) => a.y - b.y || a.x - b.x).slice(0, 3)
+    const right = strip[2]!
+    const note = await saveCard(p.root, "arena", { kind: "note", ref: "", text: "hmm, he rises a beat late here. Can the shadow land on frame 4?", x: right.x + right.w + 80, y: right.y - 30, w: 250, madeBy: "you" })
+    await saveEdge(p.root, "arena", { from: note.id, to: right.id, madeBy: "you" })
+    await waitRect(w, `.react-flow__node[data-id="${note.id}"]`, 5_000)
+    await key(w, "1", ["shift"])
+    await sleep(700)
+    await imagesSettled(w, 8_000)
+    await shoot(w, dir, "strip-paper.png")
+    await openBoardMenu(w)
+    await sleep(200)
+    await shoot(w, dir, "board-menu-paper.png")
+    await closeBoardMenu(w)
+
+    const cards = (await loadBoard(p.root, "arena")).cards.filter((c) => c.kind === "frame")
+    const first = [...cards].sort((a, b) => a.y - b.y || a.x - b.x)[0]!
+    const next = [...cards].filter((c) => c.y === first.y && c.x > first.x).sort((a, b) => a.x - b.x)[0]!
+    const oldCaption = first.caption
+    const newCaption = "Move · Shadow step: he sinks into his shadow and rises ahead"
+    const cap = await centerOf(w, `.react-flow__node[data-id="${first.id}"] .cnode-cap`)
+    if (cap) await dblClick(w, cap[0], cap[1])
+    const editing = Boolean(await waitRect(w, ".cnode-cap-input", 2_000))
+    const noLightbox = !(await rectOf(w, ".lightbox"))
+    await typeText(w, newCaption)
+    const saved = waitBoardWrite("card", (c) => c.id === first.id && c.caption === newCaption, 4_000)
+    await key(w, "Return")
+    const wrote = (await saved) !== null
+    await shoot(w, dir, "caption-edited.png")
+    await key(w, "Z", ["control"])
+    const undone = await until(async () => (await loadCard(p.root, "arena", first.id))?.caption === oldCaption, 4_000)
+    await key(w, "Z", ["control", "shift"])
+    const redone = await until(async () => (await loadCard(p.root, "arena", first.id))?.caption === newCaption, 4_000)
+    check(`double-clicking a caption edits it in place (no lightbox), Enter saves, Ctrl+Z restores ${JSON.stringify(oldCaption)}, Ctrl+Shift+Z redoes`, editing && noLightbox && wrote && undone && redone)
+
+    const img = await centerOf(w, `.react-flow__node[data-id="${first.id}"] .cnode-frame`)
+    if (img) await dblClick(w, img[0], img[1])
+    const opened = await waitImage(w, ".lightbox img", 3_000)
+    const shown = async () => (await w.webContents.executeJavaScript(`[document.querySelector(".lightbox")?.dataset.card ?? "", document.querySelector(".lightbox-text")?.textContent ?? ""]`)) as [string, string]
+    const [id0, cap0] = await shown()
+    await shoot(w, dir, "lightbox-paper.png")
+    await key(w, "Right")
+    await sleep(250)
+    const [id1, cap1] = await shown()
+    await key(w, "Left")
+    await sleep(200)
+    const [id2] = await shown()
+    await key(w, "Escape")
+    const closed = await until(async () => !(await rectOf(w, ".lightbox")), 2_000)
+    check(`the lightbox shows the caption (${JSON.stringify(cap0)}), the right arrow steps to the next frame in reading order (${JSON.stringify(cap1)}), left steps back, Escape closes`, opened && id0 === first.id && cap0 === newCaption && id1 === next.id && cap1 === next.caption && id2 === first.id && closed)
+
+    await openBoardMenu(w)
+    await clickEl(w, ".board-new input", 2_000)
+    await typeText(w, "scratch")
+    await key(w, "Return")
+    const made = await until(async () => (await pill()) === "scratch", 5_000)
+    if (!(await waitFor("canvas", 8_000))) console.warn("river smoke: canvas not ready on scratch")
+    await openBoardMenu(w)
+    await clickEl(w, `[data-action="delete-board"][data-board="scratch"]`, 2_000)
+    const asked = Boolean(await waitRect(w, `[data-action="delete-board-confirm"]`, 2_000))
+    const stillThere = await exists(join(p.root, ".river", "boards", "scratch"))
+    await clickEl(w, `[data-action="delete-board-confirm"]`, 2_000)
+    const gone = await until(async () => !(await exists(join(p.root, ".river", "boards", "scratch"))), 5_000)
+    const back = await until(async () => (await pill()) === "arena", 5_000)
+    await openBoardMenu(w)
+    const lastLocked = (await w.webContents.executeJavaScript(`Boolean(document.querySelector('[data-action="delete-board"][data-board="arena"]')?.disabled)`)) as boolean
+    await closeBoardMenu(w)
+    check(`deleting a board asks first, sends it to the trash and opens the one left; the last board cannot be deleted`, made && asked && stillThere && gone && back && lastLocked)
+  }
+  const ok = results.every(([, r]) => r)
+  console.log(`river smoke: premium phase ${phase} ${ok ? "PASSED" : "FAILED"} (${results.filter(([, r]) => r).length}/${results.length})`)
+  return ok
+}
+
 async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
   const limit = process.env["RIVER_SMOKE_JOB"] === "1" || process.env["RIVER_SMOKE_PERF"] === "1" ? 300_000 : 180_000
   const hardStop = setTimeout(() => {
@@ -1049,6 +1282,17 @@ async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
     })
 
   await mkdir(dir, { recursive: true })
+  const phase = process.env["RIVER_SMOKE_PREMIUM"]
+  if (phase === "1" || phase === "2") {
+    if (!(await waitFor("story-map", 30_000))) console.warn("river smoke: story map did not report ready")
+    const ok = await smokePremium(w, dir, phase, waitFor, (v) => seen.delete(v)).catch((err: unknown) => {
+      console.error("river smoke: premium run threw", err)
+      return false
+    })
+    clearTimeout(hardStop)
+    app.exit(ok ? 0 : 1)
+    return
+  }
   if (process.env["RIVER_SMOKE_JOB"] === "1") {
     if (!(await waitFor("story-map", 30_000))) console.warn("river smoke: story map did not report ready")
     const ok = await smokeJob(w, dir, waitFor).catch((err: unknown) => {
@@ -1133,6 +1377,7 @@ app.whenReady().then(async () => {
   registerIpc(() => win, isSmoke && process.env["RIVER_SMOKE_JOB"] === "1" ? { jobDeps: smokeJobDeps } : {})
 
   const initial = isSmoke ? process.env["RIVER_PROJECT"] : (argProject() ?? process.env["RIVER_PROJECT"] ?? getLastProject())
+  if (initial && process.env["RIVER_SMOKE_PREMIUM"] === "1") await seedStripCapture(resolve(initial))
   if (initial) await openProject(resolve(initial), !isSmoke)
 
   win = createWindow()

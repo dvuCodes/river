@@ -1,127 +1,69 @@
 /* River — a calm, dense map-editor UI. River-stone neutrals, one teal current, ochre for conditions. */
 
 :root {
+  /* Every colour is light-dark(light, dark): an element's color-scheme picks the side, so the canvas can be paper while the shell follows the OS. */
   color-scheme: light dark;
   --font: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
   --mono: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
 
-  --bg: #efede7;
-  --canvas: #f6f5f1;
-  --panel: #fbfaf7;
-  --panel-2: #f1efe9;
-  --line: #dcd8cd;
-  --line-soft: #e8e5dd;
-  --text: #1f211e;
-  --text-2: #4a4c46;
-  --muted: #7a796f;
-  --accent: #0d7680;
-  --accent-ink: #ffffff;
-  --accent-soft: #d6ebec;
-  --cond: #9a5c12;
-  --cond-soft: #f6e8d3;
-  --danger: #bf3b27;
-  --danger-soft: #f8dfd9;
-  --ok: #3a7a39;
-  --ok-soft: #dfeedb;
-  --end: #3b5ba5;
-  --end-soft: #dfe5f4;
-  --edge: #9d9a8f;
-  --card: #ffffff;
-  --shadow: 0 1px 2px rgb(40 35 20 / 0.06), 0 4px 14px rgb(40 35 20 / 0.06);
+  --bg: light-dark(#efede7, #111416);
+  --canvas: light-dark(#f6f5f1, #15191b);
+  --panel: light-dark(#fbfaf7, #1a1f22);
+  --panel-2: light-dark(#f1efe9, #20262a);
+  --line: light-dark(#dcd8cd, #2d353a);
+  --line-soft: light-dark(#e8e5dd, #252c30);
+  --text: light-dark(#1f211e, #dfe4e3);
+  --text-2: light-dark(#4a4c46, #b4bcbb);
+  --muted: light-dark(#7a796f, #84908f);
+  --accent: light-dark(#0d7680, #4db6bd);
+  --accent-ink: light-dark(#ffffff, #0b1618);
+  --accent-soft: light-dark(#d6ebec, #173a3d);
+  --cond: light-dark(#9a5c12, #e2a75c);
+  --cond-soft: light-dark(#f6e8d3, #3a2c19);
+  --danger: light-dark(#bf3b27, #ef6b56);
+  --danger-soft: light-dark(#f8dfd9, #41211c);
+  --ok: light-dark(#3a7a39, #7fbb72);
+  --ok-soft: light-dark(#dfeedb, #1f3320);
+  --end: light-dark(#3b5ba5, #8ea8ea);
+  --end-soft: light-dark(#dfe5f4, #1f2a45);
+  --edge: light-dark(#9d9a8f, #5f6b6e);
+  --card: light-dark(#ffffff, #1e2427);
+  --shadow: 0 1px 2px light-dark(rgb(40 35 20 / 0.06), rgb(0 0 0 / 0.3)), 0 4px 14px light-dark(rgb(40 35 20 / 0.06), rgb(0 0 0 / 0.25));
   --radius: 6px;
   /* storyboard canvas: your marks are pink, agents are purple */
-  --pen: #e0287a;
-  --pen-soft: #fbe3ee;
-  --agent: #7b4fd6;
-  --agent-soft: #ece5fb;
+  --pen: light-dark(#e0287a, #ff5fa2);
+  --pen-soft: light-dark(#fbe3ee, #4a1f33);
+  --agent: light-dark(#7b4fd6, #b294ff);
+  --agent-soft: light-dark(#ece5fb, #2e2547);
   /* the board is warm paper: your notes are pink and handwritten, agents' notes lavender, connectors indigo */
   --hand: "Caveat", "Segoe Print", "Bradley Hand", cursive;
-  --board: #f3f1ec;
-  --board-dot: #cfcabe;
-  --ink: #23221f;
-  --cap: #5e5c55;
-  --star: #4b44c6;
-  --link: #4c47c4;
-  --sel: #c2215f;
-  --sel-gap: #ffffff;
-  --img-bg: #e6e3dc;
-  --note-you: #fde6ee;
-  --note-you-line: #c9346d;
-  --note-you-ink: #8f1748;
-  --note-agent: #ebeafb;
-  --note-agent-line: #d8d5f2;
-  --note-agent-ink: #2a2937;
-  --chrome: #ffffff;
-  --chrome-line: #e3e0d8;
-  --chrome-on: #eeece6;
-  --chrome-shadow: 0 1px 2px rgb(30 25 15 / 0.06), 0 6px 22px rgb(30 25 15 / 0.09);
-  --mm-bg: #ffffff;
-  --mm-mask: rgb(243 241 236 / 0.72);
-  --mm-view: #4c47c4;
-  --mm-image: #b9b4a9;
-  --mm-passage: #d6d2c8;
-  --mm-note-you: #e47aa3;
-  --mm-note-agent: #b4aef0;
-  --mm-mark: rgb(224 40 122 / 0.22);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #111416;
-    --canvas: #15191b;
-    --panel: #1a1f22;
-    --panel-2: #20262a;
-    --line: #2d353a;
-    --line-soft: #252c30;
-    --text: #dfe4e3;
-    --text-2: #b4bcbb;
-    --muted: #84908f;
-    --accent: #4db6bd;
-    --accent-ink: #0b1618;
-    --accent-soft: #173a3d;
-    --cond: #e2a75c;
-    --cond-soft: #3a2c19;
-    --danger: #ef6b56;
-    --danger-soft: #41211c;
-    --ok: #7fbb72;
-    --ok-soft: #1f3320;
-    --end: #8ea8ea;
-    --end-soft: #1f2a45;
-    --edge: #5f6b6e;
-    --card: #1e2427;
-    --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 18px rgb(0 0 0 / 0.25);
-    --pen: #ff5fa2;
-    --pen-soft: #4a1f33;
-    --agent: #b294ff;
-    --agent-soft: #2e2547;
-    --board: #1b1a18;
-    --board-dot: #3a3833;
-    --ink: #e9e6df;
-    --cap: #a8a59b;
-    --star: #a99dff;
-    --link: #9d96ff;
-    --sel: #ff6aa6;
-    --sel-gap: #1b1a18;
-    --img-bg: #2a2926;
-    --note-you: #3a1c2a;
-    --note-you-line: #d9508a;
-    --note-you-ink: #ffc4dc;
-    --note-agent: #26243a;
-    --note-agent-line: #3b3858;
-    --note-agent-ink: #dddbf0;
-    --chrome: #262522;
-    --chrome-line: #3a3833;
-    --chrome-on: #34322e;
-    --chrome-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 8px 24px rgb(0 0 0 / 0.35);
-    --mm-bg: #22211e;
-    --mm-mask: rgb(27 26 24 / 0.7);
-    --mm-view: #9d96ff;
-    --mm-image: #57544d;
-    --mm-passage: #46443e;
-    --mm-note-you: #b84a7a;
-    --mm-note-agent: #6a62b8;
-    --mm-mark: rgb(255 95 162 / 0.25);
-  }
+  --board: light-dark(#f3f1ec, #1b1a18);
+  --board-dot: light-dark(#cfcabe, #3a3833);
+  --ink: light-dark(#23221f, #e9e6df);
+  --cap: light-dark(#5e5c55, #a8a59b);
+  --star: light-dark(#4b44c6, #a99dff);
+  --link: light-dark(#4c47c4, #9d96ff);
+  --sel: light-dark(#c2215f, #ff6aa6);
+  --sel-gap: light-dark(#ffffff, #1b1a18);
+  --img-bg: light-dark(#e6e3dc, #2a2926);
+  --note-you: light-dark(#fde6ee, #3a1c2a);
+  --note-you-line: light-dark(#c9346d, #d9508a);
+  --note-you-ink: light-dark(#8f1748, #ffc4dc);
+  --note-agent: light-dark(#ebeafb, #26243a);
+  --note-agent-line: light-dark(#d8d5f2, #3b3858);
+  --note-agent-ink: light-dark(#2a2937, #dddbf0);
+  --chrome: light-dark(#ffffff, #262522);
+  --chrome-line: light-dark(#e3e0d8, #3a3833);
+  --chrome-on: light-dark(#eeece6, #34322e);
+  --chrome-shadow: 0 1px 2px light-dark(rgb(30 25 15 / 0.06), rgb(0 0 0 / 0.35)), 0 6px 22px light-dark(rgb(30 25 15 / 0.09), rgb(0 0 0 / 0.35));
+  --mm-bg: light-dark(#ffffff, #22211e);
+  --mm-mask: light-dark(rgb(243 241 236 / 0.72), rgb(27 26 24 / 0.7));
+  --mm-view: light-dark(#4c47c4, #9d96ff);
+  --mm-image: light-dark(#b9b4a9, #57544d);
+  --mm-passage: light-dark(#d6d2c8, #46443e);
+  --mm-note-you: light-dark(#e47aa3, #b84a7a);
+  --mm-note-agent: light-dark(#b4aef0, #6a62b8);
+  --mm-mark: light-dark(rgb(224 40 122 / 0.22), rgb(255 95 162 / 0.25));
 }
 
 * {
@@ -1495,6 +1437,101 @@ input[type="checkbox"] {
   margin: 0;
   color: var(--muted);
   font-size: 11px;
+}
+.single .frame img {
+  max-height: max(240px, calc(100vh - 420px));
+  width: auto;
+}
+.send-board {
+  margin-top: 10px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.send-board.is-single {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.send-board.is-single .send-done,
+.send-board.is-single .err-note {
+  flex-basis: 100%;
+}
+.strip-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.strip-title {
+  font-weight: 600;
+  color: var(--text);
+}
+.strip-every {
+  height: 26px;
+}
+.strip-frames {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin: 10px 0 0;
+  padding: 2px;
+}
+.strip-frame {
+  position: relative;
+  flex: none;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+.strip-thumb {
+  display: block;
+  width: 104px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 5px;
+  background: none;
+  line-height: 0;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 120ms ease, border-color 120ms ease;
+}
+.strip-thumb img {
+  width: 100%;
+  height: auto;
+  border-radius: 3px;
+}
+.strip-frame.is-picked .strip-thumb {
+  opacity: 1;
+}
+.strip-frame.is-viewing .strip-thumb {
+  border-color: var(--accent);
+}
+.strip-pick {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.strip-link {
+  position: absolute;
+  top: 34px;
+  right: -16px;
+  width: 14px;
+  height: 1.5px;
+  background: var(--edge);
+}
+.strip-frame:not(.is-picked) .strip-link {
+  opacity: 0.35;
+}
+.send-done {
+  margin: 8px 0 0;
+  color: var(--text-2);
 }
 .compare {
   display: grid;

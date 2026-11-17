@@ -1,7 +1,7 @@
 import { useReactFlow, useViewport, useViewportStore } from "@xyflow/react"
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react"
 import type { Mark, MarkStatus } from "@river/core"
-import type { JobDTO } from "../../../shared/api"
+import type { CanvasTheme, JobDTO } from "../../../shared/api"
 import { cx, errorText, shortTime } from "../util"
 import type { Pt } from "./geometry"
 import { ME } from "./nodes"
@@ -41,25 +41,135 @@ export function ToolBar(props: { tool: Tool; onTool(t: Tool): void }) {
 // ---------- board pill ----------
 
 const BOARD_NAME = /^[a-z0-9_-]{1,64}$/
+const boardName = (raw: string) => raw.trim().toLowerCase().replace(/\s+/g, "-")
+const NAME_RULE = "Use a to z, 0 to 9, - and _ (at most 64)."
 
-export function BoardPill(props: { board: string; items: number; openMarks: number; onBoard(name: string): void }) {
+const THEMES: { id: CanvasTheme; label: string; title: string }[] = [
+  { id: "paper", label: "Paper", title: "Warm paper, whatever the OS uses" },
+  { id: "dark", label: "Dark", title: "A dark board" },
+  { id: "system", label: "System", title: "Follow the OS: paper in light mode, dark in dark mode" },
+]
+
+/** One board in the menu: open it, rename it in place, or delete it after asking. */
+function BoardRow(props: { name: string; current: boolean; last: boolean; onOpen(): void; onRename(to: string): Promise<void>; onDelete(): Promise<void> }) {
+  const [mode, setMode] = useState<"idle" | "rename" | "confirm">("idle")
+  const [draft, setDraft] = useState(props.name)
+  const [err, setErr] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const run = (fn: () => Promise<void>) => {
+    setBusy(true)
+    fn().then(
+      () => {
+        setBusy(false)
+        setMode("idle")
+      },
+      (e: unknown) => {
+        setBusy(false)
+        setErr(errorText(e))
+      },
+    )
+  }
+  if (mode === "rename") {
+    return (
+      <li className="board-row is-editing">
+        <form
+          className="board-rename"
+          onSubmit={(e) => {
+            e.preventDefault()
+            const to = boardName(draft)
+            if (!BOARD_NAME.test(to)) return setErr(NAME_RULE)
+            run(() => props.onRename(to))
+          }}
+        >
+          <input
+            autoFocus
+            value={draft}
+            aria-label={`New name for ${props.name}`}
+            onFocus={(e) => e.currentTarget.select()}
+            onChange={(e) => (setDraft(e.target.value), setErr(null))}
+            onKeyDown={(e) => {
+              if (e.key !== "Escape") return
+              e.preventDefault()
+              e.stopPropagation()
+              setMode("idle")
+              setErr(null)
+            }}
+          />
+          <button className="btn" data-action="rename-save" disabled={busy || !draft.trim()}>
+            Save
+          </button>
+        </form>
+        {err && <p className="err-note">{err}</p>}
+      </li>
+    )
+  }
+  if (mode === "confirm") {
+    return (
+      <li className="board-row is-confirming">
+        <p className="board-confirm">
+          Delete <b>{props.name}</b>? Its cards and marks go to the trash.
+        </p>
+        <div className="board-confirm-actions">
+          <button className="btn" onClick={() => setMode("idle")}>
+            Keep it
+          </button>
+          <button className="btn btn-danger" data-action="delete-board-confirm" disabled={busy} onClick={() => run(props.onDelete)}>
+            Delete
+          </button>
+        </div>
+        {err && <p className="err-note">{err}</p>}
+      </li>
+    )
+  }
+  return (
+    <li className="board-row">
+      <button className={cx("board-menu-item", props.current && "is-current")} onClick={props.onOpen}>
+        {props.name}
+        {props.current && <span className="board-menu-check">✓</span>}
+      </button>
+      <span className="board-row-tools">
+        <button className="row-icon" data-action="rename-board" data-board={props.name} title={`Rename ${props.name}`} aria-label={`Rename ${props.name}`} onClick={() => (setDraft(props.name), setMode("rename"))}>
+          <svg viewBox="0 0 16 16" aria-hidden>
+            <path d="M3 13l1-3.2 6.6-6.6 2.2 2.2L6.2 12zM9.6 4.2l2.2 2.2" />
+          </svg>
+        </button>
+        <button
+          className="row-icon is-danger"
+          data-action="delete-board"
+          data-board={props.name}
+          disabled={props.last}
+          title={props.last ? "The only board cannot be deleted" : `Delete ${props.name}`}
+          aria-label={`Delete ${props.name}`}
+          onClick={() => setMode("confirm")}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden>
+            <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5M7 7v4M9 7v4" />
+          </svg>
+        </button>
+      </span>
+    </li>
+  )
+}
+
+export function BoardPill(props: { board: string; items: number; openMarks: number; theme: CanvasTheme; onTheme(t: CanvasTheme): void; onBoard(name: string): void }) {
   const [open, setOpen] = useState(false)
   const [boards, setBoards] = useState<string[] | null>(null)
   const [draft, setDraft] = useState("")
   const [err, setErr] = useState<string | null>(null)
+  const list = () => window.river.boardList().then(setBoards, (e: unknown) => setErr(errorText(e)))
   useEffect(() => {
-    if (!open) return
-    window.river.boardList().then(setBoards, (e: unknown) => setErr(errorText(e)))
+    if (open) void list()
   }, [open])
   const create = () => {
-    const name = draft.trim().toLowerCase().replace(/\s+/g, "-")
-    if (!BOARD_NAME.test(name)) return setErr("Use a to z, 0 to 9, - and _ (at most 64).")
+    const name = boardName(draft)
+    if (!BOARD_NAME.test(name)) return setErr(NAME_RULE)
     setOpen(false)
     props.onBoard(name)
   }
+  const shown = boards ?? [props.board]
   return (
     <div className="board-pill-wrap" onPointerDown={(e) => e.stopPropagation()}>
-      <button className={cx("board-pill", open && "is-open")} data-board={props.board} onClick={() => setOpen((o) => !o)} title="Switch board">
+      <button className={cx("board-pill", open && "is-open")} data-board={props.board} onClick={() => setOpen((o) => !o)} title="Boards and canvas look">
         <span className="board-logo" aria-hidden>
           <svg viewBox="0 0 16 16">
             <rect x="2" y="2.5" width="5" height="5" rx="1.2" />
@@ -74,24 +184,35 @@ export function BoardPill(props: { board: string; items: number; openMarks: numb
             {props.openMarks} open mark{props.openMarks === 1 ? "" : "s"}
           </span>
         </span>
+        <svg className="board-caret" viewBox="0 0 16 16" aria-hidden>
+          <path d="M4.5 6.5L8 10l3.5-3.5" />
+        </svg>
       </button>
       {open && (
         <div className="board-menu">
           <div className="board-menu-head">Boards</div>
           <ul>
-            {(boards ?? [props.board]).map((b) => (
-              <li key={b}>
-                <button
-                  className={cx("board-menu-item", b === props.board && "is-current")}
-                  onClick={() => {
-                    setOpen(false)
-                    if (b !== props.board) props.onBoard(b)
-                  }}
-                >
-                  {b}
-                  {b === props.board && <span className="board-menu-check">✓</span>}
-                </button>
-              </li>
+            {shown.map((b) => (
+              <BoardRow
+                key={b}
+                name={b}
+                current={b === props.board}
+                last={shown.length <= 1}
+                onOpen={() => {
+                  setOpen(false)
+                  if (b !== props.board) props.onBoard(b)
+                }}
+                onRename={async (to) => {
+                  await window.river.boardRename(b, to)
+                  if (b === props.board) props.onBoard(to)
+                  await list()
+                }}
+                onDelete={async () => {
+                  const left = await window.river.boardDelete(b)
+                  setBoards(left)
+                  if (b === props.board) props.onBoard(left.includes("main") ? "main" : left[0]!)
+                }}
+              />
             ))}
           </ul>
           <form
@@ -107,6 +228,15 @@ export function BoardPill(props: { board: string; items: number; openMarks: numb
             </button>
           </form>
           {err && <p className="err-note">{err}</p>}
+          <div className="board-menu-head board-menu-sep">Canvas</div>
+          <div className="theme-seg" role="radiogroup" aria-label="Canvas look">
+            {THEMES.map((t) => (
+              <button key={t.id} role="radio" aria-checked={props.theme === t.id} className={cx("theme-opt", props.theme === t.id && "is-on")} data-theme-choice={t.id} title={t.title} onClick={() => props.onTheme(t.id)}>
+                <span className={cx("theme-swatch", `sw-${t.id}`)} aria-hidden />
+                {t.label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -193,26 +323,64 @@ export function QuickJump(props: { items: JumpItem[]; onPick(id: string): void; 
 
 // ---------- lightbox ----------
 
-export function Lightbox(props: { url: string; caption: string; onClose(): void }) {
+export interface LightboxItem {
+  id: string
+  url: string
+  caption: string
+}
+
+/** One image large, with its caption; the arrow keys and the side buttons step through the board's images in reading order. */
+export function Lightbox(props: { items: LightboxItem[]; at: number; onAt(i: number): void; onClose(): void }) {
   const box = useRef<HTMLDivElement>(null)
-  // Focus moves into the lightbox, so Escape reaches it even when a card had focus.
+  const n = props.items.length
+  const item = props.items[props.at]
+  // Focus moves into the lightbox, so Escape and the arrows reach it even when a card had focus.
   useEffect(() => box.current?.focus(), [])
+  if (!item) return null
+  const step = (d: number) => props.onAt((props.at + d + n) % n)
+  const nav = (d: number, label: string, glyph: string) =>
+    n > 1 && (
+      <button
+        className={cx("lightbox-nav", d < 0 ? "is-prev" : "is-next")}
+        data-lightbox={d < 0 ? "prev" : "next"}
+        aria-label={label}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={() => step(d)}
+      >
+        {glyph}
+      </button>
+    )
   return (
     <div
       ref={box}
       className="lightbox"
       tabIndex={-1}
       role="dialog"
-      aria-label={props.caption}
+      aria-label={item.caption}
+      data-card={item.id}
       onPointerDown={props.onClose}
       onKeyDown={(e) => {
-        if (e.key !== "Escape") return
+        if (e.key === "Escape") props.onClose()
+        else if (e.key === "ArrowRight" || e.key === "ArrowDown") step(1)
+        else if (e.key === "ArrowLeft" || e.key === "ArrowUp") step(-1)
+        else return
+        e.preventDefault()
         e.stopPropagation()
-        props.onClose()
       }}
     >
-      <img src={props.url} alt={props.caption} />
-      {props.caption && <p className="lightbox-cap">{props.caption}</p>}
+      <figure className="lightbox-fig">
+        <img key={item.url} src={item.url} alt={item.caption} />
+        <figcaption className="lightbox-cap">
+          {item.caption && <span className="lightbox-text">{item.caption}</span>}
+          {n > 1 && (
+            <span className="lightbox-count mono">
+              {props.at + 1} / {n}
+            </span>
+          )}
+        </figcaption>
+      </figure>
+      {nav(-1, "Previous image", "‹")}
+      {nav(1, "Next image", "›")}
     </div>
   )
 }

@@ -15,6 +15,7 @@ import {
   type ReviewThread,
   type StateSchema,
   type Story,
+  DEFAULT_BOARD,
   addThread,
   captureShot,
   contentPassages,
@@ -22,6 +23,7 @@ import {
   evalCond,
   formatCond,
   lint,
+  listBoards,
   listCaptures,
   listPlans,
   listStories,
@@ -49,6 +51,7 @@ import type {
   AgentPrefsUpdate,
   AgentStartRequest,
   AgentStatus,
+  CanvasTheme,
   CaptureDTO,
   FramesDTO,
   JobDTO,
@@ -106,11 +109,14 @@ export async function openProject(root: string, remember = true): Promise<void> 
 
 async function projectInfo(): Promise<ProjectInfo | null> {
   if (!project) {
-    return projectError ? { root: projectError.root, name: "", engine: "", stories: [], shots: [], error: projectError.message } : null
+    return projectError ? { root: projectError.root, name: "", board: DEFAULT_BOARD, engine: "", stories: [], shots: [], error: projectError.message } : null
   }
+  const boards = await listBoards(project.root)
+  const last = settings.getLastBoard(project.root)
   return {
     root: project.root,
     name: project.manifest.name,
+    board: last && boards.includes(last) ? last : boards.includes(DEFAULT_BOARD) || boards.length === 0 ? DEFAULT_BOARD : boards[0]!,
     engine: project.manifest.engine,
     stories: await listStories(project),
     shots: project.manifest.shots,
@@ -355,7 +361,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
   handle("review:status", (threadId: string, status: ReviewStatus) => setStatus(need(), threadId, status))
   handle("plan:status", (planId: string, status: ChangePlan["status"]) => setPlanStatus(need(), planId, status))
 
-  for (const [channel, fn] of Object.entries(boardHandlers(need, (dir) => projectWatch?.add(dir), getWindow))) {
+  for (const [channel, fn] of Object.entries(boardHandlers(need, { add: (dir) => projectWatch?.add(dir), remove: (dir) => projectWatch?.remove(dir) }, getWindow))) {
     handle(channel, fn as (...args: unknown[]) => Promise<unknown>)
   }
 
@@ -371,6 +377,8 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     if (!agent.claudeSignIn) throw new Error(agent.reason ?? "The agent is unavailable.")
     await agent.claudeSignIn(settings.getAgentPrefs().claudePath)
   })
+  handle("settings:canvasTheme", () => settings.getCanvasTheme())
+  handle("settings:setCanvasTheme", (t: CanvasTheme) => settings.setCanvasTheme(t))
   handle("settings:setKey", async (key: string) => {
     await settings.setApiKey(key)
     return agentStatus()
