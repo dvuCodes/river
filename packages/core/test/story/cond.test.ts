@@ -59,31 +59,31 @@ describe("conditions", () => {
 
 describe("effects", () => {
   const schema: StateSchema = {
-    irk: { type: "number", min: 0, max: 100 },
+    fear: { type: "number", min: 0, max: 100 },
     energy: { type: "int", min: 0, max: 10, initial: 5 },
     mood: { type: "enum", values: ["CALM", "SURGE"] },
     seen: { type: "bool" },
   }
 
   it("parses and formats", () => {
-    const e = parseEffects("irk += 35, energy -= 8, mood = SURGE, seen = true")
+    const e = parseEffects("fear += 35, energy -= 8, mood = SURGE, seen = true")
     expect(e).toEqual([
-      { variable: "irk", op: "add", amount: 35 },
+      { variable: "fear", op: "add", amount: 35 },
       { variable: "energy", op: "add", amount: -8 },
       { variable: "mood", op: "set", amount: "SURGE" },
       { variable: "seen", op: "set", amount: true },
     ])
-    expect(formatEffects(e)).toBe("irk += 35, energy -= 8, mood = SURGE, seen = true")
+    expect(formatEffects(e)).toBe("fear += 35, energy -= 8, mood = SURGE, seen = true")
     expect(parseEffects(formatEffects(e))).toEqual(e)
-    expect(() => parseEffects("irk += lots")).toThrow()
-    expect(() => parseEffects("irk")).toThrow()
+    expect(() => parseEffects("fear += lots")).toThrow()
+    expect(() => parseEffects("fear")).toThrow()
   })
 
   it("applies with clamping and leaves the input alone", () => {
     const s0 = initialState(schema)
-    expect(s0).toEqual({ irk: 0, energy: 5, mood: "CALM", seen: false })
-    const s1 = applyEffects(s0, parseEffects("irk += 135, energy -= 8, mood = SURGE, seen = true"), schema)
-    expect(s1).toEqual({ irk: 100, energy: 0, mood: "SURGE", seen: true })
-    expect(s0.irk).toBe(0)
+    expect(s0).toEqual({ fear: 0, energy: 5, mood: "CALM", seen: false })
+    const s1 = applyEffects(s0, parseEffects("fear += 135, energy -= 8, mood = SURGE, seen = true"), schema)
+    expect(s1).toEqual({ fear: 100, energy: 0, mood: "SURGE", seen: true })
+    expect(s0.fear).toBe(0)
   })
 })

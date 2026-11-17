@@ -27,7 +27,7 @@ describe("link split", () => {
 
 describe("slug", () => {
   it("makes ids", () => {
-    expect(slug("Squirrel!")).toBe("squirrel")
+    expect(slug("Pond!")).toBe("pond")
     expect(slug("Maple corner")).toBe("maple_corner")
     expect(slug("Café  Noir 2")).toBe("cafe_noir_2")
   })
