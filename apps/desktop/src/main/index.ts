@@ -725,6 +725,66 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   }, 4_000)
   check(`deleting a card removes its ${beatEdges.length} connectors and Ctrl+Z restores them`, beatEdges.length === 2 && cascade && restored)
 
+  // Shift-click two cards at different heights, then "Arrange in a row" lines them up; Ctrl+Z puts them back.
+  await key(w, "Escape")
+  const research0 = await card("research")
+  const optA0 = await card("optA")
+  await clickEl(w, node("research", ".note-text"), 3_000)
+  const optA = await centerOf(w, node("optA", ".cnode-frame"))
+  if (optA) {
+    // React Flow reads the multi-select key from key events, so Shift is held as a key around the click.
+    w.webContents.sendInputEvent({ type: "keyDown", keyCode: "Shift", modifiers: ["shift"] })
+    await sleep(50)
+    w.webContents.sendInputEvent({ type: "mouseMove", x: Math.round(optA[0]), y: Math.round(optA[1]), modifiers: ["shift"] })
+    w.webContents.sendInputEvent({ type: "mouseDown", x: Math.round(optA[0]), y: Math.round(optA[1]), button: "left", clickCount: 1, modifiers: ["shift"] })
+    await sleep(30)
+    w.webContents.sendInputEvent({ type: "mouseUp", x: Math.round(optA[0]), y: Math.round(optA[1]), button: "left", clickCount: 1, modifiers: ["shift"] })
+    await sleep(50)
+    w.webContents.sendInputEvent({ type: "keyUp", keyCode: "Shift" })
+    await sleep(200)
+  }
+  const both = (await w.webContents.executeJavaScript(`document.querySelectorAll(".react-flow__node.selected").length`)) as number
+  const rowSaved = waitBoardWrite("card", (c) => c.id === id("optA"), 4_000)
+  await clickEl(w, `[data-action="row"]`, 2_000)
+  const lined = await rowSaved
+  check(`shift-click adds to the selection (${both} selected) and "Arrange in a row" top-aligns them`, both === 2 && lined !== null && research0 !== undefined && lined.y === research0.y && lined.x > research0.x)
+  await key(w, "Z", ["control"])
+  await until(async () => (await card("optA"))?.y === optA0?.y, 3_000)
+
+  // Note tool: click to place a note, type, Escape saves the text; Ctrl+Z takes the text back.
+  await key(w, "Escape")
+  await clickEl(w, `[data-tool="note"]`, 2_000)
+  const placing = waitBoardWrite("card", (c) => c.kind === "note" && c.text === "" && !Object.values(ids).includes(c.id), 4_000)
+  if (pane) await click(w, pane.x + pane.w * 0.55, pane.y + pane.h * 0.62)
+  const placed = await placing
+  const input = await waitRect(w, ".note-input", 2_000)
+  const focus = (await w.webContents.executeJavaScript(`(document.activeElement?.tagName ?? "") + "." + (document.activeElement?.className ?? "")`)) as string
+  await typeText(w, "warmer lamps")
+  const typed = waitBoardWrite("card", (c) => c.id === placed?.id && c.text === "warmer lamps", 4_000)
+  await key(w, "Escape")
+  const noted = await typed
+  await key(w, "Z", ["control"])
+  const unTyped = placed ? await until(async () => (await loadCard(p.root, "main", placed.id))?.text === "", 3_000) : false
+  const onDisk = placed ? (await loadCard(p.root, "main", placed.id))?.text : undefined
+  check(`a new note takes typing inline, saves on Escape, and Ctrl+Z takes the text back (input ${input ? "shown" : "missing"}, focus "${focus}", saved ${JSON.stringify(noted?.text ?? null)}, after undo ${JSON.stringify(onDisk ?? null)})`, noted !== null && unTyped)
+
+  // Board pill: create a second board, it opens empty; switch back to main.
+  await key(w, "Escape")
+  await clickEl(w, ".board-pill", 2_000)
+  await clickEl(w, ".board-new input", 2_000)
+  await typeText(w, "second")
+  await key(w, "Return")
+  const second = await waitRect(w, `.board-pill[data-board="second"]`, 5_000)
+  const secondEmpty = second ? await until(async () => (await w.webContents.executeJavaScript(`document.querySelectorAll(".react-flow__node").length`)) === 0, 3_000) : false
+  await clickEl(w, ".board-pill", 2_000)
+  const menu = (await w.webContents.executeJavaScript(`[...document.querySelectorAll(".board-menu-item")].map((b) => b.textContent.replace("✓", "").trim()).join()`)) as string
+  await w.webContents.executeJavaScript(`[...document.querySelectorAll(".board-menu-item")].find((b) => b.textContent.trim() === "main")?.setAttribute("data-smoke", "main")`)
+  await clickEl(w, `.board-menu-item[data-smoke="main"]`, 2_000)
+  const back = await waitRect(w, `.board-pill[data-board="main"]`, 5_000)
+  check(`the board pill creates "second" (empty, listed as ${menu}) and switches back to main`, second !== null && secondEmpty && menu === "main,second" && back !== null && (await exists(join(p.root, ".river", "boards", "second", "board.json"))))
+  if (!(await waitFor("canvas", 8_000))) console.warn("river smoke: canvas not ready after switching back")
+  await sleep(600)
+
   // Double-click an image: lightbox; Escape closes it.
   const img = await centerOf(w, node("optA", ".cnode-frame"))
   if (img) {

@@ -70,6 +70,20 @@ function NoteBody({ id, text }: { id: string; text: string }) {
     el.style.height = "auto"
     el.style.height = `${el.scrollHeight}px`
   }, [draft, editing])
+  // React Flow keeps a new node hidden until it has measured it, and a hidden textarea cannot take focus.
+  useEffect(() => {
+    if (!editing) return
+    let frame = 0
+    let tries = 0
+    const focus = () => {
+      const el = area.current
+      if (!el || document.activeElement === el) return
+      el.focus()
+      if (document.activeElement !== el && tries++ < 20) frame = requestAnimationFrame(focus)
+    }
+    focus()
+    return () => cancelAnimationFrame(frame)
+  }, [editing])
   const finish = () => {
     setEditing(false)
     if (draft !== text) actions.editText(id, draft)
@@ -88,7 +102,6 @@ function NoteBody({ id, text }: { id: string; text: string }) {
       value={draft}
       placeholder="Write a note…"
       rows={2}
-      autoFocus
       onFocus={(e) => e.currentTarget.setSelectionRange(e.currentTarget.value.length, e.currentTarget.value.length)}
       onBlur={finish}
       onChange={(e) => setDraft(e.target.value)}

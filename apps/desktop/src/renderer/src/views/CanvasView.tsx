@@ -283,8 +283,9 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
       const old = new Map(prev.map((n) => [n.id, n]))
       const next: BoardNode[] = [...cardList.map((dto) => cardNode(dto, old.get(dto.card.id))), ...markList.map((m) => markNode(m, old.get(m.id)))]
       const select = selectNext.current
-      if (!select || !next.some((n) => select.has(n.id))) return next
-      selectNext.current = null
+      if (!select) return next
+      // The copies arrive one by one as main saves them.
+      if (next.filter((n) => select.has(n.id)).length === select.size) selectNext.current = null
       return next.map((n) => (n.selected === select.has(n.id) ? n : { ...n, selected: select.has(n.id) }))
     })
   }, [cardList, markList])
@@ -331,6 +332,8 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
           const v = dto.view
           const job = v.kind === "concept" && v.job && v.job.status !== "accepted" && v.job.status !== "dismissed" ? v.job : undefined
           if (job) {
+            // The job owns its cards and connectors; dismissing it removes them, and that is not undoable.
+            gone.delete(id)
             putCard(id, null)
             window.river.jobDismiss(job.id).catch((e: unknown) => {
               fail(e)
@@ -388,6 +391,20 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
       }
     }
     void commit(step)
+  }
+
+  /** Arrow keys move a focused node without a drag; those moves are saved once the keys rest, as one step. */
+  const keyMoves = useRef<{ ids: Set<string>; timer: number | undefined }>({ ids: new Set(), timer: undefined })
+  const noteSettledMoves = (ids: string[]) => {
+    if (ids.length === 0) return
+    const km = keyMoves.current
+    for (const id of ids) km.ids.add(id)
+    window.clearTimeout(km.timer)
+    km.timer = window.setTimeout(() => {
+      const moved = flow.getNodes().filter((n) => km.ids.has(n.id))
+      km.ids.clear()
+      persistMoves(moved)
+    }, 250)
   }
 
   const selection = () => ({ nodes: flow.getNodes().filter((n) => n.selected), edges: flow.getEdges().filter((e) => e.selected) })
@@ -711,10 +728,11 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
             edges={links}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
-            onNodesChange={(changes) =>
+            onNodesChange={(changes) => {
+              noteSettledMoves([...changes].filter((c) => c.type === "position" && c.position && !c.dragging).map((c) => c.id))
               // A card's height follows its content: never keep a height that a resize wrote.
               setNodes((ns) => changes.applyTo(ns).map((n) => (n.type === "card" && n.height !== undefined ? { ...n, height: undefined } : n)))
-            }
+            }}
             onEdgesChange={(changes) => setLinks((es) => changes.applyTo(es))}
             onNodeDragStop={(_e, _n, moved) => persistMoves(moved)}
             onSelectionDragStop={(_e, moved) => persistMoves(moved)}
