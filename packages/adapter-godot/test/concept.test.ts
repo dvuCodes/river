@@ -220,10 +220,56 @@ describe("linesToRead", () => {
     expect(marked(`${DRAW}\tvar d = self.get("x")\n`)).toEqual([9])
     expect(marked(`${DRAW}\tKit.no_such(img)\n`)).toEqual([9])
     expect(marked(`${DRAW}\tvar t = Time.get_ticks_msec()\n`)).toEqual([9])
-    expect(marked(`${DRAW}\tvar s = "a\n\timg.fill(Color.RED)\n`)).toEqual([9])
     expect(linesToRead(`${DRAW}\tvar s = "a\\\nb"\n\tvar o = OS\n`).at(-1)).toEqual({ line: 11, reason: "uses OS" })
     expect(marked(`@tool\n${DRAW}`)).toEqual([1])
-    expect(marked(`${DRAW}\tvar s = """\nOS\n"""\n`)).toEqual([])
+  })
+
+  it("follows a string across lines as Godot does, and marks every line a string spans", () => {
+    // Godot keeps a "…" string open across a newline, escaped or not; the line it runs onto is code to Godot only after the quote.
+    expect(linesToRead(`${DRAW}\tvar s = "a\n\timg.fill(Color.RED)\n`)).toEqual([
+      { line: 9, reason: "has a string that goes on to the next line" },
+      { line: 10, reason: "starts inside the string from line 9" },
+    ])
+    expect(linesToRead(`${DRAW}\tvar s = """\nOS\n"""\n`)).toEqual([
+      { line: 9, reason: "has a string that goes on to the next line" },
+      { line: 10, reason: "starts inside the string from line 9" },
+      { line: 11, reason: "starts inside the string from line 9" },
+    ])
+    expect(marked(`${DRAW}\tvar s = 'a\\'b' # it's\n\tvar t = """x\\"""" + str(s)\n`)).toEqual([10])
+    // In a raw string too, a backslash keeps the quote after it from closing the string.
+    expect(linesToRead(`${DRAW}\tvar s = r"\\" + OS.get_name()\n`)).toEqual([
+      { line: 9, reason: "has a string that goes on to the next line" },
+      { line: 10, reason: "starts inside the string from line 9" },
+    ])
+    expect(marked(`${DRAW}\tvar n = &"name"\n\tvar r = r"raw"\n`)).toEqual([])
+    expect(linesToRead(`${DRAW}\tvar p = ^"Node/Path"\n`)).toEqual([{ line: 9, reason: "has an annotation or a node path" }])
+  })
+
+  it("highlights a code line disguised as the wrapped tail of a comment after a string Godot continues", () => {
+    // A third review's script: the comment on line 10 fills the dialog row, line 11 starts at column 0 inside the brackets.
+    const disguised = `extends RefCounted
+
+func draw(img: Image) -> void:
+	var w := img.get_width()
+	var h := img.get_height()
+	var sky = "dusk\\
+" + str(w) + """
+"""
+	Kit.vgradient(img, Rect2i(0, 0, w, h), Color(0.2, 0.2, 0.4), Color(0.9, 0.6, 0.4))
+	var pts = [Vector2(0, h), # the hill, left to right so the sky meets the ground evenly and the path runs from the
+["/tmp/out.png"].map(img.get("sa" + "ve_png"))]
+	Kit.ridge(img, h * 0.7, 30.0, Color(0.3, 0.45, 0.3), 1)
+	var t = """
+"""
+`
+    expect(linesToRead(disguised)).toEqual([
+      { line: 6, reason: "has a string that goes on to the next line" },
+      { line: 7, reason: "uses str; starts inside the string from line 6; has a string that goes on to the next line" },
+      { line: 8, reason: "starts inside the string from line 7" },
+      { line: 11, reason: "uses map, get" },
+      { line: 13, reason: "has a string that goes on to the next line" },
+      { line: 14, reason: "starts inside the string from line 13" },
+    ])
   })
 })
 

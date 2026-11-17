@@ -12,6 +12,9 @@ import { run } from "../src/index"
 const example = fileURLToPath(new URL("../../../examples/park-walk/", import.meta.url))
 const DRAW = "extends RefCounted\n\nfunc draw(img: Image) -> void:\n\timg.fill(Color(0.4, 0.5, 0.6))\n"
 
+/** A script as the read step lists it: each line after its number. */
+const numbered = (text: string) => text.split("\n").map((line, i) => `${String(i + 1).padStart(3)} | ${line}\n`).join("")
+
 async function cli(argv: string[]) {
   let out = ""
   let err = ""
@@ -109,7 +112,8 @@ describe("river mark and job", { timeout: 120_000 }, () => {
     const preview = await cli(["job", "approve", "--root", root, "--job", job.id])
     expect(preview.code).toBe(0)
     expect(preview.out).toContain(`concepts/${job.id}/draw.gd  sha256 ${job.scripts![0]!.sha256}`)
-    expect(preview.out).toContain(DRAW)
+    // Every line of the script carries its number, so a row the terminal wraps is the only kind without one.
+    expect(preview.out.split(`${"-".repeat(60)}\n`)[1]).toBe(numbered(DRAW))
     expect(preview.out).toContain(`river job approve --root ${root} --job ${job.id} --sha256 ${job.scripts![0]!.sha256} --yes`)
     expect((await loadJob(root, job.id)).status).toBe("approval")
 
@@ -179,7 +183,7 @@ describe("river mark and job", { timeout: 120_000 }, () => {
     const preview = await cli(["job", "approve", "--root", root, "--job", job.id])
     expect(preview.out).toContain(`concepts/${job.id}/draw_a.gd  sha256 ${a!.sha256}  option A "Cool blue"`)
     expect(preview.out).toContain(`concepts/${job.id}/draw_b.gd  sha256 ${b!.sha256}  option B`)
-    expect(preview.out).toContain(DRAW_B)
+    expect(preview.out).toContain(numbered(DRAW_B))
     expect(preview.out).toContain(`--job ${job.id} --sha256 a=${a!.sha256} --sha256 b=${b!.sha256} --yes`)
 
     const onlyA = await cli(["job", "approve", "--root", root, "--job", job.id, "--sha256", `a=${a!.sha256}`, "--yes"])
