@@ -3,7 +3,7 @@ import { mkdir, readdir } from "node:fs/promises"
 import path from "node:path"
 import type { EngineAdapter, Project, ShotDef } from "@river/core"
 
-export { conceptScriptBytesProblem, lintConceptScript, renderConcept, type RenderConceptRequest } from "./concept"
+export { conceptScriptProblem, lintConceptScript, renderConcept, type RenderConceptRequest } from "./concept"
 export { KIT_API, KIT_FILE, kitFileAction, kitFileText } from "./kit"
 
 /** Godot settings read from manifest.adapter.godot. */

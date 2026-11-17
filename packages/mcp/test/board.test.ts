@@ -314,4 +314,9 @@ describe("concept_write options", () => {
     expect(() => readFileSync(file("caption_a.txt"))).toThrow()
     expect((await write({ file: `concepts/${CONCEPT}/draw.gd`, content: draw })).text).not.toContain("lettered options")
   })
+
+  it("refuses to write a script that gives anything else the name Kit", async () => {
+    await expect(write({ file: `concepts/${CONCEPT}/draw_b.gd`, content: `${draw}\tvar Kit = img\n\tKit.fill(Color.RED)\n` })).rejects.toThrow(/Line 5: "Kit" may appear only as a call/)
+    expect(() => readFileSync(file("draw_b.gd"))).toThrow()
+  })
 })

@@ -5,19 +5,23 @@
  * Nothing here may run Godot on a script the user has not approved: even `--check-only` runs
  * static initialisers. `lintConceptScript` is plain text matching that tells the agent what to
  * rewrite; it is not a security boundary. The boundary is the user's approval of the exact bytes
- * that `renderConcept` is given, and `conceptScriptBytesProblem` keeps those bytes readable as shown.
+ * that `renderConcept` is given, and `conceptScriptProblem` keeps what the review shows true of
+ * them: the text reads as it runs, and every Kit call in it is River's.
  */
 import { execFile, spawn } from "node:child_process"
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { KIT_CLASS_CACHE, KIT_GD } from "./kit"
+import { KIT_CLASS_CACHE, KIT_FUNCTIONS, KIT_GD } from "./kit"
 
 /** Tokens a drawing script has no use for, each with a regex that finds it. */
 const FORBIDDEN: readonly [token: string, find: RegExp][] = [
   ["static", /\bstatic\b/],
   ["preload", /\bpreload\b/],
-  ["load(", /\bload\s*\(/],
+  // load(), Image.load_from_file and the rest; River saves the image itself, so save_png and the rest have no use either.
+  ["load", /\bload(_\w+)?\b/],
+  ["save", /\bsave(_\w+)?\b/],
+  ["Callable", /\bCallable\b/],
   ['extends "', /\bextends\s+["']/],
   ["OS.", /\bOS\s*\./],
   ["FileAccess", /\bFileAccess\b/],
@@ -51,12 +55,17 @@ const FORBIDDEN: readonly [token: string, find: RegExp][] = [
 ]
 
 /**
- * The rule on draw.gd's bytes, checked before River writes, commits, shows or runs it: printable
- * ASCII, tabs and LF line ends only. Then the text a person reads is exactly what Godot runs; an
- * escape code, a lone CR or a bidi control cannot hide or reorder code. Returns where it breaks, or
- * undefined when the bytes pass.
+ * The rules on draw.gd, checked before River writes, commits, shows or runs it, so the review shows what runs.
+ * Its bytes are printable ASCII, tabs and LF line ends only: an escape code, a lone CR or a bidi control cannot
+ * hide or reorder code. And the word Kit, in any case, appears only as Kit.<name>( for one of River's Kit
+ * functions: no variable, constant, parameter, binding or class can take the name, so a line that reads as a
+ * Kit call is one. Returns where a rule breaks, or undefined when the script passes.
  */
-export function conceptScriptBytesProblem(bytes: Uint8Array): string | undefined {
+export function conceptScriptProblem(bytes: Uint8Array): string | undefined {
+  return bytesProblem(bytes) ?? kitNameProblem(Buffer.from(bytes).toString("latin1"))
+}
+
+function bytesProblem(bytes: Uint8Array): string | undefined {
   let line = 1
   let column = 1
   for (const b of bytes) {
@@ -74,10 +83,27 @@ export function conceptScriptBytesProblem(bytes: Uint8Array): string | undefined
   return undefined
 }
 
+const KIT_CALL = new RegExp(`Kit\\.(?:${KIT_FUNCTIONS.join("|")})\\(`, "y")
+
+function kitNameProblem(text: string): string | undefined {
+  for (const m of text.matchAll(/\bkit\b/gi)) {
+    KIT_CALL.lastIndex = m.index
+    // A dot, $ or % before it, even across spaces or a line continuation, makes it a member or node of something else.
+    let before = m.index - 1
+    while (before >= 0 && /[\s\\]/.test(text[before]!)) before--
+    if (KIT_CALL.test(text) && !".$%".includes(text[before] ?? " ")) continue
+    const line = text.slice(0, m.index).split("\n").length
+    return `Line ${line}: "${m[0]}" may appear only as a call to River's Kit, written Kit.name(...) with nothing between, so the review can show every Kit line as River's code. Give nothing else the name kit (in any case), and leave the word out of comments and strings.`
+  }
+  return undefined
+}
+
 /** Problems that make the agent rewrite draw.gd, one sentence each. Empty means the text passes. */
 export function lintConceptScript(text: string): string[] {
   const lines = text.split(/\r?\n/)
   const problems: string[] = []
+  const kit = kitNameProblem(text)
+  if (kit) problems.push(kit)
   const firstCode = lines.find((l) => l.trim() !== "" && !l.trim().startsWith("#"))
   if (firstCode?.trim() !== "extends RefCounted") problems.push('The first line of code must be exactly "extends RefCounted".')
   if (!lines.some((l) => /^func\s+draw\s*\(\s*img\s*:\s*Image\s*\)/.test(l))) {
@@ -200,8 +226,8 @@ const tail = (text: string, lines = 30) => text.trim().split(/\r?\n/).slice(-lin
  * failure, including a runtime script error (Godot reports those but still exits 0).
  */
 export async function renderConcept(req: RenderConceptRequest): Promise<void> {
-  const unreadable = conceptScriptBytesProblem(Buffer.from(req.script))
-  if (unreadable) throw new Error(`river: refused to render: ${unreadable}`)
+  const refused = conceptScriptProblem(Buffer.from(req.script))
+  if (refused) throw new Error(`river: refused to render: ${refused}`)
   const width = req.width ?? 256
   const height = req.height ?? 256
   const timeoutMs = req.timeoutMs ?? 30_000

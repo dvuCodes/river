@@ -267,10 +267,18 @@ export const KIT_CLASS_CACHE = `list=[{
 }]
 `
 
+const PUBLIC_FUNC = /^static func ([a-z]\w*)\((.*)\)(?: -> (\w+))?:$/
+
+/** The names of the Kit's public functions, read from KIT_GD: the only Kit.<name>( a concept script may write. */
+export const KIT_FUNCTIONS: readonly string[] = KIT_GD.split("\n").flatMap((line) => {
+  const name = PUBLIC_FUNC.exec(line)?.[1]
+  return name ? [name] : []
+})
+
 /** The Kit's public functions as "Kit.name(args) -> type  # doc" lines, read from KIT_GD for the concept prompt. */
 export const KIT_API: string = KIT_GD.split("\n")
   .flatMap((line, i, lines) => {
-    const m = /^static func ([a-z]\w*)\((.*)\)(?: -> (\w+))?:$/.exec(line)
+    const m = PUBLIC_FUNC.exec(line)
     if (!m) return []
     const ret = m[3] && m[3] !== "void" ? ` -> ${m[3]}` : ""
     const doc = lines[i - 1]?.startsWith("## ") ? `  # ${lines[i - 1]!.slice(3)}` : ""

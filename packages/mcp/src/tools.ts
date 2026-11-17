@@ -8,7 +8,7 @@
 import { existsSync } from "node:fs"
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { conceptScriptBytesProblem, createGodotAdapter, lintConceptScript } from "@river/adapter-godot"
+import { conceptScriptProblem, createGodotAdapter, lintConceptScript } from "@river/adapter-godot"
 import {
   answerStart,
   assertConceptFile,
@@ -701,7 +701,7 @@ function conceptWrite(project: Project, conceptId: string): RiverTool {
     description:
       `Write one file in this job's folder, ${folder}/ (path relative to the project root). The scripts are ${folder}/draw.gd for one drawing, ` +
       "or draw_a.gd..draw_e.gd for up to five options; pass caption with each script (one line shown under its card). " +
-      "Replaces the whole file; empty content removes a script. Scripts may hold only printable ASCII, tabs and LF line ends; anything else is refused. " +
+      "Replaces the whole file; empty content removes a script. Scripts may hold only printable ASCII, tabs and LF line ends, and may write Kit only as Kit.name(...) calls; anything else is refused. " +
       "For a script the result lists lint problems; fix them and write the file again until there are none.",
     inputSchema: {
       file: relPath,
@@ -719,8 +719,8 @@ function conceptWrite(project: Project, conceptId: string): RiverTool {
         await rm(safePath(project, conceptPath(conceptId, conceptCaptionName(script.variant))), { force: true })
         return { text: `Removed ${rel}.`, data: { file: rel, removed: true, problems: [] } }
       }
-      const unreadable = script ? conceptScriptBytesProblem(Buffer.from(content, "utf8")) : undefined
-      if (unreadable) throw new Error(`river: cannot write ${rel}: ${unreadable} Write the whole file again without them.`)
+      const refused = script ? conceptScriptProblem(Buffer.from(content, "utf8")) : undefined
+      if (refused) throw new Error(`river: cannot write ${rel}: ${refused} Write the whole file again.`)
       await mkdir(path.dirname(full), { recursive: true })
       await writeFile(full, content, "utf8")
       if (!script) return { text: `Wrote ${rel}.`, data: { file: rel, problems: [] } }

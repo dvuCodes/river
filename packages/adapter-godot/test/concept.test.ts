@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { conceptScriptBytesProblem, lintConceptScript, renderConcept } from "../src/index"
+import { conceptScriptProblem, lintConceptScript, renderConcept } from "../src/index"
 
 const DRAW = `extends RefCounted
 
@@ -31,12 +31,18 @@ describe("lintConceptScript", () => {
     const cases: [string, string][] = [
       ["static var cache = 1", "static"],
       ["const P = preload(\"res://x.gd\")", "preload"],
-      ["var r = load(\"res://x.tres\")", "load("],
+      ["var r = load(\"res://x.tres\")", "load"],
+      ["\tvar i = Image.load_from_file(\"C:/x.png\")", "load"],
+      ["\timg.load_png_from_buffer(PackedByteArray())", "load"],
+      ["\timg.save_png(\"C:/x.png\")", "save"],
+      ["\timg.save_exr(\"C:/x.exr\")", "save"],
+      ["\tvar f = img.save_webp", "save"],
+      ["\tvar c := Callable(img, \"fill\")", "Callable"],
       ["\tOS.execute(\"cmd\", [])", "OS."],
       ["\tvar f = FileAccess.open(\"user://x\", FileAccess.WRITE)", "FileAccess"],
       ["\tDirAccess.remove_absolute(\"x\")", "DirAccess"],
       ["\tResourceLoader.exists(\"x\")", "ResourceLoader"],
-      ["\tResourceSaver.save(null, \"x\")", "ResourceSaver"],
+      ["\tResourceSaver.get_recognized_extensions(null)", "ResourceSaver"],
       ["\tProjectSettings.get_setting(\"x\")", "ProjectSettings"],
       ["\tEngine.get_main_loop()", "Engine."],
       ["\tClassDB.instantiate(\"Node\")", "ClassDB"],
@@ -59,7 +65,7 @@ describe("lintConceptScript", () => {
   })
 
   it("does not flag words that only contain a token", () => {
-    expect(lintConceptScript(DRAW + "\tvar is_static_sky = true\n\tvar reload_count = 0\n\tvar recall = 1\n")).toEqual([])
+    expect(lintConceptScript(DRAW + "\tvar is_static_sky = true\n\tvar reload_count = 0\n\tvar recall = 1\n\tvar saved = 1\n\tvar unloaded = 0\n")).toEqual([])
   })
 
   it("names the ways to build and run a script at runtime, and reflection", () => {
@@ -87,13 +93,59 @@ describe("lintConceptScript", () => {
   })
 })
 
-describe("conceptScriptBytesProblem", () => {
+/** Scripts from the PR review that each give a name of their own the name Kit, so a line that reads as a Kit call runs the agent's code. */
+const kitDisguises = (marker: string): [string, string][] => [
+  ["a local var", `${DRAW}\tvar Kit = img\n\tKit.save_png("${marker}")\n`],
+  ["a member var", `extends RefCounted\n\nvar Kit\n\nfunc draw(img: Image) -> void:\n\timg.fill(Color.RED)\n\tKit = img\n\tKit.save_png("${marker}")\n`],
+  ["a loop variable", `${DRAW}\tfor Kit in [img]:\n\t\tKit.save_png("${marker}")\n`],
+  ["a const", `${DRAW}\tvar n := 1\n\nconst Kit = 3\n`],
+  ["an enum", `${DRAW}\tvar n := 1\n\nenum Kit { A }\n`],
+]
+
+describe("the name Kit", () => {
+  const kitProblem = (text: string) => lintConceptScript(text).find((p) => p.includes("Kit"))
+
+  it("refuses the review's disguises, and every other declaration or binding named Kit, in any case", () => {
+    for (const [name, script] of kitDisguises("C:/x.png")) expect(kitProblem(script), name).toMatch(/^Line \d+: /)
+    const cases: [string, string][] = [
+      ["a parameter", "\nfunc paint(Kit: Image) -> void:\n\tpass\n"],
+      ["a signal parameter", "\nsignal moved(Kit)\n"],
+      ["an inner class", "\nclass Kit:\n\tvar a := 1\n"],
+      ["a match binding", "\tmatch 1:\n\t\tvar Kit:\n\t\t\tpass\n"],
+      ["a lambda parameter", "\tvar f := func(Kit): return 1\n"],
+      ["a lower-case local", "\tvar kit = img\n"],
+      ["an upper-case local", "\tvar KIT = img\n"],
+      ["a member of something else", "\tvar d := {}\n\td.Kit.rect(img, Rect2i(0, 0, 1, 1), Color.RED)\n"],
+      ["space before the dot", "\tKit .rect(img, Rect2i(0, 0, 1, 1), Color.RED)\n"],
+      ["a line continuation", "\tKit.\\\n\t\trect(img, Rect2i(0, 0, 1, 1), Color.RED)\n"],
+      ["an Image method", '\tKit.save_png("C:/x.png")\n'],
+      ["a private Kit helper", "\tvar h = Kit._hash(1, 2, 3)\n"],
+      ["a Kit function not called", "\tvar e = Kit.ellipse\n"],
+      ["a comment", "\t# Kit draws the sky\n"],
+      ["a string", '\tprint("Kit")\n'],
+    ]
+    for (const [name, text] of cases) expect(kitProblem(DRAW + text), name).toMatch(/^Line (9|10): /)
+  })
+
+  it("passes Kit calls written Kit.name(...), and names that only contain the word", () => {
+    expect(lintConceptScript(DRAW + "\tKit.rect(img, Rect2i(0, 0, 4, 4), Color.RED)\n\tvar l := Kit.image(4, 4)\n\tvar kit_size := 4\n\tvar toolkit := 1\n")).toEqual([])
+  })
+
+  it("refuses before Godot starts: no process is launched for such a script", async () => {
+    const [, script] = kitDisguises("C:/x.png")[0]!
+    const png = path.join(out, "never.png")
+    await expect(renderConcept({ bin: path.join(out, "no-such-godot.exe"), script, outPng: png })).rejects.toThrow(/refused to render: Line 9: [\s\S]*Kit/)
+    expect(existsSync(png)).toBe(false)
+  })
+})
+
+describe("conceptScriptProblem", () => {
   it("passes printable ASCII with tabs and LF line ends", () => {
-    expect(conceptScriptBytesProblem(Buffer.from(DRAW))).toBeUndefined()
+    expect(conceptScriptProblem(Buffer.from(DRAW))).toBeUndefined()
   })
 
   it("refuses CR, escape codes, other control bytes and anything not ASCII, with where it is", () => {
-    const at = (text: string) => conceptScriptBytesProblem(Buffer.from(DRAW + text, "utf8"))
+    const at = (text: string) => conceptScriptProblem(Buffer.from(DRAW + text, "utf8"))
     for (const text of ["\t# a\r\n", "\tpass # \u001b[2K\u001b[1G\n", "\tpass # ‮ x\n", "\tpass # \u0000\n", "\tpass # \u007f\n", "\t# dusk — calm\n", "\t# 20°\n"]) {
       expect(at(text), JSON.stringify(text)).toMatch(/^Line 9, column \d+: /)
     }
@@ -137,6 +189,16 @@ describe.skipIf(!bin)("renderConcept with real Godot (GODOT_BIN)", { timeout: 60
     await expect(renderConcept({ bin: bin!, script: Buffer.from(script), outPng: png })).rejects.toThrow(/Line 5, column \d+/)
     expect(existsSync(marker)).toBe(false)
     expect(existsSync(png)).toBe(false)
+  })
+
+  it("runs no script that takes the name Kit: the review's disguises write nothing and render nothing", async () => {
+    const marker = path.join(out, "kit-marker.png").split(path.sep).join("/")
+    for (const [name, script] of kitDisguises(marker)) {
+      const png = path.join(out, "kit-disguise.png")
+      await expect(renderConcept({ bin: bin!, script, outPng: png }), name).rejects.toThrow(/refused to render: Line \d+: [\s\S]*Kit/)
+      expect(existsSync(marker), name).toBe(false)
+      expect(existsSync(png), name).toBe(false)
+    }
   })
 
   it("renders a script that infers a type from a Variant, which Godot's default settings treat as an error", async () => {

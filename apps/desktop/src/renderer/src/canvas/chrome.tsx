@@ -493,7 +493,7 @@ export function ReviewDialog(props: { jobId: string; onClose(): void }) {
         </header>
         <p className="concept-warn">Running a script executes its code on this computer. Read each one before you run them.</p>
         <p className="review-kit">
-          <code>Kit.*</code> calls are River's own drawing helpers, not the agent's code.{" "}
+          <code>Kit.name(…)</code> calls run River's own drawing helpers; their arguments and every other line are the agent's code. River refuses a script that uses the name Kit any other way.{" "}
           <button type="button" className="link-btn" data-action="view-kit" onClick={() => setKit(true)}>
             Read the Kit
           </button>

@@ -18,7 +18,7 @@ import { existsSync } from "node:fs"
 import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { hostname } from "node:os"
 import path from "node:path"
-import { conceptScriptBytesProblem, godotSettings, KIT_FILE, kitFileAction, kitFileText, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
+import { conceptScriptProblem, godotSettings, KIT_FILE, kitFileAction, kitFileText, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
 import {
   addTurnedDown,
   answerStart,
@@ -453,9 +453,9 @@ function scriptsProblem(folder: string, scripts: { name: string; variant?: strin
   }
   const problems: string[] = []
   for (const s of scripts) {
-    const unreadable = conceptScriptBytesProblem(s.bytes)
-    if (unreadable) {
-      problems.push(`${folder}/${s.name}: ${unreadable}`)
+    const refused = conceptScriptProblem(s.bytes)
+    if (refused) {
+      problems.push(`${folder}/${s.name}: ${refused}`)
       continue
     }
     const lint = lintConceptScript(s.bytes.toString("utf8"))
@@ -466,15 +466,15 @@ function scriptsProblem(folder: string, scripts: { name: string; variant?: strin
 
 /**
  * The bytes of each of the job's scripts in its latest commit: the only copy River shows, hashes, renders
- * and applies. Refuses bytes a person could not read as shown (a job committed before that rule).
+ * and applies. Refuses a script the review could not show as it runs (a job committed before those rules, or crafted).
  */
 async function committedScripts(root: string, job: Job): Promise<{ record: JobScriptRecord; bytes: Buffer }[]> {
   if (!job.scripts?.length || !job.headSha) throw new Error(`river: job ${job.id} has no script yet`)
   const out: { record: JobScriptRecord; bytes: Buffer }[] = []
   for (const record of job.scripts) {
     const bytes = await readCommittedFile(root, job.headSha, inRepo(job, record.file))
-    const unreadable = conceptScriptBytesProblem(bytes)
-    if (unreadable) throw new Error(`river: refused: ${record.file} cannot be shown as it would run. ${unreadable} Dismiss the job and ask again.`)
+    const refused = conceptScriptProblem(bytes)
+    if (refused) throw new Error(`river: refused: ${record.file} cannot be shown as it would run. ${refused} Dismiss the job and ask again.`)
     out.push({ record, bytes })
   }
   return out

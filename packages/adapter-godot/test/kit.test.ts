@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { conceptScriptBytesProblem, KIT_API, lintConceptScript, renderConcept } from "../src/index"
+import { conceptScriptProblem, KIT_API, lintConceptScript, renderConcept } from "../src/index"
 import { KIT_GD } from "../src/kit"
 
 const script = (body: string[]) => ["extends RefCounted", "", "func draw(img: Image) -> void:", ...body.map((l) => `\t${l}`), ""].join("\n")
@@ -76,7 +76,7 @@ describe("Kit API", () => {
   it("lets agent scripts call every Kit function through the lint and the byte rule", () => {
     for (const [name, c] of Object.entries(CASES)) expect(lintConceptScript(script([...(c.setup ?? []), ...c.call])), name).toEqual([])
     expect(lintConceptScript(PARK)).toEqual([])
-    expect(conceptScriptBytesProblem(Buffer.from(PARK))).toBeUndefined()
+    expect(conceptScriptProblem(Buffer.from(PARK))).toBeUndefined()
   })
 
   it("keeps the sample scene within the 40 lines the prompt asks for", () => {
