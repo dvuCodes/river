@@ -396,16 +396,11 @@ export async function approveJobScript(workspaceRoot: string, jobId: string, sha
   }
 }
 
-/**
- * Once a job is accepted or dismissed: its card keeps the concept (accepted) or goes (dismissed),
- * and its worktree and branch go. Safe to repeat, so recoverJobs can finish it.
- */
-async function settle(root: string, job: Job, card: Card | undefined): Promise<void> {
-  if (card?.pending && job.status === "accepted") {
+/** What follows an accept: the card keeps the concept without its pending flag, and the worktree and branch go. Safe to repeat. */
+async function finishAccept(root: string, job: Job, card: Card | undefined): Promise<void> {
+  if (card?.pending) {
     const { pending: _pending, ...kept } = card
     await saveCard(root, job.board, kept)
-  } else if (card?.pending) {
-    await deleteCard(root, job.board, card.id)
   }
   await removeJobWorktree(root, job.id)
 }
@@ -425,7 +420,7 @@ export async function acceptJob(workspaceRoot: string, jobId: string): Promise<J
   await applyJobFiles(root, job.headSha!, inRepo(job, conceptPath(job.conceptId)))
   const accepted = await transition(root, job, "accepted")
   await findPendingCard(root, accepted)
-    .then((card) => settle(root, accepted, card))
+    .then((card) => finishAccept(root, accepted, card))
     .catch((err: unknown) => console.warn(`river: job ${jobId} is accepted, but tidying up failed (retried when the project next opens): ${errMsg(err)}`))
   return accepted
 }
@@ -490,7 +485,9 @@ async function settleEnded(root: string, jobs: Job[]): Promise<void> {
     try {
       if (!cards.has(job.board)) cards.set(job.board, (await loadBoard(root, job.board)).cards)
       const card = cards.get(job.board)!.find((c) => c.pending?.jobId === job.id)
-      if (card || branches.has(job.id)) await settle(root, job, card)
+      if (!card && !branches.has(job.id)) continue
+      if (job.status === "accepted") await finishAccept(root, job, card)
+      else await dismiss(root, job)
     } catch (err) {
       console.warn(`river: could not tidy up job ${job.id}: ${errMsg(err)}`)
     }

@@ -217,8 +217,12 @@ describe("concept jobs", { timeout: 120_000 }, () => {
   it("dismissing a dismissed job again removes a pending card left behind, and an accepted job cannot be dismissed", async () => {
     const job = await start({ runTurn: fakeTurn(DRAW) })
     await dismissJob(game, job.id)
-    await saveCard(game, "main", { kind: "concept", x: 0, y: 0, w: 260, ref: job.conceptId, madeBy: "concept-artist", pending: { markId: mark.id, jobId: job.id } })
+    const leftover = () => saveCard(game, "main", { kind: "concept", x: 0, y: 0, w: 260, ref: job.conceptId, madeBy: "concept-artist", pending: { markId: mark.id, jobId: job.id } })
+    await leftover()
     expect((await dismissJob(game, job.id)).status).toBe("dismissed")
+    expect(await pending(job)).toBeUndefined()
+    await leftover()
+    await recoverJobs(game)
     expect(await pending(job)).toBeUndefined()
 
     const accepted = await answeredJob()
