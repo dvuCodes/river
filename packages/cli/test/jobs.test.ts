@@ -141,7 +141,7 @@ describe("river mark and job", { timeout: 120_000 }, () => {
     expect((await loadBoard(root, "main")).marks[0]!.thread.at(-1)).toMatchObject({ by: "you", text: "warmer" })
     const early = await cli(["job", "revise", "--root", root, "--job", job.id])
     expect(early.code).toBe(1)
-    expect(early.err).toContain("only an answered or failed job can be revised")
+    expect(early.err).toContain("only an answered, accepted or failed job can be revised")
 
     const dismissed = await cli(["job", "dismiss", "--root", root, "--job", job.id, "--reason", "too dark"])
     expect(dismissed.code).toBe(0)

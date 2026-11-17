@@ -226,9 +226,16 @@ async function removeCards(root: string, board: Board, cards: Card[]): Promise<v
   for (const c of cards) await deleteCard(root, board.name, c.id)
 }
 
+/** The cards of a job's answer, found by their derived ids, so they are found after an accept too. */
+function answerCards(board: Board, jobId: string): Card[] {
+  const ids = answerIds({ id: jobId } as Job)
+  const own = new Set([ids.note, ...[0, 1, 2, 3, 4].map(ids.option)])
+  return board.cards.filter((c) => own.has(c.id))
+}
+
 /** Where a job's answer starts: beside the mark, or under the answer it revises. */
 function answerStart(board: Board, job: Job): { x: number; y: number } {
-  const parentCards = job.parentJobId ? board.cards.filter((c) => c.pending?.jobId === job.parentJobId).map(cardRect) : []
+  const parentCards = job.parentJobId ? answerCards(board, job.parentJobId).map(cardRect) : []
   if (parentCards.length > 0) {
     return { x: Math.min(...parentCards.map((r) => r.x)), y: Math.max(...parentCards.map((r) => r.y + r.h)) + BOARD_GAP }
   }
@@ -344,13 +351,18 @@ async function revisionPrompt(project: Project, parent: Job, replies: string[], 
     lines.push(`- ${optionName(s)} (${path.posix.basename(s.file)})${s.caption ? ` "${s.caption}"` : ""}: ${how}`)
   }
   if (parent.status === "failed" && parent.error) lines.push(`The job failed: ${parent.error}`)
+  if (parent.status === "accepted") {
+    const kept = (parent.scripts ?? []).filter((s) => s.accepted)
+    lines.push(`The user kept ${kept.map(optionName).join(" and ") || "nothing"}; ${kept.length === 1 ? "it is" : "they are"} in the project at concepts/${parent.conceptId}/.`)
+  }
   if (withScripts && parent.headSha) {
     lines.push("", "The previous scripts:")
     for (const s of parent.scripts ?? []) {
-      const text = await readCommittedFile(project.root, parent.headSha, inRepo(parent, s.file)).then(
-        (b) => b.toString("utf8"),
-        () => undefined,
-      )
+      // An accepted job's branch is gone; the options the user kept are in the checkout.
+      const text = await readCommittedFile(project.root, parent.headSha, inRepo(parent, s.file))
+        .catch(() => (s.accepted ? readFile(path.join(project.root, s.file)) : undefined))
+        .then((b) => b?.toString("utf8"))
+        .catch(() => undefined)
       if (text !== undefined) lines.push(`--- ${path.posix.basename(s.file)}`, text.trimEnd(), "---")
     }
   }
@@ -566,20 +578,22 @@ export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}
 /**
  * Answer the user's reply on a mark: a new job (parentJobId = jobId) that gets the previous answer, how its
  * renders went and the reply, and resumes the agent's session when there is one. `jobId` must be the
- * mark's latest job, answered (with a reply by the user after its answer) or failed (a reply is optional:
- * the revision fixes what broke). The previous job stays as it is; the user can still accept or dismiss it.
- * Resolves like startConceptJob.
+ * mark's latest job: answered or accepted (with a reply by the user after its answer, such as "I like A, try
+ * two more takes on A"), or failed (a reply is optional: the revision fixes what broke). The previous job
+ * stays as it is; the user can still accept or dismiss it. Resolves like startConceptJob.
  */
 export async function reviseJob(workspaceRoot: string, jobId: string, settings: JobAgentSettings, deps: JobDeps = {}): Promise<Job> {
   const project = await loadProject(workspaceRoot)
   const root = project.root
   const parent = await loadJob(root, jobId)
-  if (parent.status !== "answered" && parent.status !== "failed") throw new Error(`river: job ${jobId} is ${parent.status}; only an answered or failed job can be revised`)
+  if (!(["answered", "accepted", "failed"] as JobStatus[]).includes(parent.status)) {
+    throw new Error(`river: job ${jobId} is ${parent.status}; only an answered, accepted or failed job can be revised`)
+  }
   const mark = await loadMark(root, parent.board, parent.markId)
   if (!mark) throw new Error(`river: no mark ${parent.markId} on board ${parent.board}`)
   if (mark.jobId !== parent.id) throw new Error(`river: job ${jobId} is not the latest answer on mark ${mark.id} (that is ${mark.jobId ?? "none"}); revise that one`)
   const replies = repliesAfter(mark, parent)
-  if (parent.status === "answered" && replies.length === 0) throw new Error(`river: reply on mark ${mark.id} first: say what to change`)
+  if (parent.status !== "failed" && replies.length === 0) throw new Error(`river: reply on mark ${mark.id} first: say what to change`)
 
   const queued = queuedJob(mark, parent.board, settings, parent.id)
   const request = await conceptPrompt(project, parent.board, mark)

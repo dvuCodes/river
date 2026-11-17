@@ -286,6 +286,24 @@ describe("revisions", { timeout: 120_000 }, () => {
     await reply("and again")
     await expect(reviseJob(game, parent.id, settings, { runTurn: turnWriting({ "draw.gd": A }) })).rejects.toThrow(/not the latest answer/)
   })
+
+  it("revises an accepted job: says what the user kept, and the new row goes under the kept cards", async () => {
+    const parent = await answered()
+    await acceptJob(game, parent.id, { variants: ["a"] })
+    await expect(reviseJob(game, parent.id, settings, { runTurn: turnWriting({ "draw.gd": A }) })).rejects.toThrow(/reply on mark/)
+    await reply("I like A, try two more takes on A")
+    const turns: AgentTurnRequest[] = []
+    const { sessionId: _s, ...noSession } = (await loadJob(game, parent.id))
+    await saveJobAs(noSession)
+    const child = await reviseJob(game, parent.id, settings, { runTurn: turnWriting({ "draw_a.gd": B, "draw_b.gd": C }, turns) })
+    expect(child.status).toBe("approval")
+    expect(turns[0]!.prompt).toContain(`The user kept option A; it is in the project at concepts/${parent.conceptId}/.`)
+    expect(turns[0]!.prompt).toContain(`--- draw_a.gd\n${A.trimEnd()}\n---`)
+    const board = await loadBoard(game, "main")
+    const kept = board.cards.filter((c) => !c.pending && (c.ref === parent.conceptId || c.text === NOTE)).map(cardRect)
+    expect(kept).toHaveLength(2)
+    for (const r of (await answerOf(child)).map(cardRect)) expect(r.y).toBeGreaterThan(Math.max(...kept.map((k) => k.y + k.h)))
+  })
 })
 
 describe("project brief", { timeout: 120_000 }, () => {
