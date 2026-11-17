@@ -123,8 +123,8 @@ export interface StoryPath {
   steps: PathStep[]
   /** All conditions met along the route (passage `when` and choice `when`). */
   conditions: Cond[]
-  /** "ending" if the last passage has @end or no choices; "loop" if it stops at a passage already on the route. */
+  /** "ending" if the last passage has @end; "dead-end" if it has no open route on and no @end; "loop" if it stops at a passage already on the route. */
   end: "ending" | "dead-end" | "loop"
-  /** False when the conditions cannot all be true, given the schema ranges and the effects on the route. */
+  /** False when the conditions cannot all be true within the schema ranges. Version 1 ignores effects along the route. */
   satisfiable: boolean
 }
