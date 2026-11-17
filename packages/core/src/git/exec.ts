@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
 
 /** Byte-exact git: never convert line endings on the way in or out. */
 export const RAW = ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "-c", "core.safecrlf=false"]
@@ -48,4 +51,14 @@ export async function identityEnv(root: string): Promise<NodeJS.ProcessEnv> {
   if (!name?.trim() && !process.env.GIT_AUTHOR_NAME) env.GIT_AUTHOR_NAME = env.GIT_COMMITTER_NAME = "river"
   if (!email?.trim() && !process.env.GIT_AUTHOR_EMAIL) env.GIT_AUTHOR_EMAIL = env.GIT_COMMITTER_EMAIL = "river@localhost"
   return env
+}
+
+/** Run `fn` with a throwaway index file outside the working tree, so the user's index is never touched. */
+export async function withTempIndex<T>(fn: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(path.join(tmpdir(), "river-index-"))
+  try {
+    return await fn({ GIT_INDEX_FILE: path.join(dir, "index") })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 }

@@ -1,7 +1,6 @@
-import { mkdtemp, readdir, rm, rmdir } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { readdir, rm, rmdir } from "node:fs/promises"
 import path from "node:path"
-import { git, gitTry, identityEnv, RAW } from "./exec"
+import { git, gitTry, identityEnv, RAW, withTempIndex } from "./exec"
 
 /** A snapshot of the working tree, kept under refs/river/checkpoints/<n>. Branch history is not changed. */
 export interface Checkpoint {
@@ -19,16 +18,6 @@ async function hasHead(root: string): Promise<boolean> {
   return (await gitTry(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"])) !== null
 }
 
-/** Run `fn` with a throwaway index file outside the working tree. */
-async function withTempIndex<T>(fn: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(path.join(tmpdir(), "river-index-"))
-  try {
-    return await fn({ GIT_INDEX_FILE: path.join(dir, "index") })
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
-}
-
 /** Write a tree object of the current working tree (tracked + untracked, not ignored) without touching the real index. */
 async function snapshotTree(root: string, head?: boolean): Promise<string> {
   head ??= await hasHead(root)
@@ -43,13 +32,20 @@ function refNumber(ref: string): number {
   return Number(ref.slice(REF_PREFIX.length))
 }
 
-/** Snapshot tracked and untracked (not ignored) files without changing the working tree or the index. */
-export async function checkpoint(root: string, label: string): Promise<Checkpoint> {
+/**
+ * A commit of the working tree (tracked and untracked, not ignored) on top of HEAD, without changing
+ * the working tree or the index. Nothing refers to it yet: the caller keeps it with a ref or branch.
+ */
+export async function snapshotCommit(root: string, label: string): Promise<string> {
   const head = await hasHead(root)
   const tree = await snapshotTree(root, head)
   const parents = head ? ["-p", "HEAD"] : []
-  const message = MESSAGE_PREFIX + label
-  const sha = (await git(root, ["commit-tree", tree, ...parents, "-m", message], { env: await identityEnv(root) })).trim()
+  return (await git(root, ["commit-tree", tree, ...parents, "-m", MESSAGE_PREFIX + label], { env: await identityEnv(root) })).trim()
+}
+
+/** Snapshot tracked and untracked (not ignored) files without changing the working tree or the index. */
+export async function checkpoint(root: string, label: string): Promise<Checkpoint> {
+  const sha = await snapshotCommit(root, label)
   const existing = await listCheckpoints(root)
   const n = existing.reduce((max, c) => Math.max(max, refNumber(c.ref)), 0) + 1
   const ref = REF_PREFIX + n

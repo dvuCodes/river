@@ -10,12 +10,12 @@
  * Those bytes are read once, from the job's commit, then hashed, rendered and later applied.
  */
 import { createHash } from "node:crypto"
-import { copyFile, readFile } from "node:fs/promises"
+import { readFile } from "node:fs/promises"
 import path from "node:path"
 import { godotSettings, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
 import {
   applyJobPaths,
-  commitPaths,
+  commitJobFile,
   CONCEPT_RENDER,
   CONCEPT_SCRIPT,
   conceptPath,
@@ -236,16 +236,15 @@ const live = new Map<string, { abort: AbortController; run: Promise<Job> }>()
 
 async function runConceptTurn(project: Project, req: ConceptJobRequest, mark: Mark, job: Job, signal: AbortSignal, deps: JobDeps): Promise<Job> {
   const root = project.root
-  let created: { worktree: string; branch: string } | undefined
   try {
-    created = await createJobWorktree(root, job.id)
+    const created = await createJobWorktree(root, job.id)
     job = await transition(root, job, "running", created)
     const texts: string[] = []
     const errors: string[] = []
     const runTurn = deps.runTurn ?? ((r, h) => startAgentTurn(r, h))
     await runTurn(
       {
-        root: path.join(job.worktree, job.projectSub),
+        root: path.join(created.worktree, job.projectSub),
         mode: "concept",
         model: req.model,
         prompt: await conceptPrompt(project, req.board, mark),
@@ -267,21 +266,18 @@ async function runConceptTurn(project: Project, req: ConceptJobRequest, mark: Ma
     if (signal.aborted) return await dismiss(root, await loadJob(root, job.id))
 
     const file = conceptPath(job.conceptId, CONCEPT_SCRIPT)
-    const written = await readFile(path.join(job.worktree, job.projectSub, file)).catch(() => undefined)
+    const written = await readFile(path.join(created.worktree, job.projectSub, file)).catch(() => undefined)
     if (!written) return await fail(root, job, errors.length > 0 ? errors.join("\n") : `The concept artist did not write ${file}.`)
     const problems = lintConceptScript(written.toString("utf8"))
     if (problems.length > 0) return await fail(root, job, [`${file} does not pass the concept lint:`, ...problems].join("\n"))
 
-    const headSha = await commitPaths(job.worktree, [inRepo(job, file)], `river: concept ${job.conceptId}`)
-    const bytes = await readCommittedFile(root, headSha, inRepo(job, file))
-    // The app shows the worktree file for approval; it must be the committed bytes, or the approval could never match.
-    if (!bytes.equals(written)) return await fail(root, job, `git changed ${file} when committing it (check the repo's .gitattributes); River needs it byte for byte.`)
+    const headSha = await commitJobFile(root, job.id, inRepo(job, file), written, `river: concept ${job.conceptId}`)
     const summary = texts.at(-1) || `The concept artist wrote ${file}.`
-    return await transition(root, job, "approval", { headSha, summary, scripts: [{ file, sha256: hash(bytes), approved: false }] }, summary)
+    return await transition(root, job, "approval", { headSha, summary, scripts: [{ file, sha256: hash(written), approved: false }] }, summary)
   } catch (err) {
     const ended = await fail(root, job, errMsg(err))
     // Dismissed while still queued: the dismiss could not know the worktree this call went on to create.
-    if (ended.status === "dismissed" && created) await removeJobWorktree(root, created.worktree, created.branch)
+    if (ended.status === "dismissed") await removeJobWorktree(root, job.id)
     return ended
   }
 }
@@ -321,8 +317,7 @@ export async function approveJobScript(workspaceRoot: string, jobId: string, sha
     const png = path.join(root, ".river", "jobs", job.id, "render.png")
     await (deps.render ?? renderConcept)({ bin, script: bytes, outPng: png })
     const render = conceptPath(job.conceptId, CONCEPT_RENDER)
-    await copyFile(png, path.join(job.worktree, job.projectSub, render))
-    const headSha = await commitPaths(job.worktree, [inRepo(job, render)], `river: render ${job.conceptId}`)
+    const headSha = await commitJobFile(root, job.id, inRepo(job, render), await readFile(png), `river: render ${job.conceptId}`)
     return await transition(root, job, "answered", { headSha })
   } catch (err) {
     return fail(root, job, errMsg(err))
@@ -346,14 +341,14 @@ export async function acceptJob(workspaceRoot: string, jobId: string): Promise<J
     const { pending: _pending, ...kept } = card
     await saveCard(root, job.board, kept)
   }
-  await removeJobWorktree(root, job.worktree, job.branch)
+  await removeJobWorktree(root, job.id)
   return transition(root, job, "accepted")
 }
 
 /** Worktree, branch and card go first, then the job is dismissed. */
 async function dismiss(root: string, job: Job): Promise<Job> {
   if (!JOB_NEXT[job.status].includes("dismissed")) throw new Error(`river: job ${job.id} is ${job.status}; it cannot be dismissed`)
-  await removeJobWorktree(root, job.worktree, job.branch)
+  await removeJobWorktree(root, job.id)
   const card = await findPendingCard(root, job)
   if (card) await deleteCard(root, job.board, card.id)
   return transition(root, job, "dismissed")

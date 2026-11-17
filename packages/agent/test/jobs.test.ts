@@ -1,11 +1,11 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process"
 import { createHash } from "node:crypto"
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { lintConceptScript, type RenderConceptRequest } from "@river/adapter-godot"
-import { ensureBoard, loadBoard, loadJob, loadMark, saveCard, saveJob, saveMark, type Job, type Mark } from "@river/core"
+import { ensureBoard, listCheckpoints, loadBoard, loadJob, loadMark, saveCard, saveJob, saveMark, type Job, type Mark } from "@river/core"
 import { acceptJob, approveJobScript, dismissJob, readJobScript, recoverJobs, startConceptJob, type JobDeps, type RunTurn } from "../src/jobs"
 import { SYSTEM_PROMPTS } from "../src/prompts"
 import type { AgentTurnRequest } from "../src/types"
@@ -75,6 +75,21 @@ function fakeRender(seen: Buffer[] = []): JobDeps["render"] {
 const start = (deps: JobDeps) => startConceptJob({ workspaceRoot: game, board: "main", markId: mark.id, model: "claude-sonnet-5-5", backend: "claude-code" }, deps)
 const pending = async (job: Job) => (await loadBoard(game, "main")).cards.find((c) => c.pending?.jobId === job.id)
 const branchExists = (job: Job) => git("branch", "--list", `river/job/${job.id}`).trim() !== ""
+
+/** Rename the repo folder, as a user moving their project does. */
+function moveRepo(): void {
+  const moved = `${top}-moved`
+  renameSync(top, moved)
+  top = moved
+  game = path.join(moved, "game")
+}
+
+/** No worktree folder, git registration or branch is left for the job. */
+function expectNoTrace(job: Job): void {
+  expect(existsSync(path.join(top, ".git", "river", "worktrees", job.id))).toBe(false)
+  expect(git("worktree", "list", "--porcelain")).not.toContain(job.id)
+  expect(branchExists(job)).toBe(false)
+}
 
 describe("concept jobs", { timeout: 120_000 }, () => {
   it("runs start -> approval -> approve -> answered -> accept, and leaves the user's other edits and index alone", async () => {
@@ -194,6 +209,60 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect(none.status).toBe("failed")
     expect(none.error).toContain("out of turns")
     await dismissJob(game, none.id)
+  })
+
+  it("keeps working after the repo folder moves: approve and accept from the new place", async () => {
+    const job = await start({ runTurn: fakeTurn(DRAW) })
+    moveRepo()
+    expect((await approveJobScript(game, job.id, sha(DRAW), { render: fakeRender(), env: { GODOT_BIN: "godot-not-run" } })).status).toBe("answered")
+    expect((await acceptJob(game, job.id)).status).toBe("accepted")
+    expect(readFileSync(path.join(game, "concepts", job.id, "draw.gd"), "utf8")).toBe(DRAW)
+    expect(readFileSync(path.join(game, "concepts", job.id, "concept.png")).equals(FAKE_PNG)).toBe(true)
+    expectNoTrace(job)
+  })
+
+  it("dismisses after the repo folder moves, and the mark can be asked again", async () => {
+    const job = await start({ runTurn: fakeTurn(DRAW) })
+    moveRepo()
+    expect((await dismissJob(game, job.id)).status).toBe("dismissed")
+    expectNoTrace(job)
+    expect((await start({ runTurn: fakeTurn(DRAW) })).status).toBe("approval")
+  })
+
+  it("leaves the user's own worktrees registered, even one whose folder is missing", async () => {
+    const userWorktree = `${top}-feature`
+    git("worktree", "add", "-q", "-b", "feature", userWorktree)
+    renameSync(userWorktree, `${userWorktree}-unplugged`)
+    try {
+      const job = await start({ runTurn: fakeTurn(DRAW) })
+      await dismissJob(game, job.id)
+      expect(git("worktree", "list", "--porcelain")).toContain("branch refs/heads/feature")
+    } finally {
+      removeDir(`${userWorktree}-unplugged`)
+    }
+  })
+
+  it("never runs the user's git hooks, and adds no checkpoint", async () => {
+    const marker = path.join(top, "hooks-ran.txt")
+    for (const hook of ["post-checkout", "reference-transaction"]) {
+      writeFileSync(path.join(top, ".git", "hooks", hook), `#!/bin/sh\necho ${hook} >> "${marker.replace(/\\/g, "/")}"\n`, { mode: 0o755 })
+    }
+    const job = await start({ runTurn: fakeTurn(DRAW) })
+    await approveJobScript(game, job.id, sha(DRAW), { render: fakeRender(), env: { GODOT_BIN: "godot-not-run" } })
+    await acceptJob(game, job.id)
+    expect((await start({ runTurn: fakeTurn(DRAW) })).status).toBe("approval")
+    await dismissJob(game, (await loadMark(game, "main", mark.id))!.jobId!)
+    expect(existsSync(marker)).toBe(false)
+    expect(await listCheckpoints(game)).toEqual([])
+    git("branch", "hooks-still-run")
+    expect(readFileSync(marker, "utf8")).toContain("reference-transaction")
+  })
+
+  it("dismiss removes the worktree and branch of a job whose file never recorded them", async () => {
+    const job = await start({ runTurn: fakeTurn(DRAW) })
+    await saveJob(game, { ...job, status: "failed", error: "could not record the running state", worktree: "", branch: "" })
+    await dismissJob(game, job.id)
+    expectNoTrace(job)
   })
 
   it("says how to configure Godot when there is none, and changes nothing", async () => {

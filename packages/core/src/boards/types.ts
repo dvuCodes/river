@@ -121,7 +121,7 @@ export const MARK_STATUS_FOR_JOB: Record<JobStatus, MarkStatus> = {
  * A job: one agent working on one mark, on its own branch, in its own worktree.
  * Stored in the workspace at .river/jobs/<id>.json; its render at .river/jobs/<id>/render.png.
  *
- * The job's base is a checkpoint commit of the user's working tree, so uncommitted edits are
+ * The job's base is a snapshot commit of the user's working tree, so uncommitted edits are
  * included. The worktree lives in the git common dir (<.git>/river/worktrees/<id>), outside the
  * game folder, so neither Godot nor `git add` sees it. The job only ever commits, diffs and applies
  * `concepts/<conceptId>/`, so stale board or job files in the checkpoint never travel back at Accept.
@@ -140,8 +140,9 @@ export interface Job {
   baseSha: string
   /** Last commit on the job branch (set once the agent's files are committed). */
   headSha?: string
+  /** river/job/<id>. River works the branch and worktree out from the id, not from these two fields. */
   branch: string
-  /** Absolute path of the worktree's top level. */
+  /** Absolute path of the worktree's top level when it was made; stale once the user moves the repo. */
   worktree: string
   /** Project root inside the worktree, relative to the git top level ("" when river.json is at the top). */
   projectSub: string

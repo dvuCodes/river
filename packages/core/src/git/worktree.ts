@@ -1,57 +1,80 @@
-import { mkdir, rm } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm } from "node:fs/promises"
 import path from "node:path"
-import { checkpoint } from "./checkpoint"
-import { git, gitBytes, gitTry, identityEnv, RAW } from "./exec"
+import { snapshotCommit } from "./checkpoint"
+import { git, gitBytes, gitTry, identityEnv, RAW, withTempIndex, type GitOptions } from "./exec"
 
-/** Where a job works: its own branch and worktree, started from a checkpoint of the user's tree. */
+/** Where a job works: its own branch and worktree, started from a snapshot of the user's tree. */
 export interface JobWorktree {
   baseSha: string
   /** river/job/<jobId> */
   branch: string
-  /** Absolute path of the worktree's top level: <git common dir>/river/worktrees/<jobId>. */
+  /** Absolute path of the worktree's top level when it was made: <git common dir>/river/worktrees/<jobId>. */
   worktree: string
   /** The project root relative to the git top level, with forward slashes ("" at the top). */
   projectSub: string
 }
 
-const BRANCH_PREFIX = "river/job/"
+const SAFE_JOB_ID = /^[A-Za-z0-9_-]{1,64}$/
+
+function jobBranch(jobId: string): string {
+  if (typeof jobId !== "string" || !SAFE_JOB_ID.test(jobId)) throw new Error(`river: invalid job id ${JSON.stringify(jobId)}`)
+  return `river/job/${jobId}`
+}
 
 /** The git top level that holds `dir`. */
 export async function gitTop(dir: string): Promise<string> {
   return path.resolve((await git(dir, ["rev-parse", "--show-toplevel"])).trim())
 }
 
-async function worktreesDir(dir: string): Promise<string> {
-  const common = (await git(dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
-  return path.join(path.resolve(common), "river", "worktrees")
+/**
+ * River's places in the repo that holds `dir`, worked out from where the repo is now (an absolute
+ * path saved earlier goes stale when the user moves the folder), and git with the user's hooks off.
+ */
+async function riverGit(dir: string) {
+  const common = path.resolve((await git(dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim())
+  const noHooks = path.join(common, "river", "no-hooks")
+  await mkdir(noHooks, { recursive: true })
+  return {
+    common,
+    worktrees: path.join(common, "river", "worktrees"),
+    git: (args: string[], opts?: GitOptions) => git(dir, ["-c", `core.hooksPath=${noHooks}`, ...args], opts),
+  }
 }
 
 /**
- * Checkpoint the user's working tree (uncommitted edits included) and check it out on a new branch
+ * Snapshot the user's working tree (uncommitted edits included) and check it out on a new branch
  * in a worktree inside the git common dir, where neither the game nor `git add` can see it.
  */
 export async function createJobWorktree(workspaceRoot: string, jobId: string): Promise<JobWorktree> {
+  const branch = jobBranch(jobId)
   const projectSub = (await git(workspaceRoot, ["rev-parse", "--show-prefix"])).trim().replace(/\/$/, "")
-  const { sha: baseSha } = await checkpoint(workspaceRoot, `job ${jobId}`)
-  const branch = BRANCH_PREFIX + jobId
-  const worktree = path.join(await worktreesDir(workspaceRoot), jobId)
-  await mkdir(path.dirname(worktree), { recursive: true })
-  await git(workspaceRoot, [...RAW, "worktree", "add", "-q", "-b", branch, worktree, baseSha])
+  // The branch keeps the snapshot alive, so no checkpoint ref lists job bases among the user's checkpoints.
+  const baseSha = await snapshotCommit(workspaceRoot, `job ${jobId}`)
+  const repo = await riverGit(workspaceRoot)
+  const worktree = path.join(repo.worktrees, jobId)
+  await mkdir(repo.worktrees, { recursive: true })
+  await repo.git([...RAW, "worktree", "add", "-q", "-b", branch, worktree, baseSha])
   return { baseSha, branch, worktree, projectSub }
 }
 
 /**
- * Commit exactly `paths` (relative to the worktree's top level) on the worktree's branch, with
- * plumbing so the user's hooks never run. Returns the new HEAD, or the current one when nothing changed.
+ * Commit `bytes` as `file` (relative to the git top level) on top of the job's branch, byte for byte:
+ * no filters, no hooks and no worktree, so it works from any checkout of the repo, wherever it has
+ * moved. Returns the new tip, or the current one when the file already holds these bytes.
  */
-export async function commitPaths(worktree: string, paths: string[], message: string): Promise<string> {
-  // -f: a .gitignore rule in the user's repo must not stop River from recording the job's own files.
-  await git(worktree, [...RAW, "add", "-f", "-A", "--", ...paths])
-  const head = (await git(worktree, ["rev-parse", "HEAD"])).trim()
-  const tree = (await git(worktree, ["write-tree"])).trim()
-  if (tree === (await git(worktree, ["rev-parse", "HEAD^{tree}"])).trim()) return head
-  const sha = (await git(worktree, ["commit-tree", tree, "-p", head, "-m", message], { env: await identityEnv(worktree) })).trim()
-  await git(worktree, ["update-ref", "-m", message, "HEAD", sha, head])
+export async function commitJobFile(dir: string, jobId: string, file: string, bytes: Buffer, message: string): Promise<string> {
+  const ref = `refs/heads/${jobBranch(jobId)}`
+  const repo = await riverGit(dir)
+  const head = (await git(dir, ["rev-parse", "--verify", "-q", `${ref}^{commit}`])).trim()
+  const blob = (await git(dir, ["hash-object", "-w", "--no-filters", "--stdin"], { input: bytes })).trim()
+  const tree = await withTempIndex(async (env) => {
+    await git(dir, ["read-tree", head], { env })
+    await git(dir, ["update-index", "--add", "--cacheinfo", `100644,${blob},${file}`], { env })
+    return (await git(dir, ["write-tree"], { env })).trim()
+  })
+  if (tree === (await git(dir, ["rev-parse", `${head}^{tree}`])).trim()) return head
+  const sha = (await git(dir, ["commit-tree", tree, "-p", head, "-m", message], { env: await identityEnv(dir) })).trim()
+  await repo.git(["update-ref", "-m", message, ref, sha, head])
   return sha
 }
 
@@ -91,17 +114,20 @@ export async function applyJobPaths(workspaceRoot: string, baseSha: string, head
   return files
 }
 
-/** Remove a job's worktree and branch. Missing ones are fine. Refuses paths and branches that are not River's. */
-export async function removeJobWorktree(workspaceRoot: string, worktree: string, branch: string): Promise<void> {
-  if (branch && !branch.startsWith(BRANCH_PREFIX)) throw new Error(`river: ${branch} is not a River job branch`)
-  if (worktree) {
-    const rel = path.relative(await worktreesDir(workspaceRoot), path.resolve(worktree))
-    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`river: ${worktree} is not a River job worktree`)
-    await gitTry(workspaceRoot, ["worktree", "remove", "--force", worktree])
-    await rm(worktree, { recursive: true, force: true, maxRetries: 3 })
+/**
+ * Remove a job's worktree folder, git's record of it and its branch, found from the job id in the repo
+ * as it is now. Missing pieces are fine, so it can run again after a partial run. Other worktrees,
+ * the user's included, are left alone.
+ */
+export async function removeJobWorktree(dir: string, jobId: string): Promise<void> {
+  const branch = jobBranch(jobId)
+  const repo = await riverGit(dir)
+  await rm(path.join(repo.worktrees, jobId), { recursive: true, force: true, maxRetries: 3 })
+  // After a move git's record still names the old path, so it is found by the branch it has checked out.
+  const records = path.join(repo.common, "worktrees")
+  for (const name of await readdir(records).catch(() => [])) {
+    const head = await readFile(path.join(records, name, "HEAD"), "utf8").catch(() => "")
+    if (head.trim() === `ref: refs/heads/${branch}`) await rm(path.join(records, name), { recursive: true, force: true, maxRetries: 3 })
   }
-  await git(workspaceRoot, ["worktree", "prune"])
-  if (branch && (await gitTry(workspaceRoot, ["rev-parse", "--verify", "-q", `refs/heads/${branch}`]))) {
-    await git(workspaceRoot, ["branch", "-D", branch])
-  }
+  if (await gitTry(dir, ["rev-parse", "--verify", "-q", `refs/heads/${branch}`])) await repo.git(["branch", "-D", branch])
 }
