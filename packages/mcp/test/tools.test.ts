@@ -1,30 +1,21 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { fileURLToPath } from "node:url"
 import { beforeEach, describe, expect, it } from "vitest"
 import { addThread, loadPlan, loadProject, setPlanStatus } from "@river/core"
 import type { EngineAdapter, Project } from "@river/core"
 import { createRiverTools, RIVER_TOOL_NAMES, selectTools, unifiedDiff } from "../src/index"
 import type { RiverTool } from "../src/index"
+import { tempProject } from "./helpers"
 
-const example = fileURLToPath(new URL("../../../examples/park-walk/", import.meta.url))
 const STORY = "stories/park_walk.twee"
 
 export const EXPECTED_TOOLS = [
   "project_info", "story_list", "story_read", "story_lint", "story_paths", "playtest_run",
-  "frames_list", "review_list", "plan_list", "plan_read",
+  "frames_list", "review_list", "plan_list", "plan_read", "board_read", "marks_open", "brief_read",
   "story_write_passage", "story_add_passage", "review_reply", "plan_save",
   "implement_edit", "plan_mark_implemented", "frames_capture",
+  "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row",
 ]
-
-export function tempProject(): string {
-  const dir = mkdtempSync(join(tmpdir(), "river-mcp-"))
-  cpSync(example, dir, { recursive: true })
-  mkdirSync(join(dir, "data"))
-  writeFileSync(join(dir, "data/tuning.txt"), "leash_max = 4.0\nsurge_force = 12\nsurge_force_alt = 12\nsurge_force = 12\n")
-  return dir
-}
 
 let dir: string
 let project: Project
@@ -42,11 +33,11 @@ beforeEach(async () => {
 })
 
 describe("tool list", () => {
-  it("has the 17 contract names, with the write tools marked mutating", () => {
+  it("has the 26 contract names, with the write tools marked mutating", () => {
     expect([...tools.map((t) => t.name)].sort()).toEqual([...EXPECTED_TOOLS].sort())
     expect([...RIVER_TOOL_NAMES].sort()).toEqual([...EXPECTED_TOOLS, "concept_write"].sort())
     expect(tools.filter((t) => t.mutating).map((t) => t.name).sort()).toEqual(
-      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture"].sort(),
+      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture", "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row"].sort(),
     )
   })
 })

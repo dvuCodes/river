@@ -243,6 +243,47 @@ export async function deleteEdge(workspaceRoot: string, board: string, edgeId: s
   await removeFile(edgeFile(workspaceRoot, board, edgeId))
 }
 
+async function needMark(workspaceRoot: string, board: string, markId: string): Promise<Mark> {
+  const mark = await loadMark(workspaceRoot, board, markId)
+  if (!mark) throw new Error(`river: no mark ${markId} on board ${board}`)
+  return mark
+}
+
+/**
+ * Add a message to a mark's thread. `status` ("answered" when an agent's reply answers the mark, "open" to
+ * give it back) is refused on a mark a River job works on, whose status follows the job. A user's reply on
+ * a mark an agent answered outside River's jobs opens it again, so that agent finds it in marks_open.
+ */
+export async function replyToMark(
+  workspaceRoot: string,
+  board: string,
+  markId: string,
+  by: string,
+  text: string,
+  status?: "answered" | "open",
+): Promise<Mark> {
+  const mark = await needMark(workspaceRoot, board, markId)
+  const job = mark.jobId ? await loadJob(workspaceRoot, mark.jobId).catch(() => undefined) : undefined
+  const jobOwns = job !== undefined && job.status !== "failed" && job.status !== "dismissed"
+  if (status && jobOwns) throw new Error(`river: mark ${markId}'s status follows its River job ${job.id} (${job.status}); reply without a status`)
+  const next = status ?? (by === "you" && !jobOwns && mark.status === "answered" ? "open" : mark.status)
+  const { claimedBy, ...rest } = mark
+  // Giving a mark back releases the claim; a user's reply keeps it, so the agent that answered sees it is theirs.
+  const keepClaim = claimedBy && !(status === "open") ? { claimedBy } : {}
+  return saveMark(workspaceRoot, board, { ...rest, ...keepClaim, status: next, thread: [...mark.thread, { by, at: new Date().toISOString(), text }] })
+}
+
+/** An agent takes an open mark: status "working", claimedBy `by`. Claiming a mark again by the same agent is a no-op. */
+export async function claimMark(workspaceRoot: string, board: string, markId: string, by: string): Promise<Mark> {
+  const mark = await needMark(workspaceRoot, board, markId)
+  if (mark.status === "working" && mark.claimedBy === by && !mark.jobId) return mark
+  if (mark.status !== "open") {
+    const who = mark.claimedBy ? ` by ${mark.claimedBy}` : mark.jobId ? ` (River job ${mark.jobId})` : ""
+    throw new Error(`river: mark ${markId} is ${mark.status}${who}; only an open mark can be claimed`)
+  }
+  return saveMark(workspaceRoot, board, { ...mark, status: "working", claimedBy: by })
+}
+
 /** Marks with status "open", oldest first. */
 export function openMarks(board: Board): Mark[] {
   return board.marks.filter((m) => m.status === "open").sort(byCreated)
