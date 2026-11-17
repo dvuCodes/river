@@ -1,7 +1,7 @@
 import { parsePassage, rewriteLinks, slugify } from "./passage"
 import type { Passage, Story } from "./types"
 
-/** "Squirrel!" -> "squirrel", "Maple corner" -> "maple_corner". Lowercase, [a-z0-9_] only. */
+/** "Pond!" -> "pond", "Long path" -> "long_path". Lowercase, [a-z0-9_] only. */
 export function slug(name: string): string {
   return slugify(name)
 }

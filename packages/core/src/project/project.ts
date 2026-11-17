@@ -6,7 +6,7 @@ import type { Project, RiverManifest } from "./types"
 import type { Diagnostic, StateSchema, Story } from "../story/types"
 import { parseTwee3, writeTwee3 } from "../formats/twee3"
 
-export const DEFAULT_EDITABLE = ["data/**", "tools/shots/**", "stories/**"]
+export const DEFAULT_EDITABLE = ["data/**", "tools/shots/**"]
 
 const ShotSchema = z.object({
   id: z.string().min(1),

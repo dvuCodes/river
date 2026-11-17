@@ -11,6 +11,7 @@ let project: Project
 beforeEach(async () => {
   root = tempGame()
   project = await loadProject(root)
+  project.manifest.editable = ["data/**", "tools/shots/**", "stories/**"] // this test edits a story file
 })
 afterEach(() => removeDir(root))
 

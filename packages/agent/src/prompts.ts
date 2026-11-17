@@ -7,13 +7,13 @@ Every River tool that changes something asks the user first. If the user denies 
 
 const TWEE = `Story syntax. A story is one Twee 3 file. River adds game rules to a passage as "@" lines at the top of its text, ended by a line "--":
 
-  :: Squirrel! [encounter]
-  @id squirrel
-  @when distance_m >= 90
+  :: Pond [encounter]
+  @id pond
+  @when energy >= 20
   --
-  A squirrel freezes halfway up the oak.
-  [[Leave it->Standoff]] @cost treats 1
-  [[Hold tight->Strain]] @set irk += 35, energy -= 8 @when bond < 50
+  Ducks. Many ducks.
+  [[Throw a treat->Treat]] @cost treats 1
+  [[Hold the leash tight->Calm down]] @set excitement -= 30, bond -= 5 @when bond > 20
 
 - @id <id>: stable passage id (default: slug of the name).
 - @when <cond>: the passage (or, after a link, the choice) is available only when the condition is true. Conditions compare state variables with == != < <= > >= and combine with and / or / not.

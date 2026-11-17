@@ -30,7 +30,7 @@ describe("review threads", () => {
     expect(t.messages[0]).toMatchObject({ author: "dat", text: "leash looks slack" })
     expect(new Date(t.messages[0]!.at).toISOString()).toBe(t.messages[0]!.at)
 
-    const other = await addThread(p, { shotId: "standoff", rev: "abc1234" }, "dat", "squirrel too small")
+    const other = await addThread(p, { shotId: "boss_intro", rev: "abc1234" }, "dat", "sprite too small")
 
     const r = await reply(p, t.id, "agent", "I will plan a fix")
     expect(r.messages.map((m) => m.author)).toEqual(["dat", "agent"])
@@ -50,7 +50,7 @@ describe("review threads", () => {
     expect((await listThreads(p)).map((x) => x.id).sort()).toEqual([t.id, other.id].sort())
     expect(await listThreads(p, "nothing")).toEqual([])
     // no temp files left behind by the atomic writes
-    expect(readdirSync(path.join(root, ".river", "review")).sort()).toEqual(["standoff.json", "walk.json"])
+    expect(readdirSync(path.join(root, ".river", "review")).sort()).toEqual(["boss_intro.json", "walk.json"])
   })
 
   it("rejects unsafe shot ids and unknown threads", async () => {

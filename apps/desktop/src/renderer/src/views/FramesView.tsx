@@ -318,8 +318,8 @@ export function FramesView(props: { tick: number; onAgent(i: AgentIntent): void 
               <div className="empty-note">
                 <p>No shots in river.json yet. A shot is a scene plus a setup script that freezes it:</p>
                 <pre className="mono snippet">{`"shots": [{
-  "id": "leash_taut",
-  "scene": "res://walk/walk.tscn",
+  "id": "level_1_intro",
+  "scene": "res://scenes/level_1.tscn",
   "setup": "res://tools/shots/taut.gd",
   "count": 1
 }]`}</pre>

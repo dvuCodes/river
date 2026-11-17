@@ -6,7 +6,7 @@ import type { ChangePlan, Project, ReviewStatus, ReviewThread } from "../project
 import { assertSafeId, newId, readJson, writeJsonAtomic } from "./store"
 
 /** Default globs a change plan may name when the manifest has no `editable`. */
-const DEFAULT_EDITABLE = ["data/**", "tools/shots/**", "stories/**"]
+const DEFAULT_EDITABLE = ["data/**", "tools/shots/**"]
 
 const STATUSES: ReviewStatus[] = ["open", "planned", "accepted", "done", "wontfix"]
 const PLAN_STATUSES: ChangePlan["status"][] = ["draft", "approved", "rejected", "implemented"]

@@ -200,7 +200,7 @@ describe("export", () => {
 describe("project", () => {
   it("loads the example project with defaults", async () => {
     const project = await loadProject(exampleRoot)
-    expect(project.manifest.editable).toEqual(["data/**", "tools/shots/**", "stories/**"])
+    expect(project.manifest.editable).toEqual(["data/**", "tools/shots/**"])
     expect(await listStories(project)).toEqual(["stories/park_walk.twee"])
     const schema = await loadSchema(project)
     expect(schema.treats).toEqual({ type: "int", min: 0, max: 10, initial: 2 })

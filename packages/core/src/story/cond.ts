@@ -172,7 +172,7 @@ function parseEffectValue(raw: string, whole: string): Value {
   throw new Error(`bad value "${s}" in "${whole}"`)
 }
 
-/** Parse "irk += 35, energy -= 8, mood = SURGE". "-=" becomes add with a negative amount. */
+/** Parse "bond += 10, energy -= 8, mood = CALM". "-=" becomes add with a negative amount. */
 export function parseEffects(src: string): Effect[] {
   if (src.trim() === "") return []
   return splitTopLevel(src).map((part): Effect => {
