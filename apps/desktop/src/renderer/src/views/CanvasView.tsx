@@ -132,11 +132,14 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
 
   const fail = useCallback((err: unknown) => setActionError(errorText(err)), [])
 
+  // Marks for the perf smoke: open, board loaded, ready (fitted).
   useEffect(() => {
     let live = true
+    performance.mark("canvas:open")
     window.river.boardOpen(board).then(
       (b: BoardDTO) => {
         if (!live) return
+        performance.mark("canvas:loaded")
         setState({
           cards: Object.fromEntries(b.cards.map((c) => [c.card.id, c])),
           marks: Object.fromEntries(b.marks.map((m) => [m.id, m])),
@@ -307,7 +310,10 @@ function CanvasInner(props: { board: string; onBoard(name: string): void; storyT
     }
     if (!measured) return
     fitted.current = true
-    void Promise.resolve(flow.fitView({ padding: 64, maxZoom: 1 })).then(() => setReady(true))
+    void Promise.resolve(flow.fitView({ padding: 64, maxZoom: 1 })).then(() => {
+      performance.mark("canvas:ready")
+      setReady(true)
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [measured, state, cardList.length, markList.length])
   useSmokeReady("canvas", ready || loadError !== null)

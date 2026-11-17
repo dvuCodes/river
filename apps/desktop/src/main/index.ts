@@ -1,13 +1,14 @@
 import { access, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { BrowserWindow, app, ipcMain, nativeTheme, net, protocol } from "electron"
+import { BrowserWindow, ClipboardItem, app, clipboard, ipcMain, nativeTheme, net, protocol } from "electron"
 import type { JobDeps } from "@river/agent"
 import { VIEWS, type ViewId } from "../shared/api"
-import { type Card, type Mark, loadBoard, loadJob } from "@river/core"
+import { type Card, type Mark, loadBoard, loadCard, loadJob } from "@river/core"
 import { type BoardEntity, onBoardWritten } from "./board"
 import { currentProject, onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
 import { getLastProject } from "./settings"
+import { scenePng, seedPerfBoard, seedRichBoard } from "./smokeBoard"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const smokeDir = process.env["RIVER_SMOKE_DIR"]
@@ -49,7 +50,7 @@ function createWindow(): BrowserWindow {
   w.once("ready-to-show", () => w.show())
   // Scripted input goes straight to the page; a person's real pointer over the window must not mix into it.
   if (isSmoke) w.setIgnoreMouseEvents(true)
-  const query = isSmoke ? { smoke: "1" } : undefined
+  const query = isSmoke ? { smoke: "1", ...(process.env["RIVER_SMOKE_CULL"] === "0" ? { cull: "0" } : {}) } : undefined
   const devUrl = process.env["ELECTRON_RENDERER_URL"]
   if (devUrl) void w.loadURL(devUrl + (query ? `?${new URLSearchParams(query)}` : ""))
   else void w.loadFile(join(here, "../renderer/index.html"), query ? { query } : undefined)
@@ -495,8 +496,400 @@ async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, m
   return ok
 }
 
+/** Middle of an element, in window coordinates; null when it is not on screen. */
+async function centerOf(w: BrowserWindow, selector: string, ms = 5_000): Promise<[number, number] | null> {
+  const r = await waitRect(w, selector, ms)
+  return r ? [r.x + r.w / 2, r.y + r.h / 2] : null
+}
+
+async function viewport(w: BrowserWindow): Promise<{ x: number; y: number; zoom: number }> {
+  return (await w.webContents.executeJavaScript(`(() => {
+    const m = new DOMMatrix(getComputedStyle(document.querySelector(".react-flow__viewport")).transform)
+    return { x: m.e, y: m.f, zoom: m.a }
+  })()`)) as { x: number; y: number; zoom: number }
+}
+
+async function shoot(w: BrowserWindow, dir: string, name: string): Promise<void> {
+  const out = join(dir, name)
+  await writeFile(out, (await w.webContents.capturePage()).toPNG())
+  console.log(`river smoke: wrote ${out}`)
+}
+
+async function typeText(w: BrowserWindow, text: string): Promise<void> {
+  for (const ch of text) {
+    w.webContents.sendInputEvent({ type: "char", keyCode: ch === " " ? "Space" : ch })
+    await sleep(12)
+  }
+}
+
+/** Poll `check` until it is true or `ms` passes. */
+async function until(check: () => Promise<boolean>, ms: number): Promise<boolean> {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    if (await check()) return true
+    await sleep(100)
+  }
+  return check()
+}
+
+async function imagesSettled(w: BrowserWindow, ms: number): Promise<boolean> {
+  return until(async () => (await w.webContents.executeJavaScript(`[...document.querySelectorAll("img.cnode-img")].every((i) => i.complete)`)) as boolean, ms)
+}
+
+/**
+ * RIVER_SMOKE_BOARD=1: seed a rich board (references, your note, an agent's labelled options and note, a sequence of
+ * beats with connectors, a circled reference), screenshot it whole and close up, then drive it with real input:
+ * draw a connector with the arrow tool, box-select two cards and drag them, undo and redo, paste an image (it gets
+ * "own work"), zoom with the controls and pan the minimap, jump with Ctrl+K, duplicate and undo, select and delete
+ * a connector and undo, delete a card with its connectors and undo, and open an image in the lightbox.
+ */
+async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId, ms: number) => Promise<boolean>): Promise<boolean> {
+  const p = currentProject()
+  if (!p) return false
+  const passageRef = (await w.webContents.executeJavaScript(`(async () => {
+    const info = await window.river.getProject()
+    const story = await window.river.loadStory(info.stories[0])
+    return info.stories[0] + "#" + story.passages[0].id
+  })()`)) as string
+  const { ids } = await seedRichBoard(p.root, "main", passageRef)
+  const id = (k: string) => ids[k]!
+  const node = (k: string, sub = "") => `.react-flow__node[data-id="${id(k)}"] ${sub}`.trim()
+  const card = (k: string) => loadCard(p.root, "main", id(k))
+  const theme = process.env["RIVER_SMOKE_THEME"] ?? "system"
+  const results: [string, boolean][] = []
+  const check = (name: string, ok: boolean) => {
+    results.push([name, ok])
+    console.log(`river smoke: ${ok ? "ok" : "FAILED"} ${name}`)
+  }
+
+  w.webContents.send("smoke:navigate", "canvas")
+  if (!(await waitFor("canvas", 20_000))) console.warn("river smoke: canvas did not report ready")
+  w.focus()
+  w.webContents.focus()
+  await imagesSettled(w, 10_000)
+  await sleep(600)
+  await shoot(w, dir, `rich-${theme}.png`)
+
+  // Clicking a mark's ink (not its box) selects it and opens its panel; Escape closes it.
+  let panels = 0
+  for (let i = 0; i < 3; i++) {
+    const pt = (await w.webContents.executeJavaScript(`(() => {
+      const path = document.querySelector('[data-mark="m_circle01"] .mark-hit')
+      if (!path) return null
+      const pt = path.getPointAtLength(path.getTotalLength() * 0.3)
+      const m = path.getScreenCTM()
+      return [pt.x * m.a + m.e, pt.y * m.d + m.f]
+    })()`)) as [number, number] | null
+    if (pt) await click(w, pt[0], pt[1])
+    if (await waitRect(w, ".mark-panel", 1_500)) panels++
+    await key(w, "Escape")
+    await sleep(250)
+  }
+  check(`clicking a mark's ink opens its panel (${panels}/3)`, panels === 3)
+
+  // Close up: jump to option B, which brings your note, the options and the agent's note into view.
+  await key(w, "K", ["control"])
+  await waitRect(w, ".jump-input", 3_000)
+  await typeText(w, "lanterns")
+  await key(w, "Return")
+  await sleep(900)
+  await imagesSettled(w, 5_000)
+  await shoot(w, dir, `rich-${theme}-detail.png`)
+  check("Ctrl+K jumps to and selects the card", (await w.webContents.executeJavaScript(`[...document.querySelectorAll(".react-flow__node.selected")].map((n) => n.dataset.id).join()`)) === id("optB"))
+  await key(w, "Escape")
+  await key(w, "1", ["shift"])
+  await sleep(700)
+
+  // Arrow tool: a connector from a reference to the passage card.
+  await clickEl(w, `[data-tool="arrow"]`, 3_000)
+  const from = await centerOf(w, node("shadows", ".cnode-frame"))
+  const to = await centerOf(w, node("passage"))
+  const edgeSaved = waitBoardWrite("edge", (e) => e.from === id("shadows") && e.to === id("passage"), 6_000)
+  if (from && to) await drag(w, from, to, 18)
+  const drawn = await edgeSaved
+  check("arrow tool draws a connector between two cards", drawn !== null && (await until(async () => Boolean(await rectOf(w, `[data-testid="rf__edge-${drawn.id}"]`)), 3_000)))
+  await key(w, "V")
+
+  // Box-select beats 3 and 4 from empty paper, then drag one: both move, as one undo step.
+  const b3 = await rectOf(w, node("beat3"))
+  const b4 = await rectOf(w, node("beat4"))
+  const before3 = await card("beat3")
+  const before4 = await card("beat4")
+  let moved = false
+  let undone = false
+  let redone = false
+  if (b3 && b4 && before3 && before4) {
+    await drag(w, [b3.x - 22, b3.y - 22], [b4.x + b4.w + 22, b4.y + b4.h + 30], 14)
+    await sleep(300)
+    const selected = (await w.webContents.executeJavaScript(`[...document.querySelectorAll(".react-flow__node.selected")].map((n) => n.dataset.id).sort().join()`)) as string
+    check("box select picks exactly the two cards", selected === [id("beat3"), id("beat4")].sort().join())
+    const { zoom } = await viewport(w)
+    const saved3 = waitBoardWrite("card", (c) => c.id === id("beat3"), 6_000)
+    const saved4 = waitBoardWrite("card", (c) => c.id === id("beat4"), 6_000)
+    const grab = (await centerOf(w, node("beat3", ".cnode-frame")))!
+    await drag(w, grab, [grab[0] + 120, grab[1] + 80], 16)
+    const [a3, a4] = await Promise.all([saved3, saved4])
+    const dx = 120 / zoom
+    const dy = 80 / zoom
+    // React Flow starts the drag after the first move, so one step of the 16 can be lost.
+    const slack = 120 / 16 / zoom + 2
+    const shifted = (a: Card | null, b: Card) => a !== null && Math.abs(a.x - b.x - dx) < slack && Math.abs(a.y - b.y - dy) < slack
+    moved = shifted(a3, before3) && shifted(a4, before4) && a3!.x - before3.x === a4!.x - before4.x && a3!.y - before3.y === a4!.y - before4.y
+    check(`dragging one moves both and saves both (expected +${dx.toFixed(1)},+${dy.toFixed(1)}; got ${a3 ? `${a3.x - before3.x},${a3.y - before3.y}` : "none"} and ${a4 ? `${a4.x - before4.x},${a4.y - before4.y}` : "none"})`, moved)
+    await key(w, "Z", ["control"])
+    undone = await until(async () => {
+      const [c3, c4] = [await card("beat3"), await card("beat4")]
+      return c3?.x === before3.x && c3.y === before3.y && c4?.x === before4.x && c4.y === before4.y
+    }, 4_000)
+    check("Ctrl+Z puts both back on disk", undone)
+    await key(w, "Z", ["control", "shift"])
+    redone = await until(async () => (await card("beat3"))?.x !== before3.x, 4_000)
+    check("Ctrl+Shift+Z moves them again", redone)
+    await key(w, "Z", ["control"])
+    await until(async () => (await card("beat3"))?.x === before3.x, 4_000)
+  } else check("beats 3 and 4 are on screen", false)
+
+  // Paste an image from the clipboard: the licence form opens with "own work"; Enter adds the card.
+  await key(w, "Escape")
+  await clipboard.write([new ClipboardItem({ "image/png": new Blob([new Uint8Array(scenePng(4242, 640, 400))], { type: "image/png" }) })])
+  const pane = await rectOf(w, ".react-flow__pane")
+  if (pane) w.webContents.sendInputEvent({ type: "mouseMove", x: Math.round(pane.x + pane.w * 0.62), y: Math.round(pane.y + pane.h * 0.18) })
+  await sleep(100)
+  await key(w, "V", ["control"])
+  const form = await waitRect(w, ".ref-form", 4_000)
+  const licence = form ? ((await w.webContents.executeJavaScript(`[...document.querySelectorAll(".ref-form input")].pop()?.value ?? null`)) as string | null) : null
+  const pasted = waitBoardWrite("card", (c) => c.kind === "ref" && !Object.values(ids).includes(c.id), 6_000)
+  await key(w, "Return")
+  const pastedCard = await pasted
+  check(`paste opens the licence form with "own work" (got ${JSON.stringify(licence)}) and adds the image`, licence === "own work" && pastedCard?.source?.licence === "own work" && (await exists(join(p.root, pastedCard.ref))))
+
+  // Zoom controls and minimap.
+  const pct = async () => (await w.webContents.executeJavaScript(`document.querySelector(".zoom-pct")?.textContent ?? ""`)) as string
+  const pct0 = await pct()
+  await clickEl(w, `[data-zoom="in"]`, 3_000)
+  await sleep(400)
+  const pct1 = await pct()
+  check(`zoom in changes the readout (${pct0} to ${pct1})`, parseInt(pct1) > parseInt(pct0))
+  await clickEl(w, `[data-zoom="fit"]`, 3_000)
+  await sleep(500)
+  const miniNodes = (await w.webContents.executeJavaScript(`document.querySelectorAll(".react-flow__minimap-node").length`)) as number
+  const mini = await centerOf(w, ".react-flow__minimap svg", 3_000)
+  const vp0 = await viewport(w)
+  if (mini) await drag(w, mini, [mini[0] + 30, mini[1] + 14], 10)
+  await sleep(300)
+  const vp1 = await viewport(w)
+  check(`minimap shows ${miniNodes} nodes and dragging it pans the board`, miniNodes >= Object.keys(ids).length && (Math.abs(vp1.x - vp0.x) > 5 || Math.abs(vp1.y - vp0.y) > 5))
+  await key(w, "1", ["shift"])
+  await sleep(600)
+
+  // Duplicate with Ctrl+D, then undo removes the copy.
+  await clickEl(w, node("optD", ".cnode-frame"), 3_000)
+  const dup = waitBoardWrite("card", (c) => c.kind === "concept" && c.variant === "d" && c.id !== id("optD"), 5_000)
+  await key(w, "D", ["control"])
+  const copy = await dup
+  await key(w, "Z", ["control"])
+  check("Ctrl+D duplicates the card and Ctrl+Z removes the copy", copy !== null && (await until(async () => (await loadCard(p.root, "main", copy.id)) === undefined, 4_000)))
+
+  // Click a connector, Delete removes its file, Ctrl+Z brings it back.
+  await key(w, "Escape")
+  let edgeBack = false
+  if (drawn) {
+    const at = (await w.webContents.executeJavaScript(`(() => {
+      const path = document.querySelector('[data-testid="rf__edge-${drawn.id}"] .react-flow__edge-path')
+      if (!path) return null
+      const pt = path.getPointAtLength(path.getTotalLength() * 0.5)
+      const m = path.getScreenCTM()
+      return [pt.x * m.a + m.e, pt.y * m.d + m.f]
+    })()`)) as [number, number] | null
+    if (at) await click(w, at[0], at[1])
+    const picked = (await w.webContents.executeJavaScript(`Boolean(document.querySelector('[data-testid="rf__edge-${drawn.id}"].selected'))`)) as boolean
+    await key(w, "Delete")
+    const gone = await until(async () => !(await exists(join(p.root, ".river", "boards", "main", "edges", `${drawn.id}.json`))), 4_000)
+    await key(w, "Z", ["control"])
+    edgeBack = await until(async () => exists(join(p.root, ".river", "boards", "main", "edges", `${drawn.id}.json`)), 4_000)
+    check("clicking a connector selects it; Delete removes it; Ctrl+Z restores it", picked && gone && edgeBack)
+  }
+
+  // Delete a card that has connectors: its connectors go with it; one Ctrl+Z restores all three files.
+  const beatEdges = (await loadBoard(p.root, "main")).edges.filter((e) => e.from === id("beat2") || e.to === id("beat2")).map((e) => e.id)
+  await clickEl(w, node("beat2", ".cnode-frame"), 3_000)
+  await key(w, "Delete")
+  const cascade = await until(async () => {
+    const b = await loadBoard(p.root, "main")
+    return !b.cards.some((c) => c.id === id("beat2")) && !b.edges.some((e) => beatEdges.includes(e.id))
+  }, 4_000)
+  await key(w, "Z", ["control"])
+  const restored = await until(async () => {
+    const b = await loadBoard(p.root, "main")
+    return b.cards.some((c) => c.id === id("beat2")) && beatEdges.every((e) => b.edges.some((x) => x.id === e))
+  }, 4_000)
+  check(`deleting a card removes its ${beatEdges.length} connectors and Ctrl+Z restores them`, beatEdges.length === 2 && cascade && restored)
+
+  // Double-click an image: lightbox; Escape closes it.
+  const img = await centerOf(w, node("optA", ".cnode-frame"))
+  if (img) {
+    const [x, y] = img.map(Math.round) as [number, number]
+    w.webContents.sendInputEvent({ type: "mouseMove", x, y })
+    for (const clickCount of [1, 2]) {
+      await sleep(40)
+      w.webContents.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount })
+      await sleep(30)
+      w.webContents.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount })
+    }
+  }
+  const opened = await waitImage(w, ".lightbox img", 3_000)
+  await sleep(300)
+  if (opened) await shoot(w, dir, `lightbox-${theme}.png`)
+  await key(w, "Escape")
+  check("double-click opens the lightbox and Escape closes it", opened && (await until(async () => !(await rectOf(w, ".lightbox")), 2_000)))
+
+  await key(w, "Escape")
+  await sleep(300)
+  await shoot(w, dir, `rich-${theme}-after.png`)
+  const ok = results.every(([, r]) => r)
+  console.log(`river smoke: board checks ${ok ? "PASSED" : "FAILED"} (${results.filter(([, r]) => r).length}/${results.length})`)
+  return ok
+}
+
+const stats = (xs: number[]) => {
+  const s = [...xs].sort((a, b) => a - b)
+  const q = (f: number) => s[Math.min(s.length - 1, Math.floor(f * s.length))] ?? 0
+  return { n: s.length, p50: q(0.5), p95: q(0.95), p99: q(0.99), max: s[s.length - 1] ?? 0 }
+}
+
+/**
+ * Record rAF frame intervals and long tasks while `drive` sends input. Frame intervals at the display's refresh
+ * interval mean no frame was dropped; the idle median measured first is that floor.
+ */
+async function framesDuring(w: BrowserWindow, drive: () => Promise<void>) {
+  await w.webContents.executeJavaScript(`(() => {
+    const rec = { frames: [], long: [], moved: 0, run: true }
+    window.__riverFrames = rec
+    const vp = document.querySelector(".react-flow__viewport")
+    let last = performance.now()
+    let was = vp?.style.transform
+    const tick = (t) => {
+      rec.frames.push(t - last)
+      last = t
+      const now = vp?.style.transform
+      if (now !== was) rec.moved++
+      was = now
+      if (rec.run) requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+    try { rec.obs = new PerformanceObserver((l) => rec.long.push(...l.getEntries().map((e) => e.duration))); rec.obs.observe({ type: "longtask" }) } catch {}
+  })()`)
+  await drive()
+  return (await w.webContents.executeJavaScript(`(() => {
+    const rec = window.__riverFrames
+    rec.run = false
+    rec.obs?.disconnect()
+    return { frames: rec.frames.slice(1), long: rec.long, moved: rec.moved, nodes: document.querySelectorAll(".react-flow__node").length, edges: document.querySelectorAll(".react-flow__edge").length, imgs: document.querySelectorAll("img.cnode-img").length }
+  })()`)) as { frames: number[]; long: number[]; moved: number; nodes: number; edges: number; imgs: number }
+}
+
+/** Wheel-pan in circles for `ms` (one loop a second), so the board keeps moving without leaving the cards. */
+async function wheelPan(w: BrowserWindow, ms: number, step = 40): Promise<void> {
+  const pane = (await rectOf(w, ".react-flow__pane"))!
+  const x = Math.round(pane.x + pane.w / 2)
+  const y = Math.round(pane.y + pane.h / 2)
+  const start = Date.now()
+  while (Date.now() - start < ms) {
+    const a = ((Date.now() - start) / 1000) * Math.PI * 2
+    w.webContents.sendInputEvent({ type: "mouseWheel", x, y, deltaX: Math.round(Math.cos(a) * step), deltaY: Math.round(Math.sin(a) * step), canScroll: true })
+    await sleep(8)
+  }
+}
+
+/**
+ * RIVER_SMOKE_PERF=1: seed a 150-card board (100 distinct generated images, 50 notes, 60 connectors), then report
+ * load to ready, how long until the images on screen have loaded, and frame intervals during a scripted wheel pan at
+ * fit-all zoom and at 100%. RIVER_SMOKE_CULL=0 turns React Flow's culling off for comparison.
+ */
+/**
+ * RIVER_SMOKE_PROFILE=1: a renderer CPU profile of `run`, written as renderer.cpuprofile, with the functions that took
+ * the most self time printed. The profiler slows the page, so frame numbers from such a run are not reported.
+ */
+async function profiled(w: BrowserWindow, dir: string, run: () => Promise<void>): Promise<void> {
+  const dbg = w.webContents.debugger
+  dbg.attach("1.3")
+  await dbg.sendCommand("Profiler.enable")
+  await dbg.sendCommand("Profiler.setSamplingInterval", { interval: 200 })
+  await dbg.sendCommand("Profiler.start")
+  await run()
+  const { profile } = (await dbg.sendCommand("Profiler.stop")) as {
+    profile: { nodes: { id: number; callFrame: { functionName: string; url: string; lineNumber: number } }[]; samples: number[]; timeDeltas: number[] }
+  }
+  dbg.detach()
+  await writeFile(join(dir, "renderer.cpuprofile"), JSON.stringify(profile))
+  const self = new Map<number, number>()
+  profile.samples.forEach((id, i) => self.set(id, (self.get(id) ?? 0) + (profile.timeDeltas[i] ?? 0)))
+  const byName = new Map<string, number>()
+  for (const n of profile.nodes) {
+    const f = n.callFrame
+    const name = `${f.functionName || "(anonymous)"} ${f.url.split("/").pop() ?? ""}:${f.lineNumber}`
+    byName.set(name, (byName.get(name) ?? 0) + (self.get(n.id) ?? 0))
+  }
+  const total = [...byName.values()].reduce((a, b) => a + b, 0)
+  const top = [...byName.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14)
+  console.log(`river perf: profile ${Math.round(total / 1000)} ms sampled; top self time:`)
+  for (const [name, us] of top) console.log(`river perf:   ${(us / 1000).toFixed(1).padStart(7)} ms  ${((us / total) * 100).toFixed(1).padStart(5)}%  ${name}`)
+}
+
+async function smokePerf(w: BrowserWindow, dir: string, waitFor: (view: ViewId, ms: number) => Promise<boolean>): Promise<boolean> {
+  const p = currentProject()
+  if (!p) return false
+  const t0 = performance.now()
+  const seeded = await seedPerfBoard(p.root, "main")
+  console.log(`river perf: seeded ${JSON.stringify(seeded)} in ${Math.round(performance.now() - t0)} ms`)
+  w.focus()
+  w.webContents.focus()
+  await sleep(500)
+  const idle = await framesDuring(w, async () => {
+    await sleep(1_000)
+  })
+  const tNav = performance.now()
+  w.webContents.send("smoke:navigate", "canvas")
+  const ready = await waitFor("canvas", 60_000)
+  // useSmokeReady reports two frames plus 250 ms after the canvas is ready.
+  const navToReady = performance.now() - tNav - 250
+  const marks = (await w.webContents.executeJavaScript(`(() => {
+    const last = (n) => performance.getEntriesByName(n).pop()?.startTime ?? null
+    return { open: last("canvas:open"), loaded: last("canvas:loaded"), ready: last("canvas:ready") }
+  })()`)) as Record<string, number | null>
+  const tImg = performance.now()
+  const settled = await imagesSettled(w, 20_000)
+  const imagesMs = performance.now() - tImg
+  const atLoad = (await w.webContents.executeJavaScript(`({ nodes: document.querySelectorAll(".react-flow__node").length, imgs: document.querySelectorAll("img.cnode-img").length, loaded: [...document.querySelectorAll("img.cnode-img")].filter((i) => i.complete && i.naturalWidth > 0).length })`)) as Record<string, number>
+  const vpFit0 = await viewport(w)
+  const fit = await framesDuring(w, () => (process.env["RIVER_SMOKE_PROFILE"] === "1" ? profiled(w, dir, () => wheelPan(w, 3_000)) : wheelPan(w, 3_000)))
+  await key(w, "1", ["shift"])
+  await sleep(500)
+  for (let i = 0; i < 12 && (await viewport(w)).zoom < 0.99; i++) {
+    await clickEl(w, `[data-zoom="in"]`, 2_000)
+    await sleep(250)
+  }
+  await imagesSettled(w, 10_000)
+  const vp100a = await viewport(w)
+  const at100 = await framesDuring(w, () => wheelPan(w, 3_000))
+  const report = {
+    cull: process.env["RIVER_SMOKE_CULL"] !== "0",
+    ready,
+    navToReadyMs: Math.round(navToReady),
+    rendererOpenToLoadedMs: marks["open"] != null && marks["loaded"] != null ? Math.round(marks["loaded"] - marks["open"]) : null,
+    rendererLoadedToReadyMs: marks["loaded"] != null && marks["ready"] != null ? Math.round(marks["ready"] - marks["loaded"]) : null,
+    imagesSettledAfterReadyMs: settled ? Math.round(imagesMs) : null,
+    atLoad,
+    idleFrame: stats(idle.frames),
+    fitPan: { zoom: +vpFit0.zoom.toFixed(3), framesMoved: fit.moved, frames: stats(fit.frames), over25ms: fit.frames.filter((f) => f > 25).length, longTasks: fit.long.length, longMax: Math.round(Math.max(0, ...fit.long)), dom: { nodes: fit.nodes, edges: fit.edges, imgs: fit.imgs } },
+    pan100: { zoom: +vp100a.zoom.toFixed(3), framesMoved: at100.moved, frames: stats(at100.frames), over25ms: at100.frames.filter((f) => f > 25).length, longTasks: at100.long.length, longMax: Math.round(Math.max(0, ...at100.long)), dom: { nodes: at100.nodes, edges: at100.edges, imgs: at100.imgs } },
+  }
+  console.log(`river perf: ${JSON.stringify(report)}`)
+  return ready && report.fitPan.framesMoved > 0 && report.pan100.framesMoved > 0
+}
+
 async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
-  const limit = process.env["RIVER_SMOKE_JOB"] === "1" ? 300_000 : 120_000
+  const limit = process.env["RIVER_SMOKE_JOB"] === "1" || process.env["RIVER_SMOKE_PERF"] === "1" ? 300_000 : 180_000
   const hardStop = setTimeout(() => {
     console.error(`river smoke: timed out after ${limit / 1000}s`)
     app.exit(2)
@@ -528,6 +921,20 @@ async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
     if (!(await waitFor("story-map", 30_000))) console.warn("river smoke: story map did not report ready")
     const ok = await smokeJob(w, dir, waitFor).catch((err: unknown) => {
       console.error("river smoke: job run threw", err)
+      return false
+    })
+    clearTimeout(hardStop)
+    app.exit(ok ? 0 : 1)
+    return
+  }
+  for (const [env, run] of [
+    ["RIVER_SMOKE_BOARD", () => smokeBoard(w, dir, waitFor)],
+    ["RIVER_SMOKE_PERF", () => smokePerf(w, dir, waitFor)],
+  ] as const) {
+    if (process.env[env] !== "1") continue
+    if (!(await waitFor("story-map", 30_000))) console.warn("river smoke: story map did not report ready")
+    const ok = await run().catch((err: unknown) => {
+      console.error(`river smoke: ${env} threw`, err)
       return false
     })
     clearTimeout(hardStop)
