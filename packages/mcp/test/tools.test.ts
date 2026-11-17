@@ -12,9 +12,11 @@ const STORY = "stories/park_walk.twee"
 export const EXPECTED_TOOLS = [
   "project_info", "story_list", "story_read", "story_lint", "story_paths", "playtest_run",
   "frames_list", "review_list", "plan_list", "plan_read", "board_read", "marks_open", "brief_read",
+  "card_read", "mark_read", "card_view",
   "story_write_passage", "story_add_passage", "review_reply", "plan_save",
   "implement_edit", "plan_mark_implemented", "frames_capture",
   "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row",
+  "board_update_note", "board_remove_card", "concept_request",
 ]
 
 let dir: string
@@ -33,18 +35,35 @@ beforeEach(async () => {
 })
 
 describe("tool list", () => {
-  it("has the 26 contract names, with the write tools marked mutating", () => {
+  it("has the 32 contract names, with the write tools marked mutating", () => {
     expect([...tools.map((t) => t.name)].sort()).toEqual([...EXPECTED_TOOLS].sort())
     expect([...RIVER_TOOL_NAMES].sort()).toEqual([...EXPECTED_TOOLS, "concept_write"].sort())
     expect(tools.filter((t) => t.mutating).map((t) => t.name).sort()).toEqual(
-      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture", "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row"].sort(),
+      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture", "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row", "board_update_note", "board_remove_card", "concept_request"].sort(),
     )
+  })
+
+  it("a concept job's server has concept_write and no concept_request, so a job never starts another", () => {
+    const names = createRiverTools(project, { conceptId: "j_abc" }).map((t) => t.name)
+    expect(names).toContain("concept_write")
+    expect(names).not.toContain("concept_request")
+    expect(() => selectTools(createRiverTools(project, { conceptId: "j_abc" }), ["concept_request"])).toThrow(/a --concept server has no concept_request/)
+  })
+
+  it("refuses to write as the user or as River's own job role, per server and per review reply", async () => {
+    expect(() => createRiverTools(project, { author: "concept-artist" })).toThrow(/River's own role/)
+    expect(() => createRiverTools(project, { author: " You " })).toThrow(/is the user/)
+    await expect(call("review_reply", { threadId: "t_x", text: "hi", author: "you" })).rejects.toThrow(/is the user/)
+    await expect(call("review_reply", { threadId: "t_x", text: "hi", author: "Concept-Artist" })).rejects.toThrow(/River's own role/)
   })
 })
 
 describe("read tools", () => {
   it("project_info and story_list", async () => {
-    expect((await call("project_info")).text).toContain(`story files: ${STORY}`)
+    const info = (await call("project_info")).text
+    expect(info).toContain(`story files: ${STORY}`)
+    expect(info).toContain("state variables (stories/state.json):\n  energy: number 0..100, initial 80\n")
+    expect(info).toContain("  treats: int 0..10, initial 2")
     expect((await call("story_list")).text).toContain(`${STORY}  "Park Walk"  8 passages, start: Gate`)
   })
 
@@ -53,6 +72,7 @@ describe("read tools", () => {
     expect(r.text).toContain(readFileSync(join(dir, STORY), "utf8"))
     expect(r.text).toContain("- Pond (id pond) [encounter]")
     expect(r.text).toContain("    1: Throw a treat -> Treat")
+    expect(r.text).toContain("State variables (stories/state.json):\n  energy: number 0..100, initial 80\n")
     const data = r.data as { passages: { id: string; choices: { target: string }[] }[] }
     expect(data.passages.find((p) => p.id === "pond")!.choices.map((c) => c.target)).toEqual(["Calm down", "Treat", "Splash"])
   })
@@ -60,8 +80,11 @@ describe("read tools", () => {
   it("story_lint reports the planted problems", async () => {
     const r = await call("story_lint", { file: STORY })
     expect(r.text).toContain("error  Pond → Splash: no passage has this name")
-    expect(r.text).toContain("1 error, 2 warnings in 8 passages")
-    expect((await call("story_lint")).text).toContain("1 error, 2 warnings in 8 passages")
+    expect(r.text).toContain("1 error, 3 warnings in 8 passages")
+    expect((await call("story_lint")).text).toContain("1 error, 3 warnings in 8 passages")
+    expect(r.text).toContain(
+      "warn   Long path → Fetch: the choice can show while Fetch cannot be entered (its @when energy >= 20 is false). Give the choice @when energy >= 20, or loosen Fetch's @when.",
+    )
   })
 
   it("story_paths formats routes like the CLI", async () => {
@@ -102,6 +125,14 @@ describe("story writes", () => {
     // The planted Splash error was there before, so it is not new.
     expect(r.text).not.toMatch(/New lint problems:[\s\S]*Splash/)
     expect(r.text).toContain("2 errors in the file now.")
+  })
+
+  it("story_write_passage keeps one blank line before the next passage, and suggests ids for a wrong one", async () => {
+    const r = await call("story_write_passage", { file: STORY, passageId: "fetch", rawText: "@id fetch\n--\nThe dog drops the stick.\n\n[[Head home->Home happy]]\n\n" })
+    expect(readFileSync(join(dir, STORY), "utf8")).toContain("[[Head home->Home happy]]\n\n:: Home happy [ending]")
+    expect(r.text).toContain("+[[Head home->Home happy]]\n \n :: Home happy")
+    await expect(call("story_write_passage", { file: STORY, passageId: "Fetch", rawText: "x" })).rejects.toThrow('no passage with id "Fetch". Did you mean "fetch" (passage Fetch)?')
+    await expect(call("story_write_passage", { file: STORY, passageId: "Long path", rawText: "x" })).rejects.toThrow('Did you mean "long_path" (passage Long path)')
   })
 
   it("story_add_passage appends a passage", async () => {

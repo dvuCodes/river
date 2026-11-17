@@ -13,13 +13,15 @@ const example = fileURLToPath(new URL("../../../examples/park-walk/", import.met
 const EXPECTED_TOOLS = [
   "project_info", "story_list", "story_read", "story_lint", "story_paths", "playtest_run",
   "frames_list", "review_list", "plan_list", "plan_read", "board_read", "marks_open", "brief_read",
+  "card_read", "mark_read", "card_view",
   "story_write_passage", "story_add_passage", "review_reply", "plan_save",
   "implement_edit", "plan_mark_implemented", "frames_capture",
   "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row",
+  "board_update_note", "board_remove_card", "concept_request",
 ]
 
 describe("river-mcp over stdio", () => {
-  it("lists the 26 tools and runs story_lint", { timeout: 60_000 }, async () => {
+  it("lists the 32 tools with the loop in its instructions, and answers in text only", { timeout: 60_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), "river-mcp-e2e-"))
     cpSync(example, root, { recursive: true })
     // tsx lives in the repo root node_modules, so run from there.
@@ -35,11 +37,14 @@ describe("river-mcp over stdio", () => {
       expect(client.getServerVersion()?.name).toBe("river")
       const { tools } = await client.listTools()
       expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort())
+      const instructions = client.getInstructions() ?? ""
+      expect(instructions).toMatch(/marks_open[\s\S]*mark_claim[\s\S]*answers: <markId>[\s\S]*mark_reply[\s\S]*concept_request/)
+      expect(instructions.length).toBeLessThan(1500)
 
       const lint = await client.callTool({ name: "story_lint", arguments: { file: "stories/park_walk.twee" } })
       expect(lint.isError).toBeFalsy()
       const text = (lint.content as { type: string; text: string }[])[0]!.text
-      expect(text).toContain("1 error, 2 warnings in 8 passages")
+      expect(text).toContain("1 error, 3 warnings in 8 passages")
 
       const bad = await client.callTool({ name: "story_read", arguments: { file: "../x" } })
       expect(bad.isError).toBe(true)
@@ -50,7 +55,8 @@ describe("river-mcp over stdio", () => {
       expect(invalid.isError).toBe(true)
       const info = await client.callTool({ name: "project_info", arguments: {} })
       expect(info.isError).toBeFalsy()
-      expect((info.structuredContent as { engine?: string } | undefined)?.engine).toBe("none")
+      expect(info.structuredContent).toBeUndefined()
+      expect((info.content as { text: string }[])[0]!.text).toContain("(engine: none)")
     } finally {
       await client.close()
     }
@@ -99,16 +105,51 @@ describe("river-mcp over stdio", () => {
       await client.connect(transport)
       expect(text(await client.callTool({ name: "marks_open", arguments: {} }))).toContain("you: a calmer pond?")
       expect((await client.callTool({ name: "mark_claim", arguments: { markId: "m_stdio001" } })).isError).toBeFalsy()
-      const note = await client.callTool({ name: "board_add_note", arguments: { near: "m_stdio001", text: "Softer light, fewer ducks." } })
-      const noteId = (note.structuredContent as { id: string }).id
-      await client.callTool({ name: "board_connect", arguments: { from: "m_stdio001", to: noteId } })
+      const note = text(await client.callTool({ name: "board_add_note", arguments: { answers: "m_stdio001", text: "Softer light, fewer ducks." } }))
+      const noteId = /Added note (c_\w+)/.exec(note)![1]!
+      mkdirSync(join(root, "art"))
+      writeFileSync(join(root, "art", "calm.png"), Buffer.from("89504e470d0a1a0a", "hex"))
+      const card = text(await client.callTool({ name: "board_add_card", arguments: { answers: "m_stdio001", file: "art/calm.png", source: { licence: "own work" } } }))
+      const cardId = /card (c_\w+) \[A\]/.exec(card)![1]!
+      const seen = await client.callTool({ name: "card_view", arguments: { cardId } })
+      expect((seen.content as { type: string; mimeType?: string }[]).map((c) => [c.type, c.mimeType])).toEqual([["text", undefined], ["image", "image/png"]])
       await client.callTool({ name: "mark_reply", arguments: { markId: "m_stdio001", text: "See the note.", status: "answered" } })
       const saved = JSON.parse(readFileSync(join(marks, "m_stdio001.json"), "utf8")) as { status: string; thread: { by: string }[] }
       expect(saved.status).toBe("answered")
       expect(saved.thread.at(-1)!.by).toBe("claude-code")
-      expect(text(await client.callTool({ name: "board_read", arguments: {} }))).toContain(`m_stdio001 -> ${noteId}  by claude-code`)
+      const board = text(await client.callTool({ name: "board_read", arguments: {} }))
+      expect(board).toContain(`m_stdio001 -> ${noteId}  by claude-code`)
+      expect(board).toContain(`${noteId} -> ${cardId}  by claude-code`)
     } finally {
       await client.close()
+    }
+  })
+
+  it("two river-mcp processes racing for the same mark: exactly one claim wins, every time", { timeout: 120_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "river-mcp-race-"))
+    cpSync(example, root, { recursive: true })
+    const marks = join(root, ".river", "boards", "main", "marks")
+    mkdirSync(marks, { recursive: true })
+    const connect = async (author: string) => {
+      const client = new Client({ name: author, version: "0.0.0" })
+      await client.connect(new StdioClientTransport({ command: process.execPath, args: ["--import", "tsx", mainTs, "--root", root, "--author", author], cwd: repoRoot, stderr: "pipe" }))
+      return client
+    }
+    const [a, b] = await Promise.all([connect("agent-a"), connect("agent-b")])
+    try {
+      const winners: string[] = []
+      for (let i = 0; i < 30; i++) {
+        const id = `m_race${String(i).padStart(4, "0")}`
+        const at = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()
+        writeFileSync(join(marks, `${id}.json`), JSON.stringify({ id, shape: "pin", path: [i, i], anchors: [], thread: [{ by: "you", at, text: `race ${i}` }], status: "open", madeBy: "you", createdAt: at }))
+        const results = await Promise.all([a, b].map((c) => c.callTool({ name: "mark_claim", arguments: { markId: id } })))
+        const won = results.filter((r) => !r.isError).length
+        expect(won, `trial ${i}`).toBe(1)
+        winners.push(JSON.parse(readFileSync(join(marks, `${id}.json`), "utf8")).claimedBy)
+      }
+      expect(winners.every((w) => w === "agent-a" || w === "agent-b")).toBe(true)
+    } finally {
+      await Promise.all([a.close(), b.close()])
     }
   })
 })

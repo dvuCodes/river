@@ -6,25 +6,37 @@
  * Handlers throw on bad input; the MCP server turns a throw into an `isError` tool result.
  */
 import { existsSync } from "node:fs"
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { conceptScriptBytesProblem, createGodotAdapter, lintConceptScript } from "@river/adapter-godot"
 import {
+  answerStart,
   assertConceptFile,
   assertConceptId,
   BOARD_GAP,
   besideRect,
   cardHeight,
+  cardImageFile,
+  cardRect,
   claimMark,
   conceptCaptionName,
   conceptPath,
   DEFAULT_BOARD,
+  deleteCard,
+  deleteEdge,
   elementRect,
   formatBoard,
+  formatCard,
   formatMark,
   IMAGE_CARD_W,
+  jobRenderName,
   listBoards,
+  listJobs,
   loadBoard,
+  loadCard,
+  loadJob,
+  markRect,
+  newBoardId,
   NOTE_CARD_W,
   occupiedRects,
   openMarks,
@@ -33,6 +45,7 @@ import {
   placeRow,
   readBrief,
   replyToMark,
+  RESERVED_AUTHORS,
   saveCard,
   saveEdge,
   assertEditAllowed,
@@ -60,9 +73,10 @@ import {
   setPlanStatus,
   updatePassageText,
 } from "@river/core"
-import type { Board, Card, ChangePlan, Diagnostic, EngineAdapter, Mark, Passage, Project, Story } from "@river/core"
+import type { Board, Card, ChangePlan, Diagnostic, EngineAdapter, Job, Mark, Passage, Project, StateSchema, Story } from "@river/core"
 import { z } from "zod"
 import { unifiedDiff } from "./diff"
+import { launchConceptJob, type JobLauncher } from "./jobs"
 
 export const READ_TOOL_NAMES = [
   "project_info",
@@ -78,6 +92,9 @@ export const READ_TOOL_NAMES = [
   "board_read",
   "marks_open",
   "brief_read",
+  "card_read",
+  "mark_read",
+  "card_view",
 ] as const
 
 export const WRITE_TOOL_NAMES = [
@@ -95,6 +112,9 @@ export const WRITE_TOOL_NAMES = [
   "board_add_card",
   "board_connect",
   "board_place_row",
+  "board_update_note",
+  "board_remove_card",
+  "concept_request",
 ] as const
 
 export type RiverToolName = (typeof READ_TOOL_NAMES)[number] | (typeof WRITE_TOOL_NAMES)[number]
@@ -104,8 +124,10 @@ export const RIVER_TOOL_NAMES: readonly RiverToolName[] = [...READ_TOOL_NAMES, .
 export interface RiverToolResult {
   /** What the model reads. Complete on its own. */
   text: string
-  /** The same result as structured data, for in-process callers (diffs, plan ids, capture files). */
+  /** The same result as structured data, for in-process callers (diffs, plan ids, capture files). Never sent over MCP. */
   data?: unknown
+  /** Images the model sees after the text (card_view). */
+  images?: { data: string; mimeType: string }[]
 }
 
 export interface RiverTool {
@@ -126,6 +148,8 @@ export interface RiverToolsOptions {
   author?: string
   /** The concept job this server works for. concept_write exists only when this is set, and writes only in concepts/<conceptId>/. */
   conceptId?: string
+  /** How concept_request starts a job in its own process. Default: River's CLI, `river job start`, detached. */
+  jobLauncher?: JobLauncher
 }
 
 /** The engine adapter for a project, by manifest.engine. */
@@ -139,6 +163,21 @@ export function adapterFor(project: Project): EngineAdapter {
 }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
+
+/** Throws for a name an agent may not write as: the user ("you") and River's own job role. */
+function assertAgentAuthor(author: string): void {
+  const name = author.trim().toLowerCase()
+  if (name === "you") throw new Error('river: the author "you" is the user; run the server as an agent role such as "claude-code"')
+  if (RESERVED_AUTHORS.includes(name)) throw new Error(`river: "${author}" is River's own role; run the server as an agent role such as "claude-code"`)
+}
+
+/** The state schema, one variable per line: type, range and starting value. */
+function schemaLines(schema: StateSchema): string[] {
+  return Object.entries(schema).map(([name, d]) => {
+    const range = d.type === "number" || d.type === "int" ? ` ${d.min ?? "-inf"}..${d.max ?? "inf"}` : d.type === "enum" ? ` (${d.values.join(" | ")})` : ""
+    return `  ${name}: ${d.type}${range}, initial ${d.initial === undefined ? "(none)" : String(d.initial)}`
+  })
+}
 const formatDiag = (d: Diagnostic) => `${d.severity.padEnd(6)} ${d.message}`
 const diagKey = (d: Diagnostic) => `${d.severity}|${d.code}|${d.message}`
 
@@ -184,8 +223,8 @@ const scalar = z.union([z.number(), z.string(), z.boolean()])
 
 export function createRiverTools(project: Project, opts: RiverToolsOptions = {}): RiverTool[] {
   const defaultAuthor = opts.author ?? "agent"
-  // River trusts "you" as the user's own words (a reply that starts a revision); an agent never writes as the user.
-  if (defaultAuthor.trim().toLowerCase() === "you") throw new Error('river: the author "you" is the user; run the server as an agent role such as "claude-code"')
+  // River trusts "you" as the user's own words (a reply that starts a revision), and concept-artist as its job's answer.
+  assertAgentAuthor(defaultAuthor)
 
   /** The story file, checked to be inside the root and one of the project's story files. */
   async function storyRel(file: string): Promise<string> {
@@ -238,12 +277,13 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
   const tools: RiverTool[] = [
     define({
       name: "project_info",
-      description: "Summary of the River project: name, engine, folders, editable globs, story files and shot ids.",
+      description: "Summary of the River project: name, engine, folders, editable globs, story files, shot ids, and the state variables with their type, range and starting value.",
       inputSchema: {},
       mutating: false,
       async run() {
         const m = project.manifest
         const stories = await listStories(project)
+        const schema = await loadSchema(project).catch(() => undefined)
         const data = {
           root: project.root,
           name: m.name,
@@ -254,6 +294,7 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
           editable: m.editable,
           storyFiles: stories,
           shots: m.shots.map((s) => ({ id: s.id, scene: s.scene, count: s.count, ...(s.note ? { note: s.note } : {}) })),
+          ...(schema ? { schema } : {}),
         }
         const text = [
           `${m.name} (engine: ${m.engine})`,
@@ -262,6 +303,7 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
           `editable: ${(m.editable ?? []).join(", ")}`,
           `story files: ${stories.join(", ") || "(none)"}`,
           `shots: ${m.shots.map((s) => s.id).join(", ") || "(none)"}`,
+          ...(schema ? [`state variables (${m.state}):`, ...schemaLines(schema)] : [`state variables: ${m.state} is missing or invalid`]),
         ].join("\n")
         return { text, data }
       },
@@ -286,7 +328,7 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
     define({
       name: "story_read",
       description:
-        "Read a story file: the raw Twee 3 text, then each passage with id, name, tags and choices. Choice indexes start at 0 (the same indexes playtest_run uses).",
+        "Read a story file: the raw Twee 3 text, then each passage with id, name, tags and choices, then the state variables (type, range, starting value). Choice indexes start at 0 (the same indexes playtest_run uses).",
       inputSchema: { file: storyFile },
       mutating: false,
       async run({ file }) {
@@ -299,7 +341,9 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
           const choices = p.choices.map((c) => `\n    ${c.index}: ${c.label} -> ${c.target}`).join("")
           return `- ${p.name} (id ${p.id})${tags}${p.isEnding ? " @end" : ""}${choices}`
         })
-        const text = `${rel}\n\n${raw}\n\nPassages (${passages.length}), start: ${story.start}\n${list.join("\n")}`
+        const schema = await loadSchema(project).catch(() => undefined)
+        const state = schema ? `\n\nState variables (${project.manifest.state}):\n${schemaLines(schema).join("\n")}` : ""
+        const text = `${rel}\n\n${raw}\n\nPassages (${passages.length}), start: ${story.start}\n${list.join("\n")}${state}`
         return { text, data: { file: rel, raw, title: story.title, start: story.start, passages } }
       },
     }),
@@ -482,7 +526,8 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
         const rel = await storyRel(file)
         const before = await readText(rel)
         const { story, diagnostics } = await lintFile(rel)
-        const next = updatePassageText(story, passageId, rawText.replace(/\r\n?/g, "\n"))
+        // The file puts the blank line between passages; a trailing newline in rawText would add another.
+        const next = updatePassageText(story, passageId, rawText.replace(/\r\n?/g, "\n").replace(/\n+$/, ""))
         return writeStory(rel, before, diagnostics, next, `Updated passage ${passageId} in ${rel}.`)
       },
     }),
@@ -514,10 +559,11 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
       inputSchema: {
         threadId: z.string().min(1),
         text: z.string().min(1),
-        author: z.string().min(1).optional().describe('Default "agent"'),
+        author: z.string().min(1).optional().describe(`Default "${defaultAuthor}". Never "you" (the user) or "concept-artist" (River's jobs)`),
       },
       mutating: true,
       async run({ threadId, text, author }) {
+        if (author !== undefined) assertAgentAuthor(author)
         const thread = await reply(project, threadId, author ?? defaultAuthor, text)
         return { text: `Replied to ${threadId} (${plural(thread.messages.length, "message")} now).`, data: thread }
       },
@@ -638,7 +684,9 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
   ]
 
   tools.push(...boardTools(project, defaultAuthor))
+  // A concept job's own server never starts another job.
   if (opts.conceptId !== undefined) tools.push(conceptWrite(project, opts.conceptId))
+  else tools.push(conceptRequest(project, defaultAuthor, opts.jobLauncher ?? launchConceptJob))
   return tools
 }
 
@@ -691,6 +739,10 @@ function conceptWrite(project: Project, conceptId: string): RiverTool {
 const boardName = z.string().regex(/^[a-z0-9_-]{1,64}$/, "a-z, 0-9, _ and -").optional().describe('Board name. Default "main"')
 const entityId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "a card or mark id")
 const IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i
+const IMAGE_TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" }
+/** card_view refuses bigger files: an image block that size costs the model more than it shows. */
+const VIEW_MAX_BYTES = 4 * 1024 * 1024
+const VIEW_MAX_IMAGES = 4
 
 /**
  * The storyboard tools. Every write is one small file under .river/boards/<board>/, renamed into place, so
@@ -717,8 +769,32 @@ function boardTools(project: Project, author: string): RiverTool[] {
     return besideRect(target)
   }
 
-  /** What kind of card an image file under the project makes: a capture is a frame, an accepted concept render a concept, anything else a reference. */
-  async function imageCard(rel: string): Promise<Pick<Card, "kind" | "ref" | "rev" | "variant">> {
+  function needMark(b: Board, markId: string): Mark {
+    const mark = b.marks.find((m) => m.id === markId)
+    if (!mark) throw new Error(`no mark "${markId}" on board ${b.name}`)
+    return mark
+  }
+
+  /**
+   * Where an answer's image card goes and what it hangs off: the newest note answering the mark (or the mark
+   * itself, before there is a note), in the row of cards that note already leads to.
+   */
+  function answerRow(b: Board, markId: string): { head: string; spot: { x: number; y: number }; index: number } {
+    const notes = b.edges.filter((e) => e.from === markId).map((e) => b.cards.find((c) => c.id === e.to && c.kind === "note")).filter((c): c is Card => c !== undefined)
+    const head = notes.at(-1)
+    const headId = head?.id ?? markId
+    const headRect = head ? cardRect(head) : markRect(needMark(b, markId))
+    const row = b.edges.filter((e) => e.from === headId).map((e) => b.cards.find((c) => c.id === e.to && c.kind !== "note")).filter((c): c is Card => c !== undefined)
+    const right = Math.max(headRect.x + headRect.w, ...row.map((c) => c.x + c.w))
+    return { head: headId, spot: { x: right + BOARD_GAP, y: headRect.y }, index: row.length }
+  }
+
+  /**
+   * What card an image file under the project makes. A capture River knows is a frame. A concept render is a
+   * concept only when a job backs it: an accepted job's kept render beside its script, or a rendered job's
+   * pending render in .river/jobs/<job>/. Anything else, under concepts/ too, is a reference that needs a licence.
+   */
+  async function imageCard(rel: string): Promise<Pick<Card, "kind" | "ref" | "rev" | "variant" | "pending">> {
     const capture = /^\.river\/captures\/([^/]+)\/[^/]+\/[^/]+$/.exec(rel)
     if (capture) {
       const abs = path.resolve(safePath(project, rel))
@@ -726,16 +802,54 @@ function boardTools(project: Project, author: string): RiverTool[] {
       if (!found) throw new Error(`${rel} is not a frame of a capture River knows (frames_list lists them)`)
       return { kind: "frame", ref: found.shotId, rev: found.rev }
     }
-    const concept = /^concepts\/([A-Za-z0-9_-]+)\/concept(?:_([a-e]))?\.png$/.exec(rel)
-    if (concept) return { kind: "concept", ref: concept[1]!, ...(concept[2] ? { variant: concept[2] } : {}) }
+    const variantOf = (v: string | undefined) => (v ? { variant: v } : {})
+    const pending = /^\.river\/jobs\/(j_[A-Za-z0-9_-]+)\/render(?:_([a-e]))?\.png$/.exec(rel)
+    if (pending) {
+      const job = await loadJob(root, pending[1]!).catch(() => undefined)
+      const script = job?.scripts?.find((s) => s.variant === pending[2] && s.render?.ok)
+      if (job && script && (job.status === "answered" || (job.status === "accepted" && script.accepted))) {
+        return { kind: "concept", ref: job.conceptId, ...variantOf(pending[2]), ...(job.status === "answered" ? { pending: { markId: job.markId, jobId: job.id } } : {}) }
+      }
+    }
+    const accepted = /^concepts\/([A-Za-z0-9_-]+)\/concept(?:_([a-e]))?\.png$/.exec(rel)
+    if (accepted) {
+      const backed = (await listJobs(root)).some(
+        (j: Job) => j.conceptId === accepted[1] && j.status === "accepted" && j.scripts?.some((s) => s.variant === accepted[2] && s.accepted),
+      )
+      if (backed) return { kind: "concept", ref: accepted[1]!, ...variantOf(accepted[2]) }
+    }
     return { kind: "ref", ref: rel }
   }
+
+  /** The image files a card shows, relative to the root: one for a concept or reference, a capture's frames for a frame card. */
+  async function imageFiles(card: Card): Promise<string[]> {
+    if (card.kind === "frame") {
+      const captures = await listCaptures(project, card.ref)
+      const capture = card.rev ? captures.find((c) => c.rev === card.rev) : captures[0]
+      if (!capture) throw new Error(`shot ${card.ref} has no capture${card.rev ? ` at rev ${card.rev}` : ""} yet`)
+      return capture.files.map((f) => path.relative(root, f).split(path.sep).join("/"))
+    }
+    const file = cardImageFile(card)
+    if (!file) throw new Error(`${card.id} is a ${card.kind} card, not an image; card_read shows its text`)
+    return [file]
+  }
+
+  /** Write a card the caller made, so an agent can change and remove its own answer but nobody else's. */
+  async function ownCard(b: Board, cardId: string): Promise<Card> {
+    const card = await loadCard(root, b.name, cardId)
+    if (!card) throw new Error(`no card "${cardId}" on board ${b.name}`)
+    if (card.madeBy !== author) throw new Error(`${cardId} was made by ${card.madeBy}; ${author} changes only its own cards`)
+    if (card.pending) throw new Error(`${cardId} belongs to River job ${card.pending.jobId}; the user accepts or dismisses it in River`)
+    return card
+  }
+
+  const edgesOf = (b: Board, id: string) => b.edges.filter((e) => e.from === id || e.to === id)
 
   return [
     define({
       name: "board_read",
       description:
-        "Read a storyboard: every card (id, kind, position, option label, caption, what it shows, pending job), every mark (status, job, thread) and every edge (from -> to). Ids here are what the other board tools take.",
+        "Read a storyboard: every card (id, kind, position and size, option label, caption, what it shows, image file, pending job), every mark (status, job, box, what it is on, thread) and every edge (from -> to). Long text is clipped; card_read and mark_read show it in full. Ids here are what the other board tools take.",
       inputSchema: { board: boardName },
       mutating: false,
       async run({ board: name }) {
@@ -746,15 +860,94 @@ function boardTools(project: Project, author: string): RiverTool[] {
 
     define({
       name: "marks_open",
-      description: "List the open marks (requests the user drew on a storyboard that nobody is working on), across every board, oldest first, with their threads.",
+      description:
+        "List the open marks (requests the user drew on a storyboard that nobody is working on), across every board, oldest first, with what each is on and its thread. Marks that River's concept jobs answer are not listed.",
       inputSchema: {},
       mutating: false,
       async run() {
-        const open: { board: string; mark: Mark }[] = []
-        for (const name of await listBoards(root)) for (const mark of openMarks(await loadBoard(root, name))) open.push({ board: name, mark })
+        const open: { board: Board; mark: Mark }[] = []
+        for (const name of await listBoards(root)) {
+          const b = await loadBoard(root, name)
+          for (const mark of openMarks(b).filter((m) => !m.jobId)) open.push({ board: b, mark })
+        }
         open.sort((a, b) => (a.mark.createdAt < b.mark.createdAt ? -1 : a.mark.createdAt > b.mark.createdAt ? 1 : 0))
-        const text = open.length === 0 ? "No open marks." : open.flatMap(({ board: b, mark }) => [`board ${b}:`, ...formatMark(mark, "  ")]).join("\n")
-        return { text, data: { marks: open } }
+        const text = open.length === 0 ? "No open marks." : open.flatMap(({ board: b, mark }) => [`board ${b.name}:`, ...formatMark(mark, "  ", b)]).join("\n")
+        return { text, data: { marks: open.map(({ board: b, mark }) => ({ board: b.name, mark })) } }
+      },
+    }),
+
+    define({
+      name: "mark_read",
+      description: "Read one mark in full: status, claim, job, box, the cards it is on (with their text), the cards its arrows lead to, and every message unclipped.",
+      inputSchema: { board: boardName, markId: entityId },
+      mutating: false,
+      async run({ board: name, markId }) {
+        const b = await board(name)
+        const mark = needMark(b, markId)
+        const [head] = formatMark(mark, "", b)
+        const lines = [head!]
+        if (mark.claimedAt) lines.push(`claimed at ${mark.claimedAt}`)
+        for (const id of mark.anchors) {
+          const card = b.cards.find((c) => c.id === id)
+          if (card) lines.push(`on: ${formatCard(card, 100_000)}`)
+        }
+        for (const e of b.edges.filter((e) => e.from === mark.id)) {
+          const card = b.cards.find((c) => c.id === e.to)
+          lines.push(`answer: ${card ? formatCard(card, 300) : e.to}`)
+        }
+        lines.push("thread:", ...mark.thread.map((m) => `- ${m.by} (${m.at}):\n${m.text}`))
+        return { text: lines.join("\n"), data: mark }
+      },
+    }),
+
+    define({
+      name: "card_read",
+      description: "Read one card in full: its whole note text or caption, what it shows (the passage text for a passage card, the image file for an image card), who made it, and its arrows.",
+      inputSchema: { board: boardName, cardId: entityId },
+      mutating: false,
+      async run({ board: name, cardId }) {
+        const b = await board(name)
+        const card = b.cards.find((c) => c.id === cardId)
+        if (!card) throw new Error(`no card "${cardId}" on board ${b.name}`)
+        const lines = [formatCard(card, 80)]
+        if (card.text !== undefined) lines.push("text:", card.text)
+        if (card.caption) lines.push(`caption: ${card.caption}`)
+        if (card.source) lines.push(`source: ${[card.source.title, card.source.url, card.source.licence].filter(Boolean).join(", ")}`)
+        if (card.kind === "passage") {
+          const [file = "", id = ""] = card.ref.split("#")
+          const passage = await loadStory(project, file).then(({ story }) => passageById(story, id)).catch(() => undefined)
+          lines.push(passage ? `passage ${passage.name} (id ${passage.id}) in ${file}:\n${passage.rawText}` : `passage ${card.ref} is not in the stories any more`)
+        }
+        for (const e of edgesOf(b, card.id)) lines.push(`edge ${e.id}: ${e.from} -> ${e.to}`)
+        return { text: lines.join("\n"), data: card }
+      },
+    }),
+
+    define({
+      name: "card_view",
+      description:
+        "See an image card: returns the picture itself (a concept render, pending or accepted, a reference image, or a captured frame's images) so you can judge what it shows. Files over 4 MB are refused.",
+      inputSchema: { board: boardName, cardId: entityId },
+      mutating: false,
+      async run({ board: name, cardId }) {
+        const b = await board(name)
+        const card = b.cards.find((c) => c.id === cardId)
+        if (!card) throw new Error(`no card "${cardId}" on board ${b.name}`)
+        const files = (await imageFiles(card)).slice(0, VIEW_MAX_IMAGES)
+        const images: { data: string; mimeType: string }[] = []
+        for (const rel of files) {
+          const mimeType = IMAGE_TYPES[path.extname(rel).toLowerCase()]
+          if (!mimeType) throw new Error(`${rel} is not a PNG, JPG, WebP or GIF image`)
+          const abs = safePath(project, rel)
+          const size = await stat(abs).then((s) => s.size).catch(() => undefined)
+          if (size === undefined) {
+            const wait = card.pending ? ` River job ${card.pending.jobId} has not rendered it yet: the user approves its scripts in River first.` : ""
+            throw new Error(`${rel} does not exist.${wait}`)
+          }
+          if (size > VIEW_MAX_BYTES) throw new Error(`${rel} is ${(size / 1024 / 1024).toFixed(1)} MB; card_view shows images up to 4 MB`)
+          images.push({ data: (await readFile(abs)).toString("base64"), mimeType })
+        }
+        return { text: `${card.id} (${card.kind}${card.label ? ` ${card.label}` : ""}${card.caption ? `, "${card.caption}"` : ""}): ${files.join(", ")}`, data: { card, files }, images }
       },
     }),
 
@@ -771,7 +964,9 @@ function boardTools(project: Project, author: string): RiverTool[] {
 
     define({
       name: "mark_claim",
-      description: `Take an open mark to work on it: its status becomes "working", claimed by ${author}. Fails when the mark is not open (someone else, or a River job, has it). Claiming it again is fine.`,
+      description:
+        `Take an open mark to work on it: its status becomes "working", claimed by ${author}, and nobody else can claim it or change its status. ` +
+        "Fails when another agent or a River job has it. Claiming it again refreshes your claim; a claim untouched for 30 minutes can be taken over.",
       inputSchema: { board: boardName, markId: entityId },
       mutating: true,
       async run({ board: name, markId }) {
@@ -784,13 +979,13 @@ function boardTools(project: Project, author: string): RiverTool[] {
     define({
       name: "mark_reply",
       description:
-        `Add a message to a mark's thread, as ${author}. status "answered" says your reply (and the cards you added) answers the mark; "open" gives the mark back. ` +
-        "A mark a River job works on keeps the job's status, so leave status out there.",
+        `Add a message to a mark's thread, as ${author}. status "answered": your reply and the cards you added answer the mark. "open": give the mark back. ` +
+        '"dismissed": you will not do it; the text says why. Only the agent that claimed a mark changes its status. A mark a River job works on keeps the job\'s status, so leave status out there.',
       inputSchema: {
         board: boardName,
         markId: entityId,
         text: z.string().min(1).max(4000),
-        status: z.enum(["answered", "open"]).optional(),
+        status: z.enum(["answered", "open", "dismissed"]).optional(),
       },
       mutating: true,
       async run({ board: name, markId, text, status }) {
@@ -801,58 +996,103 @@ function boardTools(project: Project, author: string): RiverTool[] {
 
     define({
       name: "board_add_note",
-      description: `Add a note card (text) to a board, right of a card or mark (near), or under everything; it never covers another card. Returns the new card id. madeBy ${author}.`,
+      description:
+        `Add a note card (text) to a board; it never covers another card. With answers (a mark id) River puts the note beside the mark, under any earlier answer, ` +
+        `and draws the arrow mark -> note: use it for every answer. Otherwise it goes right of near, or under everything. Returns the new card id. madeBy ${author}.`,
       inputSchema: {
         board: boardName,
         text: z.string().min(1).max(8000),
-        near: entityId.optional().describe("Card or mark id to put the note beside"),
+        answers: entityId.optional().describe("The mark this note answers"),
+        near: entityId.optional().describe("Card or mark id to put the note beside (not with answers)"),
       },
       mutating: true,
-      async run({ board: name, text, near }) {
+      async run({ board: name, text, answers, near }) {
         const b = await board(name)
+        if (answers !== undefined && near !== undefined) throw new Error("pass answers or near, not both")
+        if (answers !== undefined) needMark(b, answers)
         const card = { kind: "note" as const, w: NOTE_CARD_W, ref: "", text }
-        const [spot] = placeRow(startFor(b, near), [{ w: card.w, h: cardHeight(card) }], occupiedRects(b))
+        const start = answers !== undefined ? answerStart(b, answers) : startFor(b, near)
+        const [spot] = placeRow(start, [{ w: card.w, h: cardHeight(card) }], occupiedRects(b))
         const saved = await saveCard(root, b.name, { ...card, ...spot!, madeBy: author })
-        return { text: `Added note ${saved.id} at ${spot!.x},${spot!.y} on board ${b.name}.`, data: saved }
+        if (answers === undefined) return { text: `Added note ${saved.id} at ${spot!.x},${spot!.y} on board ${b.name}.`, data: saved }
+        const edge = await saveEdge(root, b.name, { from: answers, to: saved.id, madeBy: author })
+        return { text: `Added note ${saved.id} answering ${answers} at ${spot!.x},${spot!.y} (edge ${edge.id}). Cards you add with answers: ${answers} go in a row beside it.`, data: saved }
       },
     }),
 
     define({
       name: "board_add_card",
       description:
-        "Add an image card for a file under the project (a PNG, JPG, WebP or GIF), right of near or under everything; it never covers another card. " +
-        "A frame from .river/captures/ becomes a frame card and a concepts/<id>/concept.png (or concept_<v>.png) a concept card; these need no licence. " +
-        "Any other image (a reference you found, a PNG made with Godot) is a reference card and needs source.licence. Returns the card id.",
+        "Add an image card for a file under the project (a PNG, JPG, WebP or GIF); it never covers another card. With answers (a mark id) the card joins the row of options " +
+        "beside your note answering that mark, labelled A, B, C..., with an arrow note -> card (add the note first). Otherwise it goes right of near, or under everything. " +
+        "A frame from .river/captures/ becomes a frame card; a render of a River concept job (.river/jobs/<job>/render_<v>.png, or concepts/<id>/concept_<v>.png once accepted) " +
+        "a concept card; these need no licence. Any other image (a reference you found, a PNG you made) is a reference card and needs source.licence. Returns the card id.",
       inputSchema: {
         board: boardName,
         file: relPath.describe("Image file relative to the project root"),
         caption: z.string().max(300).optional().describe("One or two lines under the image"),
-        label: z.string().max(8).optional().describe('Short option badge, e.g. "A"'),
-        near: entityId.optional().describe("Card or mark id to put the card beside"),
+        label: z.string().max(8).optional().describe('Short option badge, e.g. "A". With answers the next letter is the default'),
+        answers: entityId.optional().describe("The mark this card answers"),
+        near: entityId.optional().describe("Card or mark id to put the card beside (not with answers)"),
         source: z
           .object({ licence: z.string().min(1), url: z.string().optional(), title: z.string().optional() })
           .optional()
           .describe("Where the image came from; required for a reference image"),
       },
       mutating: true,
-      async run({ board: name, file, caption, label, near, source }) {
+      async run({ board: name, file, caption, label, answers, near, source }) {
         const rel = normalizeRel(file)
         if (!rel) throw new Error(`"${file}" must be relative to the project root, without '..'`)
         if (!IMAGE_FILE.test(rel)) throw new Error(`${rel} is not an image (png, jpg, webp or gif)`)
         if (!existsSync(safePath(project, rel))) throw new Error(`${rel} does not exist`)
+        if (answers !== undefined && near !== undefined) throw new Error("pass answers or near, not both")
         const kind = await imageCard(rel)
         if (kind.kind === "ref" && !source) throw new Error(`${rel} is a reference image: pass source.licence (and url or title when you have them)`)
         const b = await board(name)
-        const card = { ...kind, w: IMAGE_CARD_W, ...(caption ? { caption } : {}), ...(label ? { label } : {}), ...(kind.kind === "ref" && source ? { source } : {}) }
-        const [spot] = placeRow(startFor(b, near), [{ w: card.w, h: cardHeight(card) }], occupiedRects(b))
+        const row = answers !== undefined ? answerRow(b, answers) : undefined
+        const badge = label ?? (row ? optionLabels(row.index + 1).at(-1) : undefined)
+        const card = { ...kind, w: IMAGE_CARD_W, ...(caption ? { caption } : {}), ...(badge ? { label: badge } : {}), ...(kind.kind === "ref" && source ? { source } : {}) }
+        const [spot] = placeRow(row?.spot ?? startFor(b, near), [{ w: card.w, h: cardHeight(card) }], occupiedRects(b))
         const saved = await saveCard(root, b.name, { ...card, ...spot!, madeBy: author })
-        return { text: `Added ${saved.kind} card ${saved.id} for ${rel} at ${spot!.x},${spot!.y} on board ${b.name}.`, data: saved }
+        const what = `${saved.kind} card ${saved.id}${saved.label ? ` [${saved.label}]` : ""} for ${rel} at ${spot!.x},${spot!.y} on board ${b.name}`
+        if (!row) return { text: `Added ${what}.`, data: saved }
+        const edge = await saveEdge(root, b.name, { from: row.head, to: saved.id, madeBy: author })
+        return { text: `Added ${what}, answering ${answers} (edge ${row.head} -> ${saved.id}, ${edge.id}).`, data: saved }
+      },
+    }),
+
+    define({
+      name: "board_update_note",
+      description: `Replace the text of a note card you made (madeBy ${author}). Its place and arrows stay.`,
+      inputSchema: { board: boardName, cardId: entityId, text: z.string().min(1).max(8000) },
+      mutating: true,
+      async run({ board: name, cardId, text }) {
+        const b = await board(name)
+        const card = await ownCard(b, cardId)
+        if (card.kind !== "note") throw new Error(`${cardId} is a ${card.kind} card; only a note's text can change`)
+        const saved = await saveCard(root, b.name, { ...card, text })
+        return { text: `Updated note ${saved.id}.`, data: saved }
+      },
+    }),
+
+    define({
+      name: "board_remove_card",
+      description: `Remove a card you made (madeBy ${author}) and the arrows that touch it. Cards of the user, other agents and River's jobs stay.`,
+      inputSchema: { board: boardName, cardId: entityId },
+      mutating: true,
+      async run({ board: name, cardId }) {
+        const b = await board(name)
+        await ownCard(b, cardId)
+        const edges = edgesOf(b, cardId)
+        for (const e of edges) await deleteEdge(root, b.name, e.id)
+        await deleteCard(root, b.name, cardId)
+        return { text: `Removed ${cardId}${edges.length > 0 ? ` and ${plural(edges.length, "arrow")}` : ""}.`, data: { removed: cardId, edges: edges.map((e) => e.id) } }
       },
     }),
 
     define({
       name: "board_connect",
-      description: `Draw a curved arrow from one card or mark to another (a request to its answer, frames of a sequence). An arrow that already joins the two is returned as it is. madeBy ${author}.`,
+      description: `Draw a curved arrow from one card or mark to another (frames of a sequence, a card to what it refers to). board_add_note and board_add_card with answers draw the answer's arrows for you. An arrow that already joins the two is returned as it is. madeBy ${author}.`,
       inputSchema: { board: boardName, from: entityId, to: entityId, label: z.string().max(200).optional() },
       mutating: true,
       async run({ board: name, from, to, label }) {
@@ -869,7 +1109,7 @@ function boardTools(project: Project, author: string): RiverTool[] {
       name: "board_place_row",
       description:
         "Move existing cards into one row, in the order given, right of a card or mark (near), level with its top or moved down until it covers nothing. " +
-        'Labels them A, B, C... unless you pass labels (one per card; "" leaves a card unlabelled).',
+        'Labels them A, B, C... unless you pass labels (one per card; "" leaves a card unlabelled). River\'s pending job cards cannot be moved this way.',
       inputSchema: {
         board: boardName,
         cards: z.array(entityId).min(1).max(26),
@@ -884,6 +1124,8 @@ function boardTools(project: Project, author: string): RiverTool[] {
         const cards = ids.map((id) => {
           const card = b.cards.find((c) => c.id === id)
           if (!card) throw new Error(`no card "${id}" on board ${b.name}`)
+          // A pending option's badge must keep matching its variant: that is the option the user accepts.
+          if (card.pending) throw new Error(`${id} is an option of River job ${card.pending.jobId}; River places and labels it`)
           return card
         })
         const names = labels ?? optionLabels(cards.length)
@@ -897,4 +1139,43 @@ function boardTools(project: Project, author: string): RiverTool[] {
       },
     }),
   ]
+}
+
+const BACKENDS = ["claude-code", "api-key"] as const
+const MODELS = ["claude-sonnet-5-5", "claude-opus-5-5"] as const
+
+/** concept_request: a River concept job for a mark, run by `river job start` in its own process. */
+function conceptRequest(project: Project, author: string, launch: JobLauncher): RiverTool {
+  const root = project.root
+  return define({
+    name: "concept_request",
+    description:
+      "Ask River's concept artist to draw the answer to a mark: the way to answer requests to draw, show or picture something (what does X look like, sketch Y, 3 options for Z). " +
+      "It starts a River concept job and returns its id at once; the job takes a few minutes in the background and puts its options beside the mark. " +
+      "The user must read and approve the job's scripts in River before anything is drawn, and accepts or dismisses the answer there; the mark then follows the job, so do not answer it yourself.",
+    inputSchema: {
+      board: boardName,
+      markId: entityId,
+      backend: z.enum(BACKENDS).optional().describe('Default "claude-code": the user\'s own Claude Code sign-in'),
+      model: z.enum(MODELS).optional().describe('Default "claude-sonnet-5-5"'),
+    },
+    mutating: true,
+    async run({ board: name, markId, backend, model }) {
+      const b = name ?? DEFAULT_BOARD
+      const mark = (await loadBoard(root, b)).marks.find((m) => m.id === markId)
+      if (!mark) throw new Error(`no mark "${markId}" on board ${b}`)
+      const jobId = newBoardId("j_")
+      const settings = { backend: backend ?? "claude-code", model: model ?? "claude-sonnet-5-5" } as const
+      const started = await launch({ root, board: b, markId, jobId, by: author, ...settings })
+      const job = await loadJob(root, jobId).catch(() => undefined)
+      return {
+        text: [
+          `Started River concept job ${jobId} for ${markId} (${settings.backend}, ${settings.model})${job ? `; it is ${job.status}` : ""}. Its log: ${started.log}.`,
+          "It runs in the background for a few minutes, then River lays its note and options beside the mark. Nothing is drawn until the user reads and approves the scripts in River (or with river job approve).",
+          `The mark now follows the job: do not reply on it with a status. board_read shows the job's cards as pending; card_view shows a render once it exists.`,
+        ].join("\n"),
+        data: { jobId, log: started.log },
+      }
+    },
+  })
 }
