@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { copyFile, mkdir, readFile } from "node:fs/promises"
+import { copyFile, mkdir, readFile, stat } from "node:fs/promises"
 import { basename, extname, join, relative, sep } from "node:path"
 import { type BrowserWindow, dialog } from "electron"
 import {
@@ -15,6 +15,7 @@ import {
   listCaptures,
   loadBoard,
   loadCard,
+  loadJob,
   loadMark,
   loadStory,
   markFile,
@@ -37,6 +38,28 @@ const boardWritten = new Set<(kind: "card" | "mark", value: Card | Mark) => void
 export function onBoardWritten(cb: (kind: "card" | "mark", value: Card | Mark) => void): () => void {
   boardWritten.add(cb)
   return () => boardWritten.delete(cb)
+}
+
+/** river-file:// URL of an image, versioned by its mtime so a new render replaces the cached one; undefined while it does not exist. */
+async function imageUrl(p: Project, abs: string): Promise<string | undefined> {
+  try {
+    return `${riverFileUrl(p, abs)}?v=${Math.round((await stat(abs)).mtimeMs)}`
+  } catch {
+    return undefined
+  }
+}
+
+/** A concept card: the job's render while pending, the applied concepts/<id>/concept.png once accepted. */
+async function conceptView(p: Project, card: Card): Promise<CardView> {
+  if (!card.pending) return { kind: "concept", id: card.ref, url: await imageUrl(p, join(p.root, "concepts", card.ref, "concept.png")) }
+  const { jobId } = card.pending
+  const url = await imageUrl(p, join(p.root, ".river", "jobs", jobId, "render.png"))
+  try {
+    const { id, status, summary, error } = await loadJob(p.root, jobId)
+    return { kind: "concept", id: card.ref, url, job: { id, status, summary, error } }
+  } catch (e) {
+    return { kind: "concept", id: card.ref, url, missing: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 /** First prose lines of a passage: no rule lines, no choice lines, links reduced to their labels. */
@@ -96,7 +119,7 @@ export function cardResolver(p: Project) {
         view = { kind: "ref", url: "river-file://project/" + card.ref.split(/[\\/]/).map(encodeURIComponent).join("/") }
         break
       case "concept":
-        view = { kind: "concept", id: card.ref }
+        view = await conceptView(p, card)
         break
       default:
         view = { kind: "note" }

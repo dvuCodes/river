@@ -75,9 +75,13 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent), var(--shadow);
 }
 .cnode.is-pending {
-  opacity: 0.55;
   border-style: dashed;
   border-color: color-mix(in srgb, var(--agent) 55%, var(--line));
+}
+/* A pending concept card fades only its image, so its text and buttons stay readable. */
+.cnode.is-pending:not(.cnode-concept),
+.cnode-concept.is-pending .cnode-img {
+  opacity: 0.55;
 }
 .cnode-head {
   margin: -2px 0 6px;
@@ -101,8 +105,7 @@
   border-radius: 2px;
   background: var(--panel-2);
 }
-.cnode-img-missing,
-.cnode-concept {
+.cnode-img-missing {
   display: grid;
   place-items: center;
   aspect-ratio: 16 / 10;
@@ -123,9 +126,6 @@
 }
 .cnode-cap .mono {
   font-size: 10px;
-}
-.cnode-passage {
-  padding: 0;
 }
 .cnode-title {
   font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
@@ -154,6 +154,65 @@
   margin: 4px 0 0;
   color: var(--danger);
   font-size: 11px;
+}
+.concept {
+  display: grid;
+  gap: 8px;
+}
+.concept-line {
+  margin: 0;
+  padding: 18px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+.concept-line.is-working {
+  color: var(--agent);
+}
+.concept-summary {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.concept-warn {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--cond-soft);
+  color: var(--cond);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.concept-script {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+}
+.concept-script-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.concept-script-text {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre;
+  user-select: text;
+  cursor: text;
+}
+.concept-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
 }
 .cnode-note {
   background: var(--note);
@@ -379,6 +438,14 @@
 }
 .mark-thread-empty {
   color: var(--muted);
+}
+.mark-ask {
+  width: 100%;
+  margin-bottom: 8px;
+}
+.mark-working {
+  margin: 0 0 8px;
+  color: var(--agent);
 }
 .mark-panel-foot {
   display: flex;

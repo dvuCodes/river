@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
+import { mkdir, readFile } from "node:fs/promises"
 import { userInfo } from "node:os"
-import { isAbsolute, relative, resolve, sep } from "node:path"
+import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
 import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, PermissionDecision } from "@river/agent"
 import { createGodotAdapter } from "@river/adapter-godot"
@@ -25,6 +26,7 @@ import {
   listPlans,
   listStories,
   listThreads,
+  loadJob,
   loadProject,
   loadSchema,
   loadStory,
@@ -48,13 +50,14 @@ import type {
   AgentStatus,
   CaptureDTO,
   FramesDTO,
+  JobDTO,
   OpenStateDTO,
   PathDTO,
   PlaySnapshot,
   ProjectInfo,
   StoryDTO,
 } from "../shared/api"
-import { loadAgent } from "./agent"
+import { type JobApi, loadAgent } from "./agent"
 import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
 import { boardHandlers } from "./board"
@@ -89,6 +92,10 @@ export async function openProject(root: string, remember = true): Promise<void> 
     projectError = null
     if (remember) settings.setLastProject(project.root)
     projectWatch = watchProject(project, (changes) => send("fs:change", changes))
+    const root = project.root
+    void loadAgent()
+      .then((a) => a.jobs?.recoverJobs(root))
+      .catch((err: unknown) => console.warn("river: could not recover jobs", err))
   } catch (err) {
     project = null
     projectError = { root: abs, message: err instanceof Error ? err.message : String(err) }
@@ -237,7 +244,25 @@ async function agentStatus(refreshClaude = false): Promise<AgentStatus> {
   }
 }
 
-export function registerIpc(windowGetter: () => BrowserWindow | null): void {
+type TurnAuth = Pick<AgentTurnRequest, "backend" | "apiKey" | "claudePath">
+
+async function turnAuth(status: AgentStatus): Promise<TurnAuth> {
+  if (status.backend === "api-key") {
+    const apiKey = await settings.getApiKey()
+    if (!apiKey) throw new Error("Add an Anthropic API key in Settings first.")
+    return { backend: "api-key", apiKey }
+  }
+  return { backend: "claude-code", ...(status.claudePath ? { claudePath: status.claudePath } : {}) }
+}
+
+async function jobApi(): Promise<JobApi> {
+  const agent = await loadAgent()
+  if (!agent.jobs) throw new Error(agent.jobsReason ?? "Concept jobs are unavailable.")
+  return agent.jobs
+}
+
+/** `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn). */
+export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: object } = {}): void {
   getWindow = windowGetter
   const handle = <A extends unknown[], R>(channel: string, fn: (...args: A) => Promise<R> | R) =>
     ipcMain.handle(channel, (_e, ...args) => fn(...(args as A)))
@@ -358,14 +383,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
     if (!agent.start) throw new Error(agent.reason ?? "The agent is unavailable.")
     const status = await agentStatus()
     const { turnId, ...turn } = req
-    let auth: Pick<AgentTurnRequest, "backend" | "apiKey" | "claudePath">
-    if (status.backend === "api-key") {
-      const apiKey = await settings.getApiKey()
-      if (!apiKey) throw new Error("Add an Anthropic API key in Settings first.")
-      auth = { backend: "api-key", apiKey }
-    } else {
-      auth = { backend: "claude-code", ...(status.claudePath ? { claudePath: status.claudePath } : {}) }
-    }
+    const auth = await turnAuth(status)
     // The model picker is per turn; remember the last one.
     if (turn.model !== status.model) settings.setAgentPrefs({ model: turn.model })
     const ac = new AbortController()
@@ -410,4 +428,36 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
     turns.get(turnId)?.abort()
   })
   handle("agent:restore", (ref: string) => restoreCheckpoint(need().root, ref))
+
+  handle("job:start", async (board: string, markId: string) => {
+    const p = need()
+    const jobs = await jobApi()
+    const status = await agentStatus()
+    const auth = await turnAuth(status)
+    // Watch the jobs folder before the first job file appears in it.
+    const jobsDir = join(p.root, ".river", "jobs")
+    await mkdir(jobsDir, { recursive: true })
+    projectWatch?.add(jobsDir)
+    const run = jobs.startConceptJob({ workspaceRoot: p.root, board, markId, model: status.model, ...auth }, opts.jobDeps)
+    run.catch((err: unknown) => console.warn("river: concept job failed", err))
+    // Once the job exists its errors land in its file; one that fails before that (bad mark, no git) is thrown here.
+    await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
+  })
+  handle("job:get", async (jobId: string): Promise<JobDTO> => {
+    const job = await loadJob(need().root, jobId)
+    const s = job.status === "approval" ? job.scripts?.[0] : undefined
+    if (!s) return { job }
+    // The worktree is outside the project root, so the script is read here, never served over river-file://.
+    const bytes = await readFile(join(job.worktree, job.projectSub, s.file))
+    return { job, script: { file: s.file, sha256: createHash("sha256").update(bytes).digest("hex"), text: bytes.toString("utf8") } }
+  })
+  handle("job:approve", async (jobId: string, sha256: string) => {
+    await (await jobApi()).approveJobScript(need().root, jobId, sha256)
+  })
+  handle("job:accept", async (jobId: string) => {
+    await (await jobApi()).acceptJob(need().root, jobId)
+  })
+  handle("job:dismiss", async (jobId: string) => {
+    await (await jobApi()).dismissJob(need().root, jobId)
+  })
 }

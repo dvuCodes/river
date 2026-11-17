@@ -14,6 +14,7 @@ import type {
 import type {
   Card,
   ChangePlan,
+  Job,
   Mark,
   Diagnostic,
   GameState,
@@ -156,8 +157,26 @@ export type CardView =
   | { kind: "frame"; shotId: string; rev?: string; url?: string; missing?: string }
   | { kind: "passage"; story: string; passageId: string; title: string; tags: string[]; lines: string[]; missing?: string }
   | { kind: "ref"; url: string }
-  | { kind: "concept"; id: string }
+  | {
+      kind: "concept"
+      id: string
+      /** Pending card: the job's render. Accepted card: concepts/<id>/concept.png. Absent until the file exists. */
+      url?: string
+      /** Only on a pending card. */
+      job?: ConceptJob
+      /** The pending card's job file could not be read. */
+      missing?: string
+    }
   | { kind: "note" }
+
+export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error">
+
+/** A job and, while it waits for approval, the exact script bytes it wants to run. */
+export interface JobDTO {
+  job: Job
+  /** sha256 of `text` as read just now: approving sends this back, so only the shown bytes can run. */
+  script?: { file: string; sha256: string; text: string }
+}
 
 export interface CardDTO {
   card: Card
@@ -177,7 +196,7 @@ export interface BoardDTO {
 export type NewCard = Omit<Card, "id" | "createdAt"> & Partial<Pick<Card, "id" | "createdAt">>
 export type NewMark = Omit<Mark, "id" | "createdAt" | "status"> & Partial<Pick<Mark, "id" | "createdAt" | "status">>
 
-export type FsChangeKind = "story" | "state" | "manifest" | "review" | "plans" | "board"
+export type FsChangeKind = "story" | "state" | "manifest" | "review" | "plans" | "board" | "job"
 export interface FsChange {
   kind: FsChangeKind
   /** Path relative to the project root, forward slashes. */
@@ -226,6 +245,14 @@ export interface RiverApi {
   boardPickImage(): Promise<{ token: string; fileName: string } | null>
   /** Copy the picked image into .river/refs/<hash>.<ext> and add a ref card. */
   boardAddRef(name: string, token: string, source: { title?: string; url?: string; licence: string }, at: { x: number; y: number }): Promise<CardDTO>
+  // concept jobs
+  /** Ask the concept artist about a mark. Runs in the background; progress shows on the mark and its concept card. */
+  jobStart(board: string, markId: string): Promise<void>
+  jobGet(jobId: string): Promise<JobDTO>
+  /** Run the script whose bytes hash to `sha256` (from jobGet) and render it. */
+  jobApprove(jobId: string, sha256: string): Promise<void>
+  jobAccept(jobId: string): Promise<void>
+  jobDismiss(jobId: string): Promise<void>
   // agent
   agentStatus(): Promise<AgentStatus>
   agentStart(req: AgentStartRequest): Promise<string>

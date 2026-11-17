@@ -15,7 +15,7 @@ import {
 } from "@xyflow/react"
 import { type ReactNode, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
 import type { Mark, MarkShape, MarkStatus } from "@river/core"
-import type { BoardDTO, CardDTO, NewMark } from "../../../shared/api"
+import type { BoardDTO, CardDTO, JobDTO, NewMark } from "../../../shared/api"
 import { type Pt, type Rect, anchorsFor, arrowPath, bounds, ellipsePoints, flatten, grow, intersects, pointsOf, smoothPath, strokesOf } from "../canvas/geometry"
 import { cx, errorText, shortTime, useSmokeReady } from "../util"
 import "../canvas/canvas.css"
@@ -34,7 +34,11 @@ type CardNode = Node<CardNodeData, "card">
 interface CanvasActions {
   saveText(id: string, text: string): void
   resize(id: string, w: number): void
+  /** Deletes the card; a pending agent card dismisses its job instead. */
   remove(id: string): void
+  /** Read the card from disk again. */
+  refresh(id: string): void
+  fail(err: unknown): void
 }
 const Actions = createContext<CanvasActions | null>(null)
 
@@ -104,6 +108,100 @@ function CardImage({ url, alt }: { url: string | undefined; alt: string }) {
   return <img className="cnode-img" src={url} alt={alt} draggable={false} onError={() => setFailed(true)} />
 }
 
+type ConceptViewData = Extract<CardDTO["view"], { kind: "concept" }>
+
+/** A concept card follows its job: drawing, waiting for the user to approve the script, rendering, then Accept or Dismiss. */
+function ConceptBody({ cardId, jobId, view }: { cardId: string; jobId: string | undefined; view: ConceptViewData }) {
+  const actions = useContext(Actions)!
+  const [script, setScript] = useState<JobDTO["script"] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const status = view.job?.status
+  useEffect(() => {
+    if (status !== "approval") setScript(null)
+  }, [status])
+  const act = (fn: () => Promise<unknown>) => {
+    setBusy(true)
+    fn()
+      .catch(actions.fail)
+      .finally(() => {
+        setBusy(false)
+        actions.refresh(cardId)
+      })
+  }
+  const image = <CardImage url={view.url} alt={`Concept ${view.id}`} />
+  if (!jobId) return image
+  const summary = view.job?.summary && <p className="concept-summary">{view.job.summary}</p>
+  let content: ReactNode
+  if (view.missing) content = <p className="cnode-missing">{view.missing}</p>
+  else
+    switch (status) {
+      case "queued":
+      case "running":
+        content = <p className="concept-line is-working">✦ concept artist is drawing…</p>
+        break
+      case "approval":
+        content = (
+          <>
+            {summary}
+            <p className="concept-warn">Running the script executes its code on this computer. Read it before you run it.</p>
+            {script && (
+              <div className="concept-script">
+                <div className="concept-script-head">
+                  <span className="mono">{script.file}</span>
+                  <span className="mono" title={script.sha256}>
+                    sha256 {script.sha256.slice(0, 12)}
+                  </span>
+                </div>
+                <pre className="concept-script-text nodrag nowheel">{script.text}</pre>
+              </div>
+            )}
+          </>
+        )
+        break
+      case "rendering":
+        content = <p className="concept-line is-working">Running the approved script in Godot…</p>
+        break
+      case "failed":
+        content = <p className="cnode-missing">{view.job?.error ?? "The job failed."}</p>
+        break
+      default:
+        content = (
+          <>
+            {image}
+            {summary}
+          </>
+        )
+    }
+  const open = status !== "accepted" && status !== "dismissed"
+  return (
+    <div className="concept" data-job-status={status ?? "missing"}>
+      {content}
+      {open && (
+        <div className="concept-actions">
+          {status === "approval" &&
+            (script ? (
+              <button className="btn btn-primary nodrag" data-action="run" disabled={busy} onClick={() => act(() => window.river.jobApprove(jobId, script.sha256))}>
+                Run script
+              </button>
+            ) : (
+              <button className="btn btn-primary nodrag" data-action="review" disabled={busy} onClick={() => act(() => window.river.jobGet(jobId).then((d) => setScript(d.script ?? null)))}>
+                Review script
+              </button>
+            ))}
+          {status === "answered" && (
+            <button className="btn btn-primary nodrag" data-action="accept" disabled={busy} onClick={() => act(() => window.river.jobAccept(jobId))}>
+              Accept
+            </button>
+          )}
+          <button className="btn nodrag" data-action="dismiss" disabled={busy} onClick={() => act(() => window.river.jobDismiss(jobId))}>
+            Dismiss
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 const CardView = memo(function CardView({ id, data, selected }: NodeProps<CardNode>) {
   const actions = useContext(Actions)!
   const { card, view } = data.dto
@@ -123,7 +221,7 @@ const CardView = memo(function CardView({ id, data, selected }: NodeProps<CardNo
       break
     case "passage":
       body = (
-        <div className="cnode-passage">
+        <div className="cnode-passage-body">
           <div className="cnode-title">{view.title}</div>
           {view.tags.length > 0 && (
             <div className="cnode-tags">
@@ -163,12 +261,12 @@ const CardView = memo(function CardView({ id, data, selected }: NodeProps<CardNo
       )
       break
     case "concept":
-      body = (
-        <div className="cnode-concept">
-          <span className="mono">concepts/{view.id}/</span>
-        </div>
+      body = <ConceptBody cardId={id} jobId={card.pending?.jobId} view={view} />
+      caption = (
+        <>
+          concept · <span className="mono">concepts/{view.id}/</span>
+        </>
       )
-      caption = <>concept · {view.id}</>
       break
     default:
       body = <NoteBody id={id} text={card.text ?? ""} />
@@ -374,8 +472,9 @@ function AskBox(props: { at: Pt; onDone(text: string | null): void }) {
   )
 }
 
-function MarkPanel(props: { mark: Mark; cardTitle(id: string): string; onDelete(): void; onClose(): void }) {
+function MarkPanel(props: { mark: Mark; cardTitle(id: string): string; onAsk(): Promise<void>; onDelete(): void; onClose(): void }) {
   const { mark: m } = props
+  const [asking, setAsking] = useState(false)
   return (
     <aside className="mark-panel" onPointerDown={(e) => e.stopPropagation()}>
       <header className="mark-panel-head">
@@ -412,6 +511,20 @@ function MarkPanel(props: { mark: Mark; cardTitle(id: string): string; onDelete(
           </li>
         ))}
       </ul>
+      {m.status === "open" && (
+        <button
+          className="btn btn-primary mark-ask"
+          data-action="ask-concept"
+          disabled={asking}
+          onClick={() => {
+            setAsking(true)
+            void props.onAsk().finally(() => setAsking(false))
+          }}
+        >
+          {asking ? "Starting…" : "✦ Ask concept artist"}
+        </button>
+      )}
+      {m.status === "working" && <p className="mark-working">✦ The concept artist is on it. Its card beside the mark shows each step.</p>}
       <footer className="mark-panel-foot">
         <span className="mono sec-hint">{m.id}</span>
         <span className="tb-spacer" />
@@ -587,6 +700,13 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
       window.river.onFsChange((changes) => {
         let marksChanged = false
         for (const c of changes) {
+          if (c.kind === "job") {
+            const jobId = /^\.river\/jobs\/([^/]+)\.json$/.exec(c.rel)?.[1]
+            for (const dto of Object.values(stateRef.current?.cards ?? {})) {
+              if (jobId && dto.card.pending?.jobId === jobId) void window.river.boardCard(board, dto.card.id).then((d) => putCard(dto.card.id, d), fail)
+            }
+            continue
+          }
           if (c.kind !== "board") continue
           const m = /^\.river\/boards\/([^/]+)\/(cards|marks)\/([^/]+)\.json$/.exec(c.rel)
           if (!m || m[1] !== board) continue
@@ -661,9 +781,12 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
         if (dto) saveCard(dto, { w: Math.round(w) })
       },
       remove: (id) => {
+        const jobId = stateRef.current?.cards[id]?.card.pending?.jobId
         putCard(id, null)
-        window.river.boardDeleteCard(board, id).catch(fail)
+        ;(jobId ? window.river.jobDismiss(jobId) : window.river.boardDeleteCard(board, id)).catch(fail)
       },
+      refresh: (id) => void window.river.boardCard(board, id).then((d) => putCard(id, d), fail),
+      fail,
     }),
     [board, saveCard, putCard],
   )
@@ -901,6 +1024,7 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
           <MarkPanel
             mark={selected}
             cardTitle={titleOf}
+            onAsk={() => window.river.jobStart(board, selected.id).catch(fail)}
             onClose={() => setSelectedMark(undefined)}
             onDelete={() => {
               const id = selected.id

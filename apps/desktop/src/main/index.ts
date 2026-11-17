@@ -1,9 +1,9 @@
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises"
+import { access, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { BrowserWindow, app, ipcMain, nativeTheme, net, protocol } from "electron"
 import { VIEWS, type ViewId } from "../shared/api"
-import type { Card, Mark } from "@river/core"
+import { type Card, type Mark, loadBoard, loadJob } from "@river/core"
 import { onBoardWritten } from "./board"
 import { currentProject, onStoryWritten, openProject, registerIpc, resolveRiverFile } from "./ipc"
 import { getLastProject } from "./settings"
@@ -301,11 +301,134 @@ async function smokeCanvas(w: BrowserWindow, dir: string, waitFor: (view: ViewId
   return ok
 }
 
+/** Click the middle of `selector`, after checking nothing (a panel, another card) covers that point. */
+async function clickEl(w: BrowserWindow, selector: string, ms: number): Promise<boolean> {
+  const r = await waitRect(w, selector, ms)
+  if (!r) {
+    console.error(`river smoke: no ${selector}`)
+    return false
+  }
+  const [x, y] = [Math.round(r.x + r.w / 2), Math.round(r.y + r.h / 2)]
+  const onTarget = (await w.webContents.executeJavaScript(`(() => {
+    const hit = document.elementFromPoint(${x}, ${y})
+    const target = document.querySelector(${JSON.stringify(selector)})
+    return Boolean(hit && target && (target === hit || target.contains(hit) || hit.contains(target)))
+  })()`)) as boolean
+  if (!onTarget) {
+    console.error(`river smoke: ${selector} is covered at ${x},${y}`)
+    return false
+  }
+  await click(w, x, y)
+  return true
+}
+
+/** Wait until `selector` is an <img> that has loaded. */
+async function waitImage(w: BrowserWindow, selector: string, ms: number): Promise<boolean> {
+  const until = Date.now() + ms
+  while (Date.now() < until) {
+    const ok = (await w.webContents.executeJavaScript(`(() => {
+      const img = document.querySelector(${JSON.stringify(selector)})
+      return Boolean(img && img.complete && img.naturalWidth > 0)
+    })()`)) as boolean
+    if (ok) return true
+    await sleep(200)
+  }
+  return false
+}
+
+const exists = (abs: string) => access(abs).then(
+  () => true,
+  () => false,
+)
+
+/**
+ * RIVER_SMOKE_JOB=1: pin a passage and put a pin mark with a request beside it (IPC), then with real clicks:
+ * open the mark, ask the concept artist, review and run its script, Accept. The agent turn is the fake from
+ * smokeJobDeps; the render is real Godot. Screenshots the answered card and the accepted card.
+ */
+async function smokeJob(w: BrowserWindow, dir: string, waitFor: (view: ViewId, ms: number) => Promise<boolean>): Promise<boolean> {
+  const p = currentProject()
+  if (!p) {
+    console.error("river smoke: no project")
+    return false
+  }
+  const card = (
+    (await w.webContents.executeJavaScript(`(async () => {
+      const info = await window.river.getProject()
+      const rel = info.stories[0]
+      const story = await window.river.loadStory(rel)
+      return window.river.boardPin("main", { kind: "passage", ref: rel + "#" + story.passages[0].id })
+    })()`)) as { card: Card }
+  ).card
+  const markReq = {
+    shape: "pin",
+    path: [card.x + card.w + 24, card.y + 40],
+    anchors: [card.id],
+    thread: [{ by: "you", at: new Date().toISOString(), text: "make this calmer" }],
+    madeBy: "you",
+  }
+  const { mark } = (await w.webContents.executeJavaScript(`window.river.boardSaveMark("main", ${JSON.stringify(markReq)})`)) as { mark: Mark }
+  console.log(`river smoke: pinned ${card.ref} as ${card.id}; mark ${mark.id}`)
+  w.webContents.send("smoke:navigate", "canvas")
+  if (!(await waitFor("canvas", 15_000))) console.warn("river smoke: canvas did not report ready")
+  w.focus()
+  w.webContents.focus()
+  await sleep(300)
+
+  if (!(await clickEl(w, `[data-mark="${mark.id}"] .mark-pin`, 8_000))) return false
+  if (!(await clickEl(w, `[data-action="ask-concept"]`, 3_000))) return false
+  console.log("river smoke: asked the concept artist")
+  if (!(await clickEl(w, `.concept[data-job-status="approval"] [data-action="review"]`, 120_000))) return false
+  if (!(await waitRect(w, ".concept-script-text", 5_000))) {
+    console.error("river smoke: the script did not show")
+    return false
+  }
+  const shown = (await w.webContents.executeJavaScript(`document.querySelector(".concept-script-text").textContent`)) as string
+  console.log(`river smoke: reviewing script (${shown.split("\n").length} lines)`)
+  if (!(await clickEl(w, `.concept[data-job-status="approval"] [data-action="run"]`, 3_000))) return false
+  console.log("river smoke: approved; rendering")
+  if (!(await waitImage(w, `.concept[data-job-status="answered"] img.cnode-img`, 120_000))) {
+    const jobs = (await loadBoard(p.root, "main")).cards.filter((c) => c.kind === "concept")
+    console.error(`river smoke: no rendered image; concept cards ${JSON.stringify(jobs)}`)
+    return false
+  }
+  await sleep(500)
+  const answered = join(dir, "job-answered.png")
+  await writeFile(answered, (await w.webContents.capturePage()).toPNG())
+  console.log(`river smoke: wrote ${answered}`)
+
+  const concept = (await loadBoard(p.root, "main")).cards.find((c) => c.kind === "concept" && c.pending?.markId === mark.id)
+  if (!concept?.pending) {
+    console.error("river smoke: no pending concept card on disk")
+    return false
+  }
+  const jobId = concept.pending.jobId
+  if (!(await clickEl(w, `.concept[data-job-status="answered"] [data-action="accept"]`, 3_000))) return false
+  if (!(await waitImage(w, `.react-flow__node[data-id="${concept.id}"] .cnode-concept:not(.is-pending) img.cnode-img`, 30_000))) {
+    console.error("river smoke: the accepted card did not show its image")
+    return false
+  }
+  await sleep(500)
+  const accepted = join(dir, "job-accepted.png")
+  await writeFile(accepted, (await w.webContents.capturePage()).toPNG())
+  console.log(`river smoke: wrote ${accepted}`)
+
+  const conceptDir = join(p.root, "concepts", concept.ref)
+  const files = { "draw.gd": await exists(join(conceptDir, "draw.gd")), "concept.png": await exists(join(conceptDir, "concept.png")) }
+  const job = await loadJob(p.root, jobId)
+  const markNow = (await loadBoard(p.root, "main")).marks.find((m) => m.id === mark.id)
+  console.log(`river smoke: concepts/${concept.ref}/ ${JSON.stringify(files)}; job ${job.status}; mark ${markNow?.status}`)
+  const ok = files["draw.gd"] && files["concept.png"] && job.status === "accepted"
+  console.log(`river smoke: job checks ${ok ? "PASSED" : "FAILED"}`)
+  return ok
+}
+
 async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
+  const limit = process.env["RIVER_SMOKE_JOB"] === "1" ? 300_000 : 120_000
   const hardStop = setTimeout(() => {
-    console.error("river smoke: timed out after 120s")
+    console.error(`river smoke: timed out after ${limit / 1000}s`)
     app.exit(2)
-  }, 120_000)
+  }, limit)
   w.webContents.on("console-message", (e) => console.log(`[renderer] ${e.message}`))
   w.webContents.on("render-process-gone", (_e, d) => {
     console.error("river smoke: renderer gone", d.reason)
@@ -329,6 +452,16 @@ async function runSmoke(w: BrowserWindow, dir: string): Promise<void> {
     })
 
   await mkdir(dir, { recursive: true })
+  if (process.env["RIVER_SMOKE_JOB"] === "1") {
+    if (!(await waitFor("story-map", 30_000))) console.warn("river smoke: story map did not report ready")
+    const ok = await smokeJob(w, dir, waitFor).catch((err: unknown) => {
+      console.error("river smoke: job run threw", err)
+      return false
+    })
+    clearTimeout(hardStop)
+    app.exit(ok ? 0 : 1)
+    return
+  }
   if (process.env["RIVER_SMOKE_CANVAS"] === "1") {
     const ready = await waitFor("story-map", 30_000)
     if (!ready) console.warn("river smoke: story map did not report ready")

@@ -45,7 +45,7 @@ export interface ProjectWatch {
 
 /**
  * Watch the parts of a project the app shows: the stories folder, river.json,
- * .river/review and .river/plans, plus board folders added with `add`. Changes are batched and handed to `emit`.
+ * .river/review, .river/plans and .river/jobs, plus folders added with `add`. Changes are batched and handed to `emit`.
  * Nothing is created on disk; missing folders are simply not watched until they exist.
  */
 export function watchProject(project: Project, emit: (changes: FsChange[]) => void): ProjectWatch {
@@ -55,6 +55,7 @@ export function watchProject(project: Project, emit: (changes: FsChange[]) => vo
     join(root, "river.json"),
     join(root, ".river", "review"),
     join(root, ".river", "plans"),
+    join(root, ".river", "jobs"),
   ]
   const stateRel = project.manifest.state.split(/[\\/]/).join("/")
 
@@ -65,6 +66,7 @@ export function watchProject(project: Project, emit: (changes: FsChange[]) => vo
     if (rel.startsWith(".river/plans/")) return "plans"
     // One file per card or mark; temp files of atomic writes start with a dot.
     if (/^\.river\/boards\/[a-z0-9_-]{1,64}\/(cards|marks)\/[^./][^/]*\.json$/.test(rel)) return "board"
+    if (/^\.river\/jobs\/[^./][^/]*\.json$/.test(rel)) return "job"
     if (rel === stateRel) return "state"
     if (/\.(twee|tw)$/i.test(rel)) return "story"
     return undefined
