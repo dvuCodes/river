@@ -1,7 +1,6 @@
-import { execFile } from "node:child_process"
-import { mkdtemp, readdir, rm, rmdir } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { readdir, rm, rmdir } from "node:fs/promises"
 import path from "node:path"
+import { git, gitTry, identityEnv, RAW, withTempIndex } from "./exec"
 
 /** A snapshot of the working tree, kept under refs/river/checkpoints/<n>. Branch history is not changed. */
 export interface Checkpoint {
@@ -14,79 +13,43 @@ export interface Checkpoint {
 
 const REF_PREFIX = "refs/river/checkpoints/"
 const MESSAGE_PREFIX = "river checkpoint: "
-/** Byte-exact snapshots: never convert line endings on the way in or out. */
-const RAW = ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "-c", "core.safecrlf=false"]
-
-interface GitOptions {
-  env?: NodeJS.ProcessEnv
-}
-
-function git(root: string, args: string[], opts: GitOptions = {}): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      "git",
-      args,
-      { cwd: root, env: { ...process.env, ...opts.env }, maxBuffer: 256 * 1024 * 1024, windowsHide: true, encoding: "utf8" },
-      (err, stdout, stderr) => {
-        if (err) {
-          return reject(new Error(`git ${args.join(" ")} failed in ${root}: ${String(stderr || err.message).trim()}`))
-        }
-        resolve(stdout)
-      },
-    )
-  })
-}
-
-/** Like git(), but resolves to null when git exits non-zero. */
-function gitTry(root: string, args: string[], opts: GitOptions = {}): Promise<string | null> {
-  return git(root, args, opts).catch(() => null)
-}
 
 async function hasHead(root: string): Promise<boolean> {
   return (await gitTry(root, ["rev-parse", "--verify", "-q", "HEAD^{commit}"])) !== null
 }
 
-/** Run `fn` with a throwaway index file outside the working tree. */
-async function withTempIndex<T>(fn: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(path.join(tmpdir(), "river-index-"))
-  try {
-    return await fn({ GIT_INDEX_FILE: path.join(dir, "index") })
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
-}
-
-/** Write a tree object of the current working tree (tracked + untracked, not ignored) without touching the real index. */
-async function snapshotTree(root: string, head?: boolean): Promise<string> {
+/**
+ * Write a tree object of the current working tree (tracked + untracked, not ignored) without touching
+ * the real index. `config` goes before each git command.
+ */
+async function snapshotTree(root: string, head?: boolean, config: string[] = []): Promise<string> {
   head ??= await hasHead(root)
   return withTempIndex(async (env) => {
-    if (head) await git(root, ["read-tree", "HEAD"], { env })
-    await git(root, [...RAW, "add", "-A", "--", "."], { env })
-    return (await git(root, ["write-tree"], { env })).trim()
+    if (head) await git(root, [...config, "read-tree", "HEAD"], { env })
+    await git(root, [...config, ...RAW, "add", "-A", "--", "."], { env })
+    return (await git(root, [...config, "write-tree"], { env })).trim()
   })
-}
-
-/** Identity for commit-tree when the repo has none configured (checkpoint refs are local only). */
-async function identityEnv(root: string): Promise<NodeJS.ProcessEnv> {
-  const env: NodeJS.ProcessEnv = {}
-  const name = await gitTry(root, ["config", "--get", "user.name"])
-  const email = await gitTry(root, ["config", "--get", "user.email"])
-  if (!name?.trim() && !process.env.GIT_AUTHOR_NAME) env.GIT_AUTHOR_NAME = env.GIT_COMMITTER_NAME = "river"
-  if (!email?.trim() && !process.env.GIT_AUTHOR_EMAIL) env.GIT_AUTHOR_EMAIL = env.GIT_COMMITTER_EMAIL = "river@localhost"
-  return env
 }
 
 function refNumber(ref: string): number {
   return Number(ref.slice(REF_PREFIX.length))
 }
 
+/**
+ * A commit of the working tree (tracked and untracked, not ignored) on top of HEAD, without changing
+ * the working tree or the index. Nothing refers to it yet: the caller keeps it with a ref or branch.
+ * `config` goes before each git command (a job passes core.hooksPath so the user's hooks stay off).
+ */
+export async function snapshotCommit(root: string, label: string, config: string[] = []): Promise<string> {
+  const head = await hasHead(root)
+  const tree = await snapshotTree(root, head, config)
+  const parents = head ? ["-p", "HEAD"] : []
+  return (await git(root, [...config, "commit-tree", tree, ...parents, "-m", MESSAGE_PREFIX + label], { env: await identityEnv(root) })).trim()
+}
+
 /** Snapshot tracked and untracked (not ignored) files without changing the working tree or the index. */
 export async function checkpoint(root: string, label: string): Promise<Checkpoint> {
-  const head = await hasHead(root)
-  const tree = await snapshotTree(root, head)
-  const parents = head ? ["-p", "HEAD"] : []
-  const message = MESSAGE_PREFIX + label
-  const sha = (await git(root, ["commit-tree", tree, ...parents, "-m", message], { env: await identityEnv(root) })).trim()
+  const sha = await snapshotCommit(root, label)
   const existing = await listCheckpoints(root)
   const n = existing.reduce((max, c) => Math.max(max, refNumber(c.ref)), 0) + 1
   const ref = REF_PREFIX + n

@@ -111,6 +111,21 @@ describe("startAgentTurn", () => {
     expect(execFileSync("git", ["for-each-ref", "refs/river/"], { cwd: root, encoding: "utf8" }).trim()).toBe("")
   })
 
+  it("runs a concept turn without a checkpoint, and refuses one without a valid conceptId", async () => {
+    for (const conceptId of [undefined, "../x"]) {
+      const { query, calls } = fakeQuery(okRun)
+      const { events, h } = handlers()
+      await startAgentTurn(req({ mode: "concept", ...(conceptId ? { conceptId } : {}) }), h, { query, mcpLaunch: launch })
+      expect(calls).toHaveLength(0)
+      expect(events).toEqual([{ type: "error", message: expect.stringMatching(/conceptId|invalid concept id/) }])
+    }
+    const { query, calls } = fakeQuery(okRun)
+    const { h } = handlers()
+    await startAgentTurn(req({ mode: "concept", conceptId: "k_run00001" }), h, { query, mcpLaunch: launch })
+    expect(String(calls[0]!.prompt)).toContain("Concept id: k_run00001 (write concepts/k_run00001/draw.gd)")
+    expect(execFileSync("git", ["for-each-ref", "refs/river/"], { cwd: root, encoding: "utf8" }).trim()).toBe("")
+  })
+
   it("reports a thrown query as error + done and still reports the checkpoint", async () => {
     const query = (() =>
       (async function* () {

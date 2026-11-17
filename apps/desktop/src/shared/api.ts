@@ -12,7 +12,10 @@ import type {
   PermissionRequest,
 } from "@river/agent"
 import type {
+  Card,
   ChangePlan,
+  Job,
+  Mark,
   Diagnostic,
   GameState,
   ReviewStatus,
@@ -21,8 +24,8 @@ import type {
   StateSchema,
 } from "@river/core"
 
-export type ViewId = "story-map" | "paths" | "playtest" | "frames" | "agent"
-export const VIEWS: readonly ViewId[] = ["story-map", "paths", "playtest", "frames", "agent"]
+export type ViewId = "story-map" | "paths" | "playtest" | "canvas" | "frames" | "agent"
+export const VIEWS: readonly ViewId[] = ["story-map", "paths", "playtest", "canvas", "frames", "agent"]
 
 export interface ProjectInfo {
   root: string
@@ -67,7 +70,7 @@ export interface StoryDTO {
   passages: PassageDTO[]
   /** Parse diagnostics plus lint results. */
   diagnostics: Diagnostic[]
-  /** passage id -> [x, y] from <story>.layout.json. */
+  /** passage id -> [x, y] from the passage header metadata {"position":"x,y"}. Passages without one are absent. */
   positions: Record<string, [number, number]>
   schema: StateSchema
 }
@@ -149,7 +152,51 @@ export interface AgentStartRequest {
   sessionId?: string
 }
 
-export type FsChangeKind = "story" | "state" | "manifest" | "review" | "plans"
+/** What a card shows, resolved by main (the renderer cannot read stories or captures itself). */
+export type CardView =
+  | { kind: "frame"; shotId: string; rev?: string; url?: string; missing?: string }
+  | { kind: "passage"; story: string; passageId: string; title: string; tags: string[]; lines: string[]; missing?: string }
+  | { kind: "ref"; url: string }
+  | {
+      kind: "concept"
+      id: string
+      /** Pending card: the job's render. Accepted card: concepts/<id>/concept.png. Absent until the file exists. */
+      url?: string
+      /** Only on a pending card. */
+      job?: ConceptJob
+      /** The pending card's job file could not be read. */
+      missing?: string
+    }
+  | { kind: "note" }
+
+export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error">
+
+/** A job and, while it waits for approval, the exact script bytes it wants to run. */
+export interface JobDTO {
+  job: Job
+  /** sha256 of exactly these bytes: approving sends it back, so only the shown script can run. */
+  script?: { file: string; sha256: string; text: string }
+}
+
+export interface CardDTO {
+  card: Card
+  view: CardView
+}
+
+export interface BoardDTO {
+  name: string
+  cards: CardDTO[]
+  marks: Mark[]
+  /** Count of marks with status "open" (core openMarks). */
+  openMarks: number
+  /** Files that did not parse, as "<path>: <message>". */
+  errors: string[]
+}
+
+export type NewCard = Omit<Card, "id" | "createdAt"> & Partial<Pick<Card, "id" | "createdAt">>
+export type NewMark = Omit<Mark, "id" | "createdAt" | "status"> & Partial<Pick<Mark, "id" | "createdAt" | "status">>
+
+export type FsChangeKind = "story" | "state" | "manifest" | "review" | "plans" | "board" | "job"
 export interface FsChange {
   kind: FsChangeKind
   /** Path relative to the project root, forward slashes. */
@@ -164,7 +211,8 @@ export interface RiverApi {
   loadStory(rel: string): Promise<StoryDTO>
   savePassage(rel: string, passageId: string, rawText: string): Promise<StoryDTO>
   renamePassage(rel: string, passageId: string, newName: string): Promise<StoryDTO>
-  saveLayout(rel: string, positions: Record<string, [number, number]>): Promise<void>
+  /** Write card positions (passage id -> [x, y]) into the story file passage headers. Only the given passages change. */
+  savePositions(rel: string, positions: Record<string, [number, number]>): Promise<void>
   paths(rel: string): Promise<PathDTO[]>
   openState(rel: string, state: GameState): Promise<OpenStateDTO>
   // playtest
@@ -179,6 +227,32 @@ export interface RiverApi {
   reply(threadId: string, text: string): Promise<ReviewThread>
   setThreadStatus(threadId: string, status: ReviewStatus): Promise<ReviewThread>
   setPlanStatus(planId: string, status: ChangePlan["status"]): Promise<ChangePlan>
+  // storyboard canvas
+  /** Open (and on first use create) a board; its folder is watched from then on. */
+  boardOpen(name: string): Promise<BoardDTO>
+  /** One card or mark as it is on disk now; null when it was deleted. */
+  boardCard(name: string, cardId: string): Promise<CardDTO | null>
+  boardMark(name: string, markId: string): Promise<Mark | null>
+  boardSaveCard(name: string, card: NewCard): Promise<CardDTO>
+  boardDeleteCard(name: string, cardId: string): Promise<void>
+  /** Saves the mark; returns it with the board's open mark count. */
+  boardSaveMark(name: string, mark: NewMark): Promise<{ mark: Mark; openMarks: number }>
+  boardDeleteMark(name: string, markId: string): Promise<number>
+  boardOpenCount(name: string): Promise<number>
+  /** Add a passage ("<story>#<id>") or frame (shot id) card at the next free spot. */
+  boardPin(name: string, pin: { kind: "passage" | "frame"; ref: string; rev?: string }): Promise<CardDTO>
+  /** Pick an image file to import; null when cancelled. */
+  boardPickImage(): Promise<{ token: string; fileName: string } | null>
+  /** Copy the picked image into .river/refs/<hash>.<ext> and add a ref card. */
+  boardAddRef(name: string, token: string, source: { title?: string; url?: string; licence: string }, at: { x: number; y: number }): Promise<CardDTO>
+  // concept jobs
+  /** Ask the concept artist about a mark. Runs in the background; progress shows on the mark and its concept card. */
+  jobStart(board: string, markId: string): Promise<void>
+  jobGet(jobId: string): Promise<JobDTO>
+  /** Run the script whose bytes hash to `sha256` (from jobGet) and render it. */
+  jobApprove(jobId: string, sha256: string): Promise<void>
+  jobAccept(jobId: string): Promise<void>
+  jobDismiss(jobId: string): Promise<void>
   // agent
   agentStatus(): Promise<AgentStatus>
   agentStart(req: AgentStartRequest): Promise<string>

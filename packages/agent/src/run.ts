@@ -1,5 +1,5 @@
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk"
-import { checkpoint, loadPlan, loadProject, type ChangePlan, type Project } from "@river/core"
+import { assertConceptId, checkpoint, loadPlan, loadProject, type ChangePlan, type Project } from "@river/core"
 import { startApprovalServer, type ApprovalServer } from "./approval"
 import { runClaudeCodeProcess } from "./claude-code"
 import { MessageMapper } from "./events"
@@ -55,6 +55,14 @@ export async function startAgentTurn(req: AgentTurnRequest, h: AgentTurnHandlers
     }
     if (plan.status !== "approved") return emitError(`Plan ${plan.id} is ${plan.status}, not approved.`)
   }
+  if (req.mode === "concept") {
+    if (!req.conceptId) return emitError("Concept mode needs a conceptId.")
+    try {
+      assertConceptId(req.conceptId)
+    } catch (err) {
+      return emitError(errMsg(err))
+    }
+  }
   if (backend !== "api-key" && backend !== "claude-code") return emitError(`Unknown agent backend: ${String(backend)}`)
   if (backend === "api-key" && !req.apiKey) return emitError("No Anthropic API key.")
   if (h.signal?.aborted) return emitError("Turn aborted.")
@@ -81,7 +89,13 @@ export async function startAgentTurn(req: AgentTurnRequest, h: AgentTurnHandlers
 
   const turn: Turn = {
     project,
-    policy: { mode: req.mode, project, ...(plan ? { plan } : {}), onPermission: (r) => h.onPermission(r) },
+    policy: {
+      mode: req.mode,
+      project,
+      ...(plan ? { plan } : {}),
+      ...(req.mode === "concept" && req.conceptId ? { conceptId: req.conceptId } : {}),
+      onPermission: (r) => h.onPermission(r),
+    },
     mapper,
     abortController,
   }

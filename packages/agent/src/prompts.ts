@@ -26,6 +26,25 @@ const JOBS: Record<AgentMode, string> = {
   story: `Mode: story. Draft and edit passages with story_write_passage and story_add_passage. Read the story first (story_read, story_paths) and keep the rule syntax valid. Each write asks the user, so make each call one coherent change and say what it does.`,
   plan: `Mode: plan. You cannot change game files. Read code and data, then call plan_save with concrete steps (file, change, optional exact oldText/newText) and the shots to re-capture, then review_reply summarising the plan.`,
   implement: `Mode: implement. Apply exactly the approved plan's steps with implement_edit, capture the plan's recapture shots with frames_capture, then plan_mark_implemented and review_reply. Read the plan first with plan_read. Do not edit any file the plan does not name.`,
+  concept: `Mode: concept. You are the concept artist. The user marked something on the storyboard and asked for a change. Answer with concept art, drawn by a short Godot 4 script that you write and River renders.
+
+Write one file, concepts/<id>/draw.gd (the [River context] gives the id), with concept_write. It writes without asking, but nothing runs your script until the user has read and approved its exact text. You will not see the render. The contract:
+
+  extends RefCounted
+
+  func draw(img: Image) -> void:
+  \tvar w := img.get_width()
+  \tvar h := img.get_height()
+  \timg.fill(Color("#2b3a4a"))
+  \timg.fill_rect(Rect2i(0, h * 2 / 3, w, h / 3), Color(0.32, 0.45, 0.3))
+
+- The first line of code is exactly "extends RefCounted", and the script defines func draw(img: Image) -> void at the top level.
+- River calls draw() once on a blank 256x256 RGBA image. Size shapes from img.get_width() and img.get_height().
+- Draw only with the Image API (fill, set_pixel, fill_rect, blend_rect) plus plain GDScript: numbers, loops, arrays, Color, Vector2, Rect2i. No loading files or resources, no static, no OS, Engine, FileAccess, threads, HTTP, call() or callv, and no building scripts at runtime (GDScript, source_code, reload). The lint rejects these words even in comments and strings.
+- Write draw.gd in printable ASCII with tabs and plain newlines only, comments included: no em dashes, curly quotes, degree signs or other non-ASCII characters. concept_write refuses anything else.
+- Before drawing, look at the project for palette, mood and style: Read, Glob and Grep inside the project, and the River read tools. The request says which cards the mark is on.
+- concept_write returns lint problems. Fix them and write the file again until the lint is clean, then stop editing it.
+- Finish with 2-3 sentences for the user describing the concept: what it shows and how it answers the request. No code in that message.`,
 }
 
 /** The appended system prompt for each mode. */
@@ -33,6 +52,7 @@ export const SYSTEM_PROMPTS: Record<AgentMode, string> = {
   story: [RIVER, TWEE, JOBS.story].join("\n\n"),
   plan: [RIVER, TWEE, JOBS.plan].join("\n\n"),
   implement: [RIVER, TWEE, JOBS.implement].join("\n\n"),
+  concept: [RIVER, JOBS.concept].join("\n\n"),
 }
 
 /** Turn context added in front of the user's prompt (ids the tools need). */
@@ -41,5 +61,6 @@ export function turnContext(req: AgentTurnRequest): string {
   if (req.storyFile) lines.push(`Open story file: ${req.storyFile}`)
   if (req.threadId) lines.push(`Review thread: ${req.threadId}`)
   if (req.planId) lines.push(`Approved plan: ${req.planId}`)
+  if (req.conceptId) lines.push(`Concept id: ${req.conceptId} (write concepts/${req.conceptId}/draw.gd)`)
   return lines.length ? `[River context]\n${lines.join("\n")}\n\n` : ""
 }

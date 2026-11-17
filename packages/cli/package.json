@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@river/core": "workspace:*",
+    "@river/agent": "workspace:*",
     "@river/adapter-godot": "workspace:*"
   }
 }

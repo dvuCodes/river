@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 import { beforeEach, describe, expect, it } from "vitest"
 import { addThread, loadPlan, loadProject, setPlanStatus } from "@river/core"
 import type { EngineAdapter, Project } from "@river/core"
-import { createRiverTools, RIVER_TOOL_NAMES, unifiedDiff } from "../src/index"
+import { createRiverTools, RIVER_TOOL_NAMES, selectTools, unifiedDiff } from "../src/index"
 import type { RiverTool } from "../src/index"
 
 const example = fileURLToPath(new URL("../../../examples/park-walk/", import.meta.url))
@@ -44,7 +44,7 @@ beforeEach(async () => {
 describe("tool list", () => {
   it("has the 17 contract names, with the write tools marked mutating", () => {
     expect([...tools.map((t) => t.name)].sort()).toEqual([...EXPECTED_TOOLS].sort())
-    expect([...RIVER_TOOL_NAMES].sort()).toEqual([...EXPECTED_TOOLS].sort())
+    expect([...RIVER_TOOL_NAMES].sort()).toEqual([...EXPECTED_TOOLS, "concept_write"].sort())
     expect(tools.filter((t) => t.mutating).map((t) => t.name).sort()).toEqual(
       ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture"].sort(),
     )
@@ -206,5 +206,76 @@ describe("unifiedDiff", () => {
     )
     expect(unifiedDiff(a, a.replace(/\n/g, "\r\n"))).toBe("")
     expect(unifiedDiff("", "x\n", "f")).toBe("--- a/f\n+++ b/f\n@@ -0,0 +1 @@\n+x\n")
+  })
+})
+
+describe("concept_write", () => {
+  const CONCEPT = "k_test0001"
+  const write = (input: unknown) => createRiverTools(project, { conceptId: CONCEPT }).find((t) => t.name === "concept_write")!.handler(input)
+  const draw = "extends RefCounted\n\nfunc draw(img: Image) -> void:\n\timg.fill(Color(0.5, 0.6, 0.7))\n"
+
+  it("exists only for a concept job, and --tools cannot ask for it without one", () => {
+    expect(tools.some((t) => t.name === "concept_write")).toBe(false)
+    const concept = createRiverTools(project, { conceptId: CONCEPT })
+    expect(concept.find((t) => t.name === "concept_write")!.mutating).toBe(true)
+    expect(selectTools(concept, ["story_read", "concept_write"]).map((t) => t.name)).toEqual(["story_read", "concept_write"])
+    expect(() => selectTools(tools, ["story_read", "concept_write"])).toThrow(/concept_write needs --concept/)
+    expect(() => createRiverTools(project, { conceptId: "../x" })).toThrow(/invalid concept id/)
+  })
+
+  it("writes draw.gd byte for byte and reports lint problems for the agent to fix", async () => {
+    const ok = await write({ file: `concepts/${CONCEPT}/draw.gd`, content: draw })
+    expect(ok.text).toContain("Lint: no problems")
+    expect(readFileSync(join(dir, "concepts", CONCEPT, "draw.gd"), "utf8")).toBe(draw)
+
+    const bad = await write({ file: `concepts\\${CONCEPT}\\draw.gd`, content: draw + '\tvar f = FileAccess.open("user://x", FileAccess.READ)\n' })
+    expect(bad.text).toContain("does not pass the concept lint")
+    expect((bad.data as { problems: string[] }).problems).toEqual([expect.stringContaining('remove "FileAccess"')])
+
+    expect((await write({ file: `concepts/${CONCEPT}/notes.md`, content: "palette notes\n" })).text).toBe(`Wrote concepts/${CONCEPT}/notes.md.`)
+  })
+
+  it("refuses anything outside concepts/<id>/ and any second script", async () => {
+    const refused = [
+      "river.json",
+      "stories/park_walk.twee",
+      `concepts/${CONCEPT}/../../river.json`,
+      `concepts/k_other000/draw.gd`,
+      `concepts/${CONCEPT}`,
+      join(dir, "concepts", CONCEPT, "draw.gd"),
+      `/concepts/${CONCEPT}/draw.gd`,
+      `concepts/${CONCEPT}/helper.gd`,
+      `concepts/${CONCEPT}/draw.gd:stream`,
+      `concepts/${CONCEPT}/x.gd.`,
+      `concepts/${CONCEPT}/draw.gd.`,
+      `concepts/${CONCEPT}/notes.md.`,
+      `concepts/${CONCEPT}/.gitattributes`,
+      `concepts/${CONCEPT}/.git/HEAD`,
+      `concepts/${CONCEPT}/sub/.hidden`,
+      `concepts/${CONCEPT}/nul`,
+      `concepts/${CONCEPT}/NUL.txt`,
+      `concepts/${CONCEPT}/con.png`,
+      `concepts/${CONCEPT}/Aux`,
+      `concepts/${CONCEPT}/prn.md`,
+      `concepts/${CONCEPT}/com1`,
+      `concepts/${CONCEPT}/LPT9.txt`,
+    ]
+    for (const file of refused) await expect(write({ file, content: draw }), file).rejects.toThrow(/cannot write/)
+    expect(readFileSync(join(dir, "river.json"), "utf8")).not.toContain("extends")
+    expect(existsSync(join(dir, "concepts"))).toBe(false)
+  })
+
+  it("refuses a draw.gd a person could not read as shown, and writes nothing", async () => {
+    const hidden = [
+      draw + "\tpass # \u001b[2K\u001b[1G\n",
+      draw.replace(/\n/g, "\r\n"),
+      draw + "\tpass # a\rb\n",
+      draw + "\tpass # ‮ x\n",
+      draw + "\t# dusk — calm\n",
+    ]
+    for (const content of hidden) {
+      await expect(write({ file: `concepts/${CONCEPT}/draw.gd`, content }), JSON.stringify(content)).rejects.toThrow(/cannot write[\s\S]*Line \d+, column \d+/)
+    }
+    expect(existsSync(join(dir, "concepts"))).toBe(false)
   })
 })

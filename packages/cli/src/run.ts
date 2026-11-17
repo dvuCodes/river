@@ -6,6 +6,7 @@ import { createGodotAdapter } from "@river/adapter-godot"
 import {
   captureShot,
   contentPassages,
+  DEFAULT_BOARD,
   createPlaytest,
   exportStory,
   formatCond,
@@ -26,6 +27,7 @@ import {
 import type { Diagnostic, EngineAdapter, Project, StateSchema, Story } from "@river/core"
 import { mkdir, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
+import { cmdJob, cmdMark } from "./jobs"
 
 export interface RunIo {
   /** Where normal output goes. Default: process.stdout. */
@@ -48,6 +50,17 @@ Commands:
   import-twine <file.html> [dir] [--force] import a Twine 2 archive or published story
   shots [dir]                              list the shots in river.json and their latest capture
   capture <shotId> [dir] | --all [dir]     run the engine to capture a shot into .river/captures
+
+Storyboard (--root defaults to the current folder, --board to main):
+  mark add --text "..." [--anchor <cardId>]   add a mark, circled around the card (or at 0,0); prints its id
+  job start --mark <id> [--backend claude-code|api-key] [--model claude-sonnet-5-5]
+                                           the concept artist answers the mark; waits until its script needs approval
+  job show --job <id>                      status, summary, error and script of a job
+  job approve --job <id>                   print the script and its sha256; runs nothing
+  job approve --job <id> --sha256 <hex> --yes
+                                           run the script in Godot, only if its bytes still hash to the sha256 you read
+  job accept --job <id>                    apply the job's concept folder to your checkout
+  job dismiss --job <id>                   throw the job away
 `
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
@@ -90,6 +103,16 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
         from: { type: "string" },
         force: { type: "boolean" },
         all: { type: "boolean" },
+        root: { type: "string" },
+        board: { type: "string" },
+        mark: { type: "string" },
+        job: { type: "string" },
+        text: { type: "string" },
+        anchor: { type: "string" },
+        backend: { type: "string" },
+        model: { type: "string" },
+        yes: { type: "boolean" },
+        sha256: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     })
@@ -115,6 +138,8 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
         return await cmdImport(resolve(cwd, rest[0]), resolve(cwd, rest[1] ?? "."), values.force ?? false, out, err)
       }
       case "shots": return await cmdShots(resolve(cwd, rest[0] ?? "."), out)
+      case "mark": return await cmdMark(rest[0], { root: resolve(cwd, values.root ?? "."), board: values.board ?? DEFAULT_BOARD, text: values.text, anchor: values.anchor }, out, err)
+      case "job": return await cmdJob(rest[0], { ...values, root: resolve(cwd, values.root ?? ".") }, out, err)
       case "capture": {
         if (values.all) return await cmdCapture(resolve(cwd, rest[0] ?? "."), undefined, out, err)
         if (!rest[0]) { err.line("river capture: missing <shotId> (or --all)"); return 2 }

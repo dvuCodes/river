@@ -29,7 +29,41 @@ export function contentPassages(story: Story): Passage[] {
 }
 
 function reparse(p: Passage, rawText: string, name = p.name): Passage {
-  return parsePassage({ name, tags: p.tags, metadata: p.metadata, rawText, file: p.span.file, line: p.span.line }).passage
+  const next = parsePassage({ name, tags: p.tags, metadata: p.metadata, rawText, file: p.span.file, line: p.span.line }).passage
+  // Keep the source so the writer can still reuse the header and spacing that did not change.
+  return p.source ? { ...next, source: p.source } : next
+}
+
+/**
+ * The card position from the Twee header metadata `{"position":"x,y"}` (top-left), or undefined when it
+ * is missing or not two finite numbers.
+ */
+export function passagePosition(p: Passage): [number, number] | undefined {
+  const v = p.metadata["position"]
+  if (typeof v !== "string") return undefined
+  const parts = v.split(",")
+  if (parts.length !== 2 || parts.some((s) => s.trim() === "")) return undefined
+  const [x, y] = parts.map((s) => Number(s.trim())) as [number, number]
+  return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : undefined
+}
+
+/**
+ * Set card positions (passage id -> [x, y], rounded to integers) in each passage's header metadata as
+ * "position": "x,y". Other metadata keys and their order are kept. Unknown ids and non-finite values are
+ * ignored. Returns the same Story object when nothing changed, else a new Story.
+ */
+export function setPassagePositions(story: Story, positions: Record<string, [number, number]>): Story {
+  let changed = false
+  const passages = story.passages.map((p) => {
+    const pos = Object.hasOwn(positions, p.id) ? positions[p.id] : undefined
+    if (!pos || !Number.isFinite(pos[0]) || !Number.isFinite(pos[1])) return p
+    // `|| 0` turns -0 into 0.
+    const value = `${Math.round(pos[0]) || 0},${Math.round(pos[1]) || 0}`
+    if (p.metadata["position"] === value) return p
+    changed = true
+    return { ...p, metadata: { ...p.metadata, position: value } }
+  })
+  return changed ? { ...story, passages } : story
 }
 
 /** Replace one passage raw text and re-parse it. Returns a new Story; the input is not changed. */

@@ -42,11 +42,13 @@ function registerApprovalTool(server: McpServer, pipe: string): void {
   )
 }
 
-/** Pick tools by name. Throws on a name River does not have. */
+/** Pick tools by name. Throws on a name River does not have, or one this server was not started for (concept_write without --concept). */
 export function selectTools(all: RiverTool[], names?: readonly string[]): RiverTool[] {
   if (!names) return all
   const unknown = names.filter((n) => !(RIVER_TOOL_NAMES as readonly string[]).includes(n))
   if (unknown.length > 0) throw new Error(`unknown tools: ${unknown.join(", ")}. Known: ${RIVER_TOOL_NAMES.join(", ")}`)
+  const unavailable = names.filter((n) => !all.some((t) => t.name === n))
+  if (unavailable.length > 0) throw new Error(`tools not available on this server: ${unavailable.join(", ")} (concept_write needs --concept <id>)`)
   return all.filter((t) => names.includes(t.name))
 }
 

@@ -2,6 +2,7 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from "react"
 import type { AgentStatus, PlaySnapshot, ProjectInfo, StoryDTO, ViewId } from "../../shared/api"
 import { SettingsDialog } from "./components/SettingsDialog"
 import { cx, errorText, isSmoke } from "./util"
+import { CanvasView } from "./views/CanvasView"
 import { type AgentContext, AgentView, useAgentSession } from "./views/AgentView"
 import { type AgentIntent, FramesView } from "./views/FramesView"
 import { PathsView } from "./views/PathsView"
@@ -42,6 +43,18 @@ const NAV: { id: ViewId; label: string; group: string; icon: ReactNode }[] = [
     icon: (
       <svg viewBox="0 0 16 16" aria-hidden>
         <path d="M4.5 2.8v10.4L13 8z" />
+      </svg>
+    ),
+  },
+  {
+    id: "canvas",
+    label: "Canvas",
+    group: "Review",
+    icon: (
+      <svg viewBox="0 0 16 16" aria-hidden>
+        <rect x="1.5" y="2.5" width="6" height="5" rx="0.8" />
+        <rect x="9" y="6" width="5.5" height="6.5" rx="0.8" />
+        <path d="M2.5 11.5c1.5-1.8 3-1.8 4.2 0s2 .8 2-.2" />
       </svg>
     ),
   },
@@ -111,6 +124,7 @@ export function App() {
   const [playStartedNonce, setPlayStartedNonce] = useState<number | null>(null)
   const [storyStale, setStoryStale] = useState(false)
   const [framesTick, setFramesTick] = useState(0)
+  const [storyTick, setStoryTick] = useState<{ rel: string; n: number } | null>(null)
   const [agentCtx, setAgentCtx] = useState<AgentContext>({ mode: "story" })
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -185,6 +199,7 @@ export function App() {
         if (changes.some((c) => c.kind === "manifest" || (c.kind === "story" && c.rel !== rel))) {
           void window.river.getProject().then(applyProject)
         }
+        for (const c of changes) if (c.kind === "story") setStoryTick((t) => ({ rel: c.rel, n: (t?.n ?? 0) + 1 }))
         if (changes.some((c) => c.kind === "review" || c.kind === "plans" || c.kind === "manifest")) setFramesTick((t) => t + 1)
       }),
     [loadStory, applyProject],
@@ -258,7 +273,11 @@ export function App() {
             storyError={storyError}
             selectedId={selectedId}
             onSelect={setSelectedId}
-            onStoryChanged={setStory}
+            onStoryChanged={(s) => {
+              // River's own writes are not echoed by the watcher, so mark an open playtest stale here.
+              setStory(s)
+              setStoryStale(true)
+            }}
             onPlayFrom={(name) => {
               setPlayReq((r) => ({ from: name, nonce: r.nonce + 1 }))
               setStoryStale(false)
@@ -281,6 +300,8 @@ export function App() {
             setStartedNonce={setPlayStartedNonce}
             storyStale={storyStale && playSnap !== null}
           />
+        ) : view === "canvas" ? (
+          <CanvasView storyTick={storyTick} />
         ) : view === "frames" ? (
           <FramesView tick={framesTick} onAgent={onAgentIntent} />
         ) : (

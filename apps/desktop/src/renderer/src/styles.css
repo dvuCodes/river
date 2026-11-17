@@ -29,6 +29,15 @@
   --card: #ffffff;
   --shadow: 0 1px 2px rgb(40 35 20 / 0.06), 0 4px 14px rgb(40 35 20 / 0.06);
   --radius: 6px;
+  /* storyboard canvas: your marks are pink, agents are purple */
+  --pen: #e0287a;
+  --pen-soft: #fbe3ee;
+  --agent: #7b4fd6;
+  --agent-soft: #ece5fb;
+  --board: #faf9f6;
+  --board-dot: #e2ded4;
+  --note: #fff8d6;
+  --note-line: #eadb98;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -56,6 +65,14 @@
     --edge: #5f6b6e;
     --card: #1e2427;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 18px rgb(0 0 0 / 0.25);
+    --pen: #ff5fa2;
+    --pen-soft: #4a1f33;
+    --agent: #b294ff;
+    --agent-soft: #2e2547;
+    --board: #171b1d;
+    --board-dot: #2c3438;
+    --note: #3a3620;
+    --note-line: #6b5f2c;
   }
 }
 

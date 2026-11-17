@@ -56,16 +56,17 @@ export function preAllowedTools(mode: AgentTurnRequest["mode"]): string[] {
   return [...readTools, ...autoWrites].map((t) => MCP_PREFIX + t)
 }
 
-/** The stdio config of the "river" MCP server, shared by both backends. */
+/** The stdio config of the "river" MCP server, shared by both backends. A concept turn gets `--concept <id>`. */
 export function riverMcpServer(
-  mode: AgentTurnRequest["mode"],
+  req: Pick<AgentTurnRequest, "mode" | "conceptId">,
   root: string,
   launch: McpLaunch,
   extraArgs: string[] = [],
 ): { command: string; args: string[]; env: Record<string, string> } {
+  const concept = req.mode === "concept" && req.conceptId ? ["--concept", req.conceptId] : []
   return {
     command: launch.command,
-    args: [...launch.args, "--root", root, "--tools", MODE_TOOLS[mode].join(","), ...extraArgs],
+    args: [...launch.args, "--root", root, "--tools", MODE_TOOLS[req.mode].join(","), ...concept, ...extraArgs],
     // The River server needs no Anthropic key; make sure it does not inherit one.
     // Inside Electron, process.execPath is the app itself; ELECTRON_RUN_AS_NODE makes it run the script as Node.
     env: { ANTHROPIC_API_KEY: "", ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}) },
@@ -108,7 +109,7 @@ export function buildQueryOptions(req: AgentTurnRequest, deps: QueryOptionDeps):
     disallowedTools: [...DISALLOWED_BUILTINS],
     canUseTool: deps.canUseTool,
     mcpServers: {
-      river: { type: "stdio", ...riverMcpServer(req.mode, root, launch), alwaysLoad: true },
+      river: { type: "stdio", ...riverMcpServer(req, root, launch), alwaysLoad: true },
     },
     systemPrompt: {
       type: "preset",

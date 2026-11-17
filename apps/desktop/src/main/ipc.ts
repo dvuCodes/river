@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto"
+import { mkdir } from "node:fs/promises"
 import { userInfo } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
-import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, PermissionDecision } from "@river/agent"
+import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobDeps, PermissionDecision } from "@river/agent"
 import { createGodotAdapter } from "@river/adapter-godot"
 import {
   type Capture,
@@ -25,7 +26,7 @@ import {
   listPlans,
   listStories,
   listThreads,
-  loadLayout,
+  loadJob,
   loadProject,
   loadSchema,
   loadStory,
@@ -35,11 +36,13 @@ import {
   reply,
   resolveTarget,
   restoreCheckpoint,
-  saveLayout,
+  safePath,
   saveStory,
+  setPassagePositions,
   setPlanStatus,
   setStatus,
   updatePassageText,
+  writeTwee3,
 } from "@river/core"
 import type {
   AgentPrefsUpdate,
@@ -47,20 +50,22 @@ import type {
   AgentStatus,
   CaptureDTO,
   FramesDTO,
+  JobDTO,
   OpenStateDTO,
   PathDTO,
   PlaySnapshot,
   ProjectInfo,
   StoryDTO,
 } from "../shared/api"
-import { loadAgent } from "./agent"
+import { type JobApi, loadAgent } from "./agent"
 import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
-import { watchProject } from "./watch"
+import { boardHandlers } from "./board"
+import { type ProjectWatch, noteOwnWrite, watchProject } from "./watch"
 
 let project: Project | null = null
 let projectError: { root: string; message: string } | null = null
-let stopWatch: (() => Promise<void>) | null = null
+let projectWatch: ProjectWatch | null = null
 let getWindow: () => BrowserWindow | null = () => null
 
 export function currentProject(): Project | null {
@@ -80,13 +85,18 @@ function need(): Project {
 /** Open a project folder (the one with river.json). Remembers it unless `remember` is false. */
 export async function openProject(root: string, remember = true): Promise<void> {
   const abs = resolve(root)
-  await stopWatch?.()
-  stopWatch = null
+  await projectWatch?.stop()
+  projectWatch = null
   try {
     project = await loadProject(abs)
     projectError = null
     if (remember) settings.setLastProject(project.root)
-    stopWatch = watchProject(project, (changes) => send("fs:change", changes))
+    projectWatch = watchProject(project, (changes) => send("fs:change", changes))
+    const opened = project.root
+    // Fails only jobs whose owning process is gone, so a job this app or the CLI is running survives a re-open.
+    void loadAgent()
+      .then((a) => a.jobs?.recoverJobs(opened))
+      .catch((err: unknown) => console.warn("river: could not recover jobs", err))
   } catch (err) {
     project = null
     projectError = { root: abs, message: err instanceof Error ? err.message : String(err) }
@@ -112,15 +122,28 @@ async function readStory(rel: string): Promise<{ story: Story; schema: StateSche
   return {
     story,
     schema,
-    dto: async () => {
-      const layout = await loadLayout(join(p.root, rel))
-      return storyDTO(story, [...diagnostics, ...lint(story, schema)], layout.positions, schema)
-    },
+    dto: async () => storyDTO(story, [...diagnostics, ...lint(story, schema)], schema),
   }
 }
 
+const storyWritten = new Set<(rel: string) => void>()
+
+/** Call `cb` after River writes a story file (used by smoke mode). Returns an unsubscribe function. */
+export function onStoryWritten(cb: (rel: string) => void): () => void {
+  storyWritten.add(cb)
+  return () => storyWritten.delete(cb)
+}
+
+/** Write a story file, telling the watcher first so it does not report River's own write as an outside change. */
+async function writeStory(rel: string, story: Story): Promise<void> {
+  const p = need()
+  noteOwnWrite(safePath(p, rel), writeTwee3(story))
+  await saveStory(p, rel, story)
+  for (const cb of storyWritten) cb(rel)
+}
+
 async function storyAfterWrite(rel: string, story: Story): Promise<StoryDTO> {
-  await saveStory(need(), rel, story)
+  await writeStory(rel, story)
   return (await readStory(rel)).dto()
 }
 
@@ -222,7 +245,25 @@ async function agentStatus(refreshClaude = false): Promise<AgentStatus> {
   }
 }
 
-export function registerIpc(windowGetter: () => BrowserWindow | null): void {
+type TurnAuth = Pick<AgentTurnRequest, "backend" | "apiKey" | "claudePath">
+
+async function turnAuth(status: AgentStatus): Promise<TurnAuth> {
+  if (status.backend === "api-key") {
+    const apiKey = await settings.getApiKey()
+    if (!apiKey) throw new Error("Add an Anthropic API key in Settings first.")
+    return { backend: "api-key", apiKey }
+  }
+  return { backend: "claude-code", ...(status.claudePath ? { claudePath: status.claudePath } : {}) }
+}
+
+async function jobApi(): Promise<JobApi> {
+  const agent = await loadAgent()
+  if (!agent.jobs) throw new Error(agent.jobsReason ?? "Concept jobs are unavailable.")
+  return agent.jobs
+}
+
+/** `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn). */
+export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: JobDeps } = {}): void {
   getWindow = windowGetter
   const handle = <A extends unknown[], R>(channel: string, fn: (...args: A) => Promise<R> | R) =>
     ipcMain.handle(channel, (_e, ...args) => fn(...(args as A)))
@@ -250,12 +291,10 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
     const { story } = await readStory(rel)
     return storyAfterWrite(rel, renamePassage(story, id, trimmed))
   })
-  handle("story:saveLayout", async (rel: string, positions: Record<string, [number, number]>) => {
-    const p = need()
-    const round = (n: number) => Math.round(n)
-    const clean: Record<string, [number, number]> = {}
-    for (const [id, [x, y]] of Object.entries(positions)) clean[id] = [round(x), round(y)]
-    await saveLayout(join(p.root, rel), { version: 1, positions: clean })
+  handle("story:savePositions", async (rel: string, positions: Record<string, [number, number]>) => {
+    const { story } = await loadStory(need(), rel)
+    const next = setPassagePositions(story, positions)
+    if (next !== story) await writeStory(rel, next)
   })
   handle("story:paths", async (rel: string): Promise<PathDTO[]> => {
     const { story, schema } = await readStory(rel)
@@ -315,6 +354,10 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
   handle("review:status", (threadId: string, status: ReviewStatus) => setStatus(need(), threadId, status))
   handle("plan:status", (planId: string, status: ChangePlan["status"]) => setPlanStatus(need(), planId, status))
 
+  for (const [channel, fn] of Object.entries(boardHandlers(need, (dir) => projectWatch?.add(dir), getWindow))) {
+    handle(channel, fn as (...args: unknown[]) => Promise<unknown>)
+  }
+
   handle("agent:status", () => agentStatus())
   handle("agent:refreshStatus", () => agentStatus(true))
   handle("settings:setAgentPrefs", (p: AgentPrefsUpdate) => {
@@ -341,14 +384,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
     if (!agent.start) throw new Error(agent.reason ?? "The agent is unavailable.")
     const status = await agentStatus()
     const { turnId, ...turn } = req
-    let auth: Pick<AgentTurnRequest, "backend" | "apiKey" | "claudePath">
-    if (status.backend === "api-key") {
-      const apiKey = await settings.getApiKey()
-      if (!apiKey) throw new Error("Add an Anthropic API key in Settings first.")
-      auth = { backend: "api-key", apiKey }
-    } else {
-      auth = { backend: "claude-code", ...(status.claudePath ? { claudePath: status.claudePath } : {}) }
-    }
+    const auth = await turnAuth(status)
     // The model picker is per turn; remember the last one.
     if (turn.model !== status.model) settings.setAgentPrefs({ model: turn.model })
     const ac = new AbortController()
@@ -393,4 +429,35 @@ export function registerIpc(windowGetter: () => BrowserWindow | null): void {
     turns.get(turnId)?.abort()
   })
   handle("agent:restore", (ref: string) => restoreCheckpoint(need().root, ref))
+
+  handle("job:start", async (board: string, markId: string) => {
+    const p = need()
+    const jobs = await jobApi()
+    const status = await agentStatus()
+    const auth = await turnAuth(status)
+    // Watch the jobs folder before the first job file appears in it.
+    const jobsDir = join(p.root, ".river", "jobs")
+    await mkdir(jobsDir, { recursive: true })
+    projectWatch?.add(jobsDir)
+    const run = jobs.startConceptJob({ workspaceRoot: p.root, board, markId, model: status.model, ...auth }, opts.jobDeps)
+    run.catch((err: unknown) => console.warn("river: concept job failed", err))
+    // Once the job exists its errors land in its file; one that fails before that (bad mark, no git) is thrown here.
+    await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
+  })
+  handle("job:get", async (jobId: string): Promise<JobDTO> => {
+    const p = need()
+    const job = await loadJob(p.root, jobId)
+    if (job.status !== "approval") return { job }
+    // The committed bytes, hashed as read: the only bytes approveJobScript will run.
+    return { job, script: await (await jobApi()).readJobScript(p.root, jobId) }
+  })
+  handle("job:approve", async (jobId: string, sha256: string) => {
+    await (await jobApi()).approveJobScript(need().root, jobId, sha256)
+  })
+  handle("job:accept", async (jobId: string) => {
+    await (await jobApi()).acceptJob(need().root, jobId)
+  })
+  handle("job:dismiss", async (jobId: string) => {
+    await (await jobApi()).dismissJob(need().root, jobId)
+  })
 }

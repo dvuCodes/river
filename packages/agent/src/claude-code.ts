@@ -126,7 +126,7 @@ export interface ClaudeArgsOptions {
 
 /** The MCP config River passes inline: only the "river" server, with approval_prompt switched on. */
 export function claudeMcpConfig(req: AgentTurnRequest, o: ClaudeArgsOptions): string {
-  const server = riverMcpServer(req.mode, o.root, o.mcpLaunch ?? defaultMcpLaunch(), ["--approval-pipe", o.approvalPipe])
+  const server = riverMcpServer(req, o.root, o.mcpLaunch ?? defaultMcpLaunch(), ["--approval-pipe", o.approvalPipe])
   return JSON.stringify({ mcpServers: { river: { type: "stdio", ...server } } })
 }
 

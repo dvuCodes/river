@@ -21,22 +21,24 @@ Everything after `--` is the server command. Add `-s project` to write the entry
 ## Options
 
 ```
-river-mcp --root <dir> [--tools name,name,...] [--approval-pipe <name>]
+river-mcp --root <dir> [--tools name,name,...] [--approval-pipe <name>] [--concept <id>]
 ```
 
 - `--root` is required. It is the game repo, the folder with `river.json`.
-- `--tools` serves only the tools you name. The default is all 17.
+- `--tools` serves only the tools you name. The default is all 17, plus `concept_write` with `--concept`.
 - `--approval-pipe` is for the River app only. It adds `approval_prompt`, the tool Claude Code calls for permission prompts (`--permission-prompt-tool mcp__river__approval_prompt`). The tool asks the River app over that local named pipe or socket, and denies on any error or timeout. It is never one of the `--tools`.
+- `--concept` is for River's concept jobs. It adds `concept_write`, which writes only in `concepts/<id>/`. Without it, asking for `concept_write` in `--tools` is an error.
 
 Read-only tools: `project_info`, `story_list`, `story_read`, `story_lint`, `story_paths`, `playtest_run`, `frames_list`, `review_list`, `plan_list`, `plan_read`.
 
-Tools that write: `story_write_passage`, `story_add_passage`, `review_reply`, `plan_save`, `implement_edit`, `plan_mark_implemented`, `frames_capture`.
+Tools that write: `story_write_passage`, `story_add_passage`, `review_reply`, `plan_save`, `implement_edit`, `plan_mark_implemented`, `frames_capture`, `concept_write` (only with `--concept`).
 
 ## Safety
 
 - Every path is relative to `--root`, and the server never writes outside it.
 - The story tools write only story files.
 - `implement_edit` runs only for a plan with status `approved`, and only on a file that the plan's steps name and that matches the `editable` globs in `river.json`. The `oldText` you pass must match exactly once.
+- `concept_write` writes only inside `concepts/<id>/`, and the only script it takes is `concepts/<id>/draw.gd`. It refuses names that start or end with a dot and Windows device names (CON, NUL, COM1 and the like). `draw.gd` may hold only printable ASCII, tabs and LF line ends; anything else is refused, so the text the user reads is the text that runs. For that file it returns the concept lint problems. River runs nothing it writes until the user approves the script's exact bytes.
 - Errors come back as MCP tool errors (`isError: true`). They do not stop the server.
 
 ## Use it in-process

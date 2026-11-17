@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync } from "node:fs"
+import { cpSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -50,6 +50,30 @@ describe("river-mcp over stdio", () => {
       const info = await client.callTool({ name: "project_info", arguments: {} })
       expect(info.isError).toBeFalsy()
       expect((info.structuredContent as { engine?: string } | undefined)?.engine).toBe("none")
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("serves concept_write with --concept, writing only in that job's folder", { timeout: 60_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "river-mcp-concept-"))
+    cpSync(example, root, { recursive: true })
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", "tsx", mainTs, "--root", root, "--tools", "project_info,concept_write", "--concept", "k_stdio001"],
+      cwd: repoRoot,
+      stderr: "pipe",
+    })
+    const client = new Client({ name: "river-test", version: "0.0.0" })
+    try {
+      await client.connect(transport)
+      expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["concept_write", "project_info"])
+      const content = "extends RefCounted\n\nfunc draw(img: Image) -> void:\n\timg.fill(Color.BLACK)\n"
+      const ok = await client.callTool({ name: "concept_write", arguments: { file: "concepts/k_stdio001/draw.gd", content } })
+      expect(ok.isError).toBeFalsy()
+      expect(readFileSync(join(root, "concepts/k_stdio001/draw.gd"), "utf8")).toBe(content)
+      const out = await client.callTool({ name: "concept_write", arguments: { file: "stories/x.gd", content } })
+      expect(out.isError).toBe(true)
     } finally {
       await client.close()
     }

@@ -5,9 +5,12 @@
  * Every path argument is relative to the project root and goes through core `safePath`.
  * Handlers throw on bad input; the MCP server turns a throw into an `isError` tool result.
  */
-import { readFile, writeFile } from "node:fs/promises"
-import { createGodotAdapter } from "@river/adapter-godot"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import path from "node:path"
+import { conceptScriptBytesProblem, createGodotAdapter, lintConceptScript } from "@river/adapter-godot"
 import {
+  assertConceptFile,
+  assertConceptId,
   assertEditAllowed,
   captureShot,
   contentPassages,
@@ -58,6 +61,7 @@ export const WRITE_TOOL_NAMES = [
   "implement_edit",
   "plan_mark_implemented",
   "frames_capture",
+  "concept_write",
 ] as const
 
 export type RiverToolName = (typeof READ_TOOL_NAMES)[number] | (typeof WRITE_TOOL_NAMES)[number]
@@ -87,6 +91,8 @@ export interface RiverToolsOptions {
   adapter?: EngineAdapter
   /** Default author for review_reply. Default "agent". */
   author?: string
+  /** The concept job this server works for. concept_write exists only when this is set, and writes only in concepts/<conceptId>/. */
+  conceptId?: string
 }
 
 /** The engine adapter for a project, by manifest.engine. */
@@ -596,5 +602,37 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
     }),
   ]
 
+  if (opts.conceptId !== undefined) tools.push(conceptWrite(project, opts.conceptId))
   return tools
+}
+
+function conceptWrite(project: Project, conceptId: string): RiverTool {
+  assertConceptId(conceptId)
+  return define({
+    name: "concept_write",
+    description:
+      `Write one file in this job's folder, concepts/${conceptId}/ (path relative to the project root, e.g. concepts/${conceptId}/draw.gd). ` +
+      "Replaces the whole file. draw.gd may hold only printable ASCII, tabs and LF line ends; anything else is refused. " +
+      "For draw.gd the result lists lint problems; fix them and write the file again until there are none.",
+    inputSchema: {
+      file: relPath,
+      content: z.string().max(200_000).describe("The whole file content"),
+    },
+    mutating: true,
+    async run({ file, content }) {
+      const rel = assertConceptFile(conceptId, file)
+      const unreadable = rel.endsWith(".gd") ? conceptScriptBytesProblem(Buffer.from(content, "utf8")) : undefined
+      if (unreadable) throw new Error(`river: cannot write ${rel}: ${unreadable} Write the whole file again without them.`)
+      const full = safePath(project, rel)
+      await mkdir(path.dirname(full), { recursive: true })
+      await writeFile(full, content, "utf8")
+      if (!rel.endsWith(".gd")) return { text: `Wrote ${rel}.`, data: { file: rel, problems: [] } }
+      const problems = lintConceptScript(content)
+      const text =
+        problems.length === 0
+          ? `Wrote ${rel}. Lint: no problems.`
+          : [`Wrote ${rel}, but it does not pass the concept lint. Fix these and write the file again:`, ...problems.map((p) => `- ${p}`)].join("\n")
+      return { text, data: { file: rel, problems } }
+    },
+  })
 }

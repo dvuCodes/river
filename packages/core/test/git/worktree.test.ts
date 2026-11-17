@@ -1,0 +1,105 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import path from "node:path"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { applyJobFiles, commitJobFile, createJobWorktree, gitTop, removeJobWorktree } from "../../src/git/worktree"
+import { git, initRepo, removeDir, tempDir } from "../project/helpers"
+
+let top: string
+beforeEach(() => {
+  top = tempDir("river-worktree-")
+  initRepo(top)
+})
+afterEach(() => removeDir(top))
+
+const write = (dir: string, rel: string, data: string | Buffer) => {
+  mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true })
+  writeFileSync(path.join(dir, rel), data)
+}
+const read = (dir: string, rel: string) => readFileSync(path.join(dir, rel))
+
+const DRAW = "extends RefCounted\r\n\r\nfunc draw(img: Image) -> void:\n\timg.fill(Color(0.2, 0.3, 0.4))\n"
+// Every byte value, so CRLF, NUL and high bytes must survive the binary patch.
+const PNG = Buffer.from(Array.from({ length: 512 }, (_, i) => i % 256))
+
+describe("job worktrees", { timeout: 60_000 }, () => {
+  it("branches from the user's dirty tree, commits only the given paths, and applies them without touching the index or other files", async () => {
+    write(top, "README.md", "readme\n")
+    write(top, "game/river.json", "{}\n")
+    write(top, "game/stories/a.twee", "one\n")
+    git(top, "add", "-A")
+    git(top, "commit", "-q", "-m", "init")
+    // The user's uncommitted work: an unrelated edit outside the project, a staged edit, an untracked file.
+    write(top, "README.md", "readme, edited\n")
+    write(top, "game/stories/a.twee", "one, staged\n")
+    git(top, "add", "game/stories/a.twee")
+    write(top, "game/notes.txt", "untracked\n")
+    const head = git(top, "rev-parse", "HEAD")
+    const index = git(top, "ls-files", "-s")
+    const status = git(top, "status", "--porcelain")
+
+    const game = path.join(top, "game")
+    expect(await gitTop(game)).toBe(top)
+    const job = await createJobWorktree(game, "j_test0001")
+    expect(job.projectSub).toBe("game")
+    expect(job.branch).toBe("river/job/j_test0001")
+    expect(job.worktree).toBe(path.join(top, ".git", "river", "worktrees", "j_test0001"))
+    expect(git(top, "rev-parse", `${job.baseSha}^`)).toBe(head)
+    expect(read(job.worktree, "game/stories/a.twee").toString()).toBe("one, staged\n")
+    expect(read(job.worktree, "game/notes.txt").toString()).toBe("untracked\n")
+    expect(git(top, "status", "--porcelain")).toBe(status)
+
+    write(job.worktree, "game/concepts/k1/scratch.txt", "never committed\n")
+    write(job.worktree, "game/stories/a.twee", "an edit that must not travel\n")
+    const first = await commitJobFile(game, "j_test0001", "game/concepts/k1/draw.gd", Buffer.from(DRAW), "river: concept k1")
+    expect(first).not.toBe(job.baseSha)
+    expect(await commitJobFile(game, "j_test0001", "game/concepts/k1/draw.gd", Buffer.from(DRAW), "again")).toBe(first)
+    const second = await commitJobFile(game, "j_test0001", "game/concepts/k1/concept.png", PNG, "river: render k1")
+    expect(git(top, "diff", "--name-only", job.baseSha, second).trim().split("\n").sort()).toEqual(["game/concepts/k1/concept.png", "game/concepts/k1/draw.gd"])
+
+    const undo = await applyJobFiles(game, second, "game/concepts/k1")
+    expect(read(top, "game/concepts/k1/draw.gd").toString()).toBe(DRAW)
+    expect(read(top, "game/concepts/k1/concept.png").equals(PNG)).toBe(true)
+    expect(existsSync(path.join(top, "game/concepts/k1/scratch.txt"))).toBe(false)
+    expect(read(top, "game/stories/a.twee").toString()).toBe("one, staged\n")
+    expect(read(top, "README.md").toString()).toBe("readme, edited\n")
+    expect(git(top, "rev-parse", "HEAD")).toBe(head)
+    expect(git(top, "ls-files", "-s")).toBe(index)
+    const lines = (text: string) => text.trim().split("\n").sort()
+    expect(lines(git(top, "status", "--porcelain"))).toEqual(lines(status + "?? game/concepts/\n"))
+
+    const again = await applyJobFiles(game, second, "game/concepts/k1")
+    await again()
+    expect(read(top, "game/concepts/k1/draw.gd").toString()).toBe(DRAW)
+    await undo()
+    expect(existsSync(path.join(top, "game/concepts"))).toBe(false)
+    expect(git(top, "status", "--porcelain")).toBe(status)
+
+    await removeJobWorktree(game, "j_test0001")
+    expect(existsSync(job.worktree)).toBe(false)
+    expect(git(top, "worktree", "list", "--porcelain")).not.toContain("j_test0001")
+    expect(git(top, "branch", "--list", job.branch)).toBe("")
+    await removeJobWorktree(game, "j_test0001")
+  })
+
+  it("works with the project at the top level, refuses a conflicting apply, and removes only by job id", async () => {
+    write(top, "river.json", "{}\n")
+    git(top, "add", "-A")
+    git(top, "commit", "-q", "-m", "init")
+    const job = await createJobWorktree(top, "j_test0002")
+    expect(job.projectSub).toBe("")
+    const sha = await commitJobFile(top, "j_test0002", "concepts/k2/draw.gd", Buffer.from(DRAW), "river: concept k2")
+
+    write(top, "concepts/k2/draw.gd", "the user's own file\n")
+    await expect(applyJobFiles(top, sha, "concepts/k2")).rejects.toThrow(/already in your project/)
+    expect(read(top, "concepts/k2/draw.gd").toString()).toBe("the user's own file\n")
+
+    for (const id of ["..", "../..", "", "a/b"]) await expect(removeJobWorktree(top, id)).rejects.toThrow(/invalid job id/)
+    expect(existsSync(path.join(top, "river.json"))).toBe(true)
+    expect(existsSync(job.worktree)).toBe(true)
+
+    removeDir(job.worktree)
+    await removeJobWorktree(top, "j_test0002")
+    expect(git(top, "worktree", "list", "--porcelain")).not.toContain("j_test0002")
+    expect(git(top, "branch", "--list", job.branch)).toBe("")
+  })
+})

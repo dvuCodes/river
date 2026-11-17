@@ -75,6 +75,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.3.326
         version: 0.3.326(@anthropic-ai/sdk@1.9.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(zod@4.6.7)
+      '@river/adapter-godot':
+        specifier: workspace:*
+        version: link:../adapter-godot
       '@river/core':
         specifier: workspace:*
         version: link:../core
@@ -87,6 +90,9 @@ importers:
       '@river/adapter-godot':
         specifier: workspace:*
         version: link:../adapter-godot
+      '@river/agent':
+        specifier: workspace:*
+        version: link:../agent
       '@river/core':
         specifier: workspace:*
         version: link:../core

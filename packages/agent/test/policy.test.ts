@@ -76,6 +76,22 @@ describe("canUseTool policy", () => {
     expect(onPermission).not.toHaveBeenCalled()
   })
 
+  it("lets concept_write through only for the turn's own concept folder, without asking", async () => {
+    const onPermission = vi.fn()
+    const can = createCanUseTool({ mode: "concept", project, conceptId: "k_policy01", onPermission })
+    expect((await can("mcp__river__concept_write", { file: "concepts/k_policy01/draw.gd", content: "x" }, opts())).behavior).toBe("allow")
+    for (const file of ["concepts/k_other000/draw.gd", "concepts/k_policy01/../../river.json", "stories/park_walk.twee", "concepts/k_policy01/extra.gd"]) {
+      expect((await can("mcp__river__concept_write", { file, content: "x" }, opts())).behavior, file).toBe("deny")
+    }
+    expect((await can("mcp__river__concept_write", { content: "x" }, opts())).behavior).toBe("deny")
+    const noJob = createCanUseTool({ mode: "concept", project, onPermission })
+    expect((await noJob("mcp__river__concept_write", { file: "concepts/k_policy01/draw.gd", content: "x" }, opts())).behavior).toBe("deny")
+    const story = createCanUseTool({ mode: "story", project, conceptId: "k_policy01", onPermission })
+    expect((await story("mcp__river__concept_write", { file: "concepts/k_policy01/draw.gd", content: "x" }, opts())).behavior).toBe("deny")
+    expect((await can("mcp__river__story_write_passage", {}, opts())).behavior).toBe("deny")
+    expect(onPermission).not.toHaveBeenCalled()
+  })
+
   it("asks for a story write, with a diff of the passage change", async () => {
     const { seen, onPermission } = recorder()
     const can = createCanUseTool({ mode: "story", project, onPermission })

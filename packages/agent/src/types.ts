@@ -6,11 +6,13 @@
  * - "plan":      READ-ONLY on game files. Answers a review thread with a ChangePlan (draft).
  * - "implement": runs an APPROVED ChangePlan. It can edit only the files the plan names
  *                (core `assertEditAllowed`), then capture the plan's shots again.
+ * - "concept":   a concept job's turn, run in the job's worktree. It can write only in
+ *                concepts/<conceptId>/ (one script, draw.gd). Nothing runs that script here.
  *
  * Every "story" and "implement" turn starts with a git checkpoint of the game repo.
  */
 
-export type AgentMode = "story" | "plan" | "implement"
+export type AgentMode = "story" | "plan" | "implement" | "concept"
 
 export type AgentModel = "claude-opus-5-5" | "claude-sonnet-5-5"
 
@@ -34,6 +36,8 @@ export interface AgentTurnRequest {
   threadId?: string
   /** Approved plan to run (mode "implement"). Required in that mode. */
   planId?: string
+  /** The concept folder the turn writes in, concepts/<conceptId>/ (mode "concept"). Required in that mode. */
+  conceptId?: string
   /** Continue an earlier conversation. */
   sessionId?: string
   backend: AgentBackend
@@ -114,6 +118,7 @@ export const WRITE_TOOLS = [
   "implement_edit",
   "plan_mark_implemented",
   "frames_capture",
+  "concept_write",
 ] as const
 
 export type RiverToolName = (typeof READ_TOOLS)[number] | (typeof WRITE_TOOLS)[number]
@@ -123,7 +128,12 @@ export const MODE_TOOLS: Record<AgentMode, readonly RiverToolName[]> = {
   story: [...READ_TOOLS, "story_write_passage", "story_add_passage"],
   plan: [...READ_TOOLS, "review_reply", "plan_save"],
   implement: [...READ_TOOLS, "implement_edit", "frames_capture", "plan_mark_implemented", "review_reply"],
+  concept: [...READ_TOOLS, "concept_write"],
 }
 
-/** Tools that never ask, even though they write: plan_save writes only a draft plan file under .river/plans. */
-export const AUTO_ALLOWED_WRITES: readonly RiverToolName[] = ["plan_save"]
+/**
+ * Tools that never ask, even though they write: plan_save writes only a draft plan file under .river/plans;
+ * concept_write writes only in the job's own folder in its worktree, and nothing runs what it writes
+ * until the user approves the exact bytes.
+ */
+export const AUTO_ALLOWED_WRITES: readonly RiverToolName[] = ["plan_save", "concept_write"]

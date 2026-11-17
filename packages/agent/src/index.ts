@@ -40,3 +40,16 @@ export {
 export { approvalPipeName, startApprovalServer, type ApprovalServer, type ApprovalDecider } from "./approval"
 export { MessageMapper, toolResultText } from "./events"
 export { unifiedDiff } from "./diff"
+export {
+  acceptJob,
+  approveJobScript,
+  dismissJob,
+  readJobScript,
+  recoverJobs,
+  startConceptJob,
+  CONCEPT_ROLE,
+  type ConceptJobRequest,
+  type JobDeps,
+  type JobScript,
+  type RunTurn,
+} from "./jobs"

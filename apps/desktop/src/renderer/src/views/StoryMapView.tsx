@@ -99,6 +99,14 @@ function Inspector(props: {
       setBusy(false)
     }
   }
+  const pin = async () => {
+    try {
+      await window.river.boardPin("main", { kind: "passage", ref: `${storyRel}#${passage.id}` })
+      setStatus({ kind: "ok", text: "Pinned to the canvas." })
+    } catch (err) {
+      setStatus({ kind: "err", text: errorText(err) })
+    }
+  }
   const save = () => run(() => window.river.savePassage(storyRel, passage.id, draft), "Saved to the story file.")
   const rename = () => run(() => window.river.renamePassage(storyRel, passage.id, name), "Renamed, and links to it updated.")
 
@@ -107,6 +115,9 @@ function Inspector(props: {
       <header className="insp-head">
         <span className="insp-kicker">Passage</span>
         <span className="insp-id mono">@id {passage.id}</span>
+        <button className="btn insp-pin" data-pin-passage={passage.id} onClick={() => void pin()} title="Add this passage to the storyboard canvas">
+          Pin to canvas
+        </button>
         <button className="icon-btn" onClick={onClose} title="Close inspector" aria-label="Close inspector">
           ×
         </button>
@@ -230,6 +241,7 @@ export function StoryMapView(props: {
   const [focus, setFocus] = useState<{ id: string; nonce: number }>()
   const [mapReady, setMapReady] = useState(false)
   const saveTimer = useRef<number | undefined>(undefined)
+  const pendingMoves = useRef<{ rel: string; positions: Record<string, [number, number]> } | null>(null)
   useSmokeReady("story-map", mapReady && Boolean(story))
 
   const selected = story?.passages.find((p) => p.id === selectedId)
@@ -237,12 +249,24 @@ export function StoryMapView(props: {
     onSelect(id)
     setFocus({ id, nonce: Date.now() })
   }
-  const onMoved = (positions: Record<string, [number, number]>) => {
+  // Drags are saved into the story file's passage headers, debounced; moves in quick succession are merged.
+  const flushMoves = () => {
     window.clearTimeout(saveTimer.current)
-    saveTimer.current = window.setTimeout(() => {
-      void window.river.saveLayout(storyRel, positions).catch((err) => console.error("layout save failed", errorText(err)))
-    }, 400)
+    const pending = pendingMoves.current
+    pendingMoves.current = null
+    if (!pending) return
+    void window.river.savePositions(pending.rel, pending.positions).catch((err) => console.error("position save failed", errorText(err)))
   }
+  const onMoved = (moved: Record<string, [number, number]>) => {
+    if (pendingMoves.current && pendingMoves.current.rel !== storyRel) flushMoves()
+    pendingMoves.current = { rel: storyRel, positions: { ...pendingMoves.current?.positions, ...moved } }
+    window.clearTimeout(saveTimer.current)
+    saveTimer.current = window.setTimeout(flushMoves, 400)
+  }
+  // Leaving the view or switching stories must not drop a pending save.
+  const flushRef = useRef(flushMoves)
+  flushRef.current = flushMoves
+  useEffect(() => () => flushRef.current(), [storyRel])
 
   return (
     <div className="view">

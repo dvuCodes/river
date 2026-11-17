@@ -215,6 +215,7 @@ export function FramesView(props: { tick: number; onAgent(i: AgentIntent): void 
   const [activeThread, setActiveThread] = useState<string | undefined>()
   const [busy, setBusy] = useState(false)
   const [localTick, setLocalTick] = useState(0)
+  const [pinned, setPinned] = useState<string | null>(null)
 
   useEffect(() => {
     let live = true
@@ -310,6 +311,18 @@ export function FramesView(props: { tick: number; onAgent(i: AgentIntent): void 
                       {s.captures.length} captures · {s.count} frame{s.count === 1 ? "" : "s"}
                     </span>
                     {s.note && <span className="shot-note">{s.note}</span>}
+                  </button>
+                  <button
+                    className="link-btn shot-pin"
+                    title="Add this shot's newest frame to the storyboard canvas"
+                    onClick={() => {
+                      window.river.boardPin("main", { kind: "frame", ref: s.id }).then(
+                        () => setPinned(s.id),
+                        (e) => setError(errorText(e)),
+                      )
+                    }}
+                  >
+                    {pinned === s.id ? "Pinned" : "Pin to canvas"}
                   </button>
                 </li>
               ))}

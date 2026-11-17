@@ -71,6 +71,14 @@ describe("buildQueryOptions", () => {
     expect(river.env.ANTHROPIC_API_KEY).toBe("")
   })
 
+  it("starts river-mcp with --concept only for a concept turn", () => {
+    const args = (r: AgentTurnRequest) => (buildQueryOptions(r, deps()).mcpServers!.river as { args: string[] }).args
+    const concept = args(req({ mode: "concept", conceptId: "k_sdk00001" }))
+    expect(concept.slice(concept.indexOf("--concept"), concept.indexOf("--concept") + 2)).toEqual(["--concept", "k_sdk00001"])
+    expect(concept[concept.indexOf("--tools") + 1]!.split(",")).toContain("concept_write")
+    expect(args(req({ mode: "story", conceptId: "k_sdk00001" }))).not.toContain("--concept")
+  })
+
   it("puts the key in the child env without touching process.env", () => {
     const before = process.env.ANTHROPIC_API_KEY
     const base = { PATH: "/usr/bin" }
