@@ -52,7 +52,7 @@ describe("buildQueryOptions", () => {
     const story = buildQueryOptions(req({ mode: "story" }), deps()).allowedTools!
     expect(story).not.toContain("mcp__river__plan_save")
     expect(story).not.toContain("mcp__river__story_write_passage")
-    expect(story).toHaveLength(13)
+    expect(story).toHaveLength(16)
 
     const impl = buildQueryOptions(req({ mode: "implement", planId: "p_1" }), deps()).allowedTools!
     expect(impl).not.toContain("mcp__river__implement_edit")

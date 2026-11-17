@@ -113,6 +113,9 @@ export const READ_TOOLS = [
   "board_read",
   "marks_open",
   "brief_read",
+  "card_read",
+  "mark_read",
+  "card_view",
 ] as const
 
 export const WRITE_TOOLS = [
@@ -130,14 +133,17 @@ export const WRITE_TOOLS = [
   "board_add_card",
   "board_connect",
   "board_place_row",
+  "board_update_note",
+  "board_remove_card",
+  "concept_request",
 ] as const
 
 export type RiverToolName = (typeof READ_TOOLS)[number] | (typeof WRITE_TOOLS)[number]
 
 /**
  * Which tools each mode can see. Built-in SDK tools allowed in every mode: Read, Glob, Grep (inside root).
- * The board write tools are for agents working the board from outside (Claude Code with river-mcp); no
- * mode has them, and a concept job's runner lays its own answer out.
+ * The board write tools and concept_request are for agents working the board from outside (Claude Code with
+ * river-mcp); no mode has them, a concept job's runner lays its own answer out, and no job starts another.
  */
 export const MODE_TOOLS: Record<AgentMode, readonly RiverToolName[]> = {
   story: [...READ_TOOLS, "story_write_passage", "story_add_passage"],

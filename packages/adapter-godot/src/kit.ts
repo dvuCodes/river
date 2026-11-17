@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+
 /**
  * Kit: River's drawing helpers for concept scripts, written into every concept sandbox as
  * res://kit.gd. It is part of River, reviewed here, so the user approves only the agent's script,
@@ -275,3 +277,26 @@ export const KIT_API: string = KIT_GD.split("\n")
     return [`Kit.${m[1]}(${m[2]})${ret}${doc}`]
   })
   .join("\n")
+
+/** concepts/kit.gd: where an accepted concept's Kit lives in the game, so its scripts parse there too. */
+export const KIT_FILE = "concepts/kit.gd"
+
+const KIT_HEADER = "## River's drawing kit, used by accepted concept scripts. River replaces this file when the kit changes, unless you edit it."
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
+
+/** The Kit as River writes it into a game: a header naming the hash of the rest, then the same bytes the sandbox runs. */
+export function kitFileText(): string {
+  return `${KIT_HEADER} sha256=${sha256(KIT_GD)}\n${KIT_GD}`
+}
+
+/**
+ * What to do with the game's concepts/kit.gd: "write" when it is missing or is River's own copy of another
+ * version (its header's hash still matches its body), "same" when it is this version, and "keep" when anyone
+ * edited it or wrote their own: River never overwrites that.
+ */
+export function kitFileAction(existing: string | undefined): "write" | "same" | "keep" {
+  if (existing === undefined) return "write"
+  if (existing === kitFileText()) return "same"
+  const header = /^## River's drawing kit[^\n]* sha256=([0-9a-f]{64})\n/.exec(existing)
+  return header && sha256(existing.slice(header[0].length)) === header[1] ? "write" : "keep"
+}

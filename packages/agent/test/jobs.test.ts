@@ -114,9 +114,9 @@ describe("concept jobs", { timeout: 120_000 }, () => {
 
     const [turn] = turns
     expect(turn).toMatchObject({ mode: "concept", conceptId: job.id, root: path.join(job.worktree, "game"), backend: "claude-code" })
-    expect(turn!.prompt).toContain("you: make this calmer")
+    expect(turn!.prompt).toContain(`- you: "make this calmer"`)
     expect(turn!.prompt).toMatch(/passage "Pond" \(stories\/park_walk\.twee#pond\): Ducks, edited\./)
-    expect(turn!.prompt).toContain("note: dusk, not night")
+    expect(turn!.prompt).toContain(`note: "dusk, not night"`)
 
     let m = (await loadMark(game, "main", mark.id))!
     expect(m).toMatchObject({ status: "working", jobId: job.id })

@@ -82,7 +82,7 @@ describe("claude-code arguments", () => {
       "--root",
       "/game",
       "--tools",
-      "project_info,story_list,story_read,story_lint,story_paths,playtest_run,frames_list,review_list,plan_list,plan_read,board_read,marks_open,brief_read,story_write_passage,story_add_passage",
+      "project_info,story_list,story_read,story_lint,story_paths,playtest_run,frames_list,review_list,plan_list,plan_read,board_read,marks_open,brief_read,card_read,mark_read,card_view,story_write_passage,story_add_passage",
       "--approval-pipe",
       "\\\\.\\pipe\\river-test",
     ])

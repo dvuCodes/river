@@ -14,17 +14,17 @@
  * row goes under the previous one.
  */
 import { createHash } from "node:crypto"
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { hostname } from "node:os"
 import path from "node:path"
-import { conceptScriptBytesProblem, godotSettings, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
+import { conceptScriptBytesProblem, godotSettings, KIT_FILE, kitFileAction, kitFileText, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
 import {
   addTurnedDown,
+  answerStart,
   applyJobFiles,
-  BOARD_GAP,
-  besideRect,
   cardHeight,
-  cardRect,
+  CONCEPT_ROLE,
   commitJobFile,
   conceptCaptionName,
   conceptPath,
@@ -38,13 +38,13 @@ import {
   jobRenderName,
   listJobBranches,
   listJobs,
+  liveClaim,
   loadBoard,
   loadJob,
   loadMark,
   loadProject,
   loadStory,
   MARK_STATUS_FOR_JOB,
-  markRect,
   newBoardId,
   NOTE_CARD_W,
   occupiedRects,
@@ -59,6 +59,8 @@ import {
   saveEdge,
   saveJob,
   saveMark,
+  updateMark,
+  withMarkLock,
   type Board,
   type Card,
   type Job,
@@ -69,6 +71,8 @@ import {
 } from "@river/core"
 import { startAgentTurn } from "./run"
 import type { AgentBackend, AgentEvent, AgentModel, AgentTurnHandlers, AgentTurnRequest } from "./types"
+
+export { CONCEPT_ROLE }
 
 /** Who runs a job's agent turn. */
 export interface JobAgentSettings {
@@ -83,6 +87,13 @@ export interface ConceptJobRequest extends JobAgentSettings {
   workspaceRoot: string
   board: string
   markId: string
+  /** The new job's id, when the caller must know it before the job exists (concept_request). Default: a new one. */
+  jobId?: string
+  /**
+   * Who asks: "you" (the default) for the user, or an agent's name. An agent may not start a job on a mark another
+   * agent holds; the user takes such a mark over, and the thread says so.
+   */
+  by?: string
 }
 
 /** Runs one agent turn; never throws (problems arrive as error events). */
@@ -97,6 +108,13 @@ export interface JobDeps {
   render?: (req: RenderConceptRequest) => Promise<void>
   /** For GODOT_BIN and $VARs in river.json. Default process.env. */
   env?: NodeJS.ProcessEnv
+  /**
+   * After rendering, one more turn looks at the renders and may rewrite the note and captions. false skips it;
+   * settings run it with them. Default: the job's own model and backend, unless RIVER_SELF_CHECK=off is in `env`
+   * (the test suite sets it), or the render is injected and the turn is not (a fake render is not worth paying a
+   * model to look at).
+   */
+  selfCheck?: false | JobAgentSettings
 }
 
 /** A script a job waits on, as the user must see it before approving. */
@@ -110,9 +128,10 @@ export interface JobScript {
   caption?: string
 }
 
-export const CONCEPT_ROLE = "concept-artist"
 const INTERRUPTIBLE: readonly JobStatus[] = ["queued", "running", "rendering"]
 const CAPTION_MAX = 160
+/** The agent's closing note goes on the board and into the mark's thread. */
+const SUMMARY_MAX = 1500
 
 const now = () => new Date().toISOString()
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex")
@@ -130,13 +149,19 @@ function leadJob(jobs: Job[]): Job | undefined {
   return newest(jobs.filter((j) => j.status !== "dismissed")) ?? newest(jobs)
 }
 
-/** The mark's jobId and status follow its lead job, so accepting or dismissing an older answer never hides a newer one. */
+/**
+ * The mark's jobId and status follow its lead job, so accepting or dismissing an older answer never hides a newer one.
+ * Under the mark's lock, so a reply the user writes meanwhile is kept. A job owns its mark: no agent's claim stays.
+ */
 async function syncMark(root: string, job: Job, message?: string): Promise<void> {
-  const mark = await loadMark(root, job.board, job.markId)
-  if (!mark) return
-  const lead = leadJob((await listJobs(root)).filter((j) => j.board === job.board && j.markId === job.markId))
-  const thread = message ? [...mark.thread, { by: job.role, at: now(), text: message }] : mark.thread
-  await saveMark(root, job.board, { ...mark, thread, ...(lead ? { jobId: lead.id, status: MARK_STATUS_FOR_JOB[lead.status] } : {}) })
+  if (!(await loadMark(root, job.board, job.markId))) return
+  await updateMark(root, job.board, job.markId, async (mark) => {
+    const lead = leadJob((await listJobs(root)).filter((j) => j.board === job.board && j.markId === job.markId))
+    const thread = message ? [...mark.thread, { by: job.role, at: now(), text: message }] : mark.thread
+    if (!lead) return { ...mark, thread }
+    const { claimedBy: _by, claimedAt: _at, ...rest } = mark
+    return { ...rest, thread, jobId: lead.id, status: MARK_STATUS_FOR_JOB[lead.status] }
+  })
 }
 
 /**
@@ -219,35 +244,30 @@ const answerIds = (job: Job) => {
 
 const ownCards = (board: Board, job: Job) => board.cards.filter((c) => c.pending?.jobId === job.id)
 
-/** Remove cards and every edge that touches them; edges go first, so an interrupted run leaves no edge to a missing card. */
-async function removeCards(root: string, board: Board, cards: Card[]): Promise<void> {
-  const ids = new Set(cards.map((c) => c.id))
+/**
+ * Remove cards (and card ids, for files that did not load) and every edge that touches them; edges go first, so an
+ * interrupted run leaves no edge to a missing card.
+ */
+async function removeCards(root: string, board: Board, cards: Card[], moreIds: readonly string[] = [], moreEdges: readonly string[] = []): Promise<void> {
+  const ids = new Set([...cards.map((c) => c.id), ...moreIds])
   for (const e of board.edges.filter((e) => ids.has(e.from) || ids.has(e.to))) await deleteEdge(root, board.name, e.id)
-  for (const c of cards) await deleteCard(root, board.name, c.id)
+  for (const id of moreEdges) await deleteEdge(root, board.name, id)
+  for (const id of ids) await deleteCard(root, board.name, id)
 }
 
-/** The cards of a job's answer, found by their derived ids, so they are found after an accept too. */
-function answerCards(board: Board, jobId: string): Card[] {
-  const ids = answerIds({ id: jobId } as Job)
-  const own = new Set([ids.note, ...[0, 1, 2, 3, 4].map(ids.option)])
-  return board.cards.filter((c) => own.has(c.id))
-}
-
-/** Where a job's answer starts: beside the mark, or under the answer it revises. */
-function answerStart(board: Board, job: Job): { x: number; y: number } {
-  const parentCards = job.parentJobId ? answerCards(board, job.parentJobId).map(cardRect) : []
-  if (parentCards.length > 0) {
-    return { x: Math.min(...parentCards.map((r) => r.x)), y: Math.max(...parentCards.map((r) => r.y + r.h)) + BOARD_GAP }
-  }
-  const mark = board.marks.find((m) => m.id === job.markId)
-  return mark ? besideRect(markRect(mark)) : { x: 0, y: 0 }
+/** Every card and edge id a job's answer can have, so a dismiss removes them even when a file no longer loads. */
+function derivedIds(job: Job): { cards: string[]; edges: string[] } {
+  const ids = answerIds(job)
+  const n = [0, 1, 2, 3, 4]
+  return { cards: [ids.note, ...n.map(ids.option)], edges: [ids.toNote, ...n.map(ids.toOption)] }
 }
 
 /** The faded card that stands for the job while it works; it becomes the first option's card at approval. */
 async function placePlaceholder(root: string, job: Job): Promise<void> {
   const board = await loadBoard(root, job.board)
   const size = { w: IMAGE_CARD_W, h: IMAGE_CARD_W }
-  const [spot] = placeRow(answerStart(board, job), [size], occupiedRects(board))
+  // Beside the mark, or under the answers already there (the answer this one revises among them).
+  const [spot] = placeRow(answerStart(board, job.markId), [size], occupiedRects(board))
   await saveCard(root, job.board, {
     id: answerIds(job).option(0),
     kind: "concept",
@@ -284,7 +304,7 @@ async function layoutAnswer(root: string, job: Job, scripts: JobScriptRecord[], 
     ...(s.caption ? { caption: s.caption } : {}),
   }))
   const cards = [note, ...options]
-  const start = placeholder ? { x: placeholder.x, y: placeholder.y } : answerStart(board, job)
+  const start = placeholder ? { x: placeholder.x, y: placeholder.y } : answerStart(board, job.markId)
   const spots = placeRow(start, cards.map((c) => ({ w: c.w, h: cardHeight(c) })), occupiedRects(board, new Set(own.map((c) => c.id))))
   const keep = new Set(cards.map((c) => c.id))
   await removeCards(root, board, own.filter((c) => !keep.has(c.id)))
@@ -296,6 +316,11 @@ async function layoutAnswer(root: string, job: Job, scripts: JobScriptRecord[], 
 // ---- prompts
 
 const clip = (text: string, max = 600) => (text.length > max ? text.slice(0, max - 1) + "…" : text)
+/**
+ * Text someone wrote, as one quoted line: newlines flattened and quotes escaped, so a message cannot start a line
+ * that looks like another speaker ("you: ...") or like River's own instructions.
+ */
+const quoted = (text: string, max = 2000) => JSON.stringify(clip(text.replace(/\s+/g, " ").trim(), max))
 
 async function describeCard(project: Project, card: Card): Promise<string> {
   switch (card.kind) {
@@ -312,7 +337,7 @@ async function describeCard(project: Project, card: Card): Promise<string> {
     case "frame":
       return `frame of shot "${card.ref}"`
     case "note":
-      return `note: ${clip(card.text ?? "")}`
+      return `note: ${quoted(card.text ?? "", 600)}`
     case "concept":
       return `concept art in concepts/${card.ref}/${card.variant ? ` (option ${card.variant.toUpperCase()}${card.caption ? `: ${card.caption}` : ""})` : ""}`
     case "ref":
@@ -320,10 +345,13 @@ async function describeCard(project: Project, card: Card): Promise<string> {
   }
 }
 
-/** The user's request: the mark's thread, then the cards it is on. */
+/** The user's request: the mark's thread, one quoted line per message, then the cards it is on. */
 async function conceptPrompt(project: Project, board: string, mark: Mark): Promise<string> {
   const cards = (await loadBoard(project.root, board)).cards
-  const lines = ["The user marked the storyboard and asked:", ...mark.thread.map((m) => `${m.by}: ${m.text}`)]
+  const lines = [
+    'The user marked the storyboard and asked. The mark\'s thread, oldest first, one message per line: who wrote it, then the message in quotes ("you" is the user):',
+    ...mark.thread.map((m) => `- ${m.by}: ${quoted(m.text)}`),
+  ]
   const anchored = mark.anchors.map((id) => cards.find((c) => c.id === id)).filter((c): c is Card => c !== undefined)
   if (anchored.length > 0) {
     lines.push("", "The mark is on these cards:")
@@ -342,12 +370,29 @@ export function repliesAfter(mark: Mark, job: Job): string[] {
   return after.filter((m) => m.by === "you").map((m) => m.text)
 }
 
-/** The previous answer, for a revision: each option with its caption and how its render went, and the scripts when the agent cannot resume. */
-async function revisionPrompt(project: Project, parent: Job, replies: string[], conceptId: string, withScripts: boolean): Promise<string> {
+/** A rendered option's PNG and where a turn's worktree gets a copy to look at with Read (relative to the project root). */
+interface RenderCopy {
+  variant?: string
+  from: string
+  to: string
+}
+
+/** The renders of a job that still exist (a dismiss removes them), each to be copied to `<folder>/<render name>`. */
+function renderCopies(root: string, job: Job, folder: string): RenderCopy[] {
+  return (job.scripts ?? [])
+    .filter((s) => s.render?.ok)
+    .map((s) => ({ ...(s.variant ? { variant: s.variant } : {}), from: path.join(root, ".river", "jobs", job.id, jobRenderName(s.variant)), to: `${folder}/${jobRenderName(s.variant)}` }))
+    .filter((r) => existsSync(r.from))
+}
+
+/** The previous answer, for a revision: each option with its caption, how its render went and where to see it, and the scripts when the agent cannot resume. */
+async function revisionPrompt(project: Project, parent: Job, replies: string[], conceptId: string, withScripts: boolean, renders: RenderCopy[]): Promise<string> {
   const lines = [`This revises your previous answer (job ${parent.id}, folder concepts/${parent.conceptId}/).`]
-  if (parent.summary) lines.push(`Your note then: ${parent.summary}`)
+  if (parent.summary) lines.push(`Your note then: ${quoted(parent.summary)}`)
+  if (renders.length > 0) lines.push("Look at your previous renders with Read before you change anything; the paths are below.")
   for (const s of parent.scripts ?? []) {
-    const how = !s.render ? "not rendered" : s.render.ok ? "rendered" : `failed to render. Godot said:\n${s.render.error}`
+    const seen = renders.find((r) => r.variant === s.variant)
+    const how = !s.render ? "not rendered" : s.render.ok ? `rendered${seen ? `, see ${seen.to}` : ""}` : `failed to render. Godot said:\n${s.render.error}`
     lines.push(`- ${optionName(s)} (${path.posix.basename(s.file)})${s.caption ? ` "${s.caption}"` : ""}: ${how}`)
   }
   if (parent.status === "failed" && parent.error) lines.push(`The job failed: ${parent.error}`)
@@ -368,7 +413,7 @@ async function revisionPrompt(project: Project, parent: Job, replies: string[], 
   }
   lines.push(
     "",
-    replies.length > 0 ? `The user replied:\n${replies.map((r) => `you: ${r}`).join("\n")}` : "The user asked for a fix: make the scripts render.",
+    replies.length > 0 ? `The user replied, one message per line:\n${replies.map((r) => `- you: ${quoted(r)}`).join("\n")}` : "The user asked for a fix: make the scripts render.",
     "",
     `Answer with new options in this job's own folder, concepts/${conceptId}/ (draw.gd, or draw_a.gd..draw_e.gd). ` +
       (kept.length > 0
@@ -437,20 +482,47 @@ interface Ask {
   prompt: string
   /** Continue the agent's earlier session with a shorter prompt; a fresh session with `prompt` if it cannot be found. */
   resume?: { sessionId: string; prompt: string }
+  /** Renders copied into the worktree before the turn, so the agent can Read them. */
+  renders?: RenderCopy[]
 }
 
 /** Jobs whose agent turn runs in this process, so a dismiss can stop the turn before removing its worktree. */
 const live = new Map<string, { abort: AbortController; run: Promise<Job> }>()
 
-/** Save the queued job, run its turn and resolve with the job at "approval" (or "failed", or "dismissed"). */
-async function launchJob(project: Project, queued: Job, settings: JobAgentSettings, ask: Ask, deps: JobDeps): Promise<Job> {
-  const root = project.root
+/**
+ * Under the mark's lock: `check` the mark still allows the job, then record the job's owner (before the job file
+ * exists, so recoverJobs elsewhere never sees it queued without one), the job, and the mark's pointer to it. Two
+ * starts or revisions on one mark can no longer both pass the check. Returns the owner's stop().
+ */
+async function reserveJob(root: string, queued: Job, by: string, check: (mark: Mark) => Promise<void>): Promise<() => void> {
+  return withMarkLock(root, queued.board, queued.markId, async () => {
+    const mark = await loadMark(root, queued.board, queued.markId)
+    if (!mark) throw new Error(`river: no mark ${queued.markId} on board ${queued.board}`)
+    await check(mark)
+    if (existsSync(path.join(root, ".river", "jobs", `${queued.id}.json`))) throw new Error(`river: job ${queued.id} already exists`)
+    const holder = liveClaim(mark)
+    if (holder && holder !== by && by !== "you") throw new Error(`river: mark ${mark.id} is claimed by ${holder}; only ${holder} or the user can start a River job on it`)
+    const stop = await claimJob(root, queued.id)
+    try {
+      await saveJob(root, queued)
+      const { claimedBy: _by, claimedAt: _at, ...rest } = mark
+      const took = holder && holder !== by ? [{ by: CONCEPT_ROLE, at: now(), text: `River job ${queued.id} took this mark over from ${holder}'s claim.` }] : []
+      await saveMark(root, queued.board, { ...rest, thread: [...mark.thread, ...took], jobId: queued.id, status: MARK_STATUS_FOR_JOB.queued })
+      return stop
+    } catch (err) {
+      stop()
+      throw err
+    }
+  })
+}
+
+/** Reserve the job on its mark, run its turn and resolve with the job at "approval" (or "failed", or "dismissed"). */
+async function launchJob(project: Project, queued: Job, settings: JobAgentSettings, ask: Ask, deps: JobDeps, reserve: () => Promise<() => void>): Promise<Job> {
   const abort = new AbortController()
   // In `live` before the job file exists, so a dismiss from this process always waits for the run.
-  // Claimed before it exists too, so recoverJobs elsewhere never sees it queued without an owner.
-  const run = claimJob(root, queued.id).then(async (stop) => {
+  const run = reserve().then(async (stop) => {
     try {
-      return await runConceptTurn(project, settings, await saveJob(root, queued), ask, abort.signal, deps)
+      return await runConceptTurn(project, settings, queued, ask, abort.signal, deps)
     } finally {
       stop()
     }
@@ -463,8 +535,8 @@ async function launchJob(project: Project, queued: Job, settings: JobAgentSettin
   }
 }
 
-function queuedJob(mark: Mark, board: string, settings: JobAgentSettings, parentJobId?: string): Job {
-  const id = newBoardId("j_")
+function queuedJob(mark: Mark, board: string, settings: JobAgentSettings, parentJobId?: string, jobId?: string): Job {
+  const id = jobId ?? newBoardId("j_")
   const at = now()
   return {
     id,
@@ -487,6 +559,47 @@ function queuedJob(mark: Mark, board: string, settings: JobAgentSettings, parent
 
 const NO_SESSION = /No conversation found with session ID/
 
+/**
+ * One concept-mode turn in `dir` (the job's worktree), resuming session `resume` when given. Collects the session
+ * id, the texts and the errors; a caller that resumed starts fresh when the errors say the session is gone.
+ */
+async function conceptTurn(
+  dir: string,
+  job: Job,
+  settings: JobAgentSettings,
+  ask: { prompt: string; resume?: string; brief?: string },
+  signal: AbortSignal,
+  deps: JobDeps,
+  runTurn: RunTurn,
+): Promise<{ sessionId?: string; texts: string[]; errors: string[] }> {
+  const out: { sessionId?: string; texts: string[]; errors: string[] } = { texts: [], errors: [] }
+  await runTurn(
+    {
+      root: dir,
+      mode: "concept",
+      model: settings.model,
+      prompt: ask.prompt,
+      backend: settings.backend,
+      conceptId: job.conceptId,
+      ...(ask.resume ? { sessionId: ask.resume } : {}),
+      ...(ask.brief ? { brief: ask.brief } : {}),
+      ...(settings.apiKey ? { apiKey: settings.apiKey } : {}),
+      ...(settings.claudePath ? { claudePath: settings.claudePath } : {}),
+    },
+    {
+      onEvent: (e) => {
+        deps.onEvent?.(e)
+        if (e.type === "session") out.sessionId = e.sessionId
+        if (e.type === "text") out.texts.push(e.text.trim())
+        if (e.type === "error") out.errors.push(e.message)
+      },
+      onPermission: async () => ({ behavior: "deny", message: "A concept job asks for nothing: it writes only its own folder." }),
+      signal,
+    },
+  )
+  return out
+}
+
 async function runConceptTurn(project: Project, settings: JobAgentSettings, job: Job, ask: Ask, signal: AbortSignal, deps: JobDeps): Promise<Job> {
   const root = project.root
   let sessionId: string | undefined
@@ -495,48 +608,26 @@ async function runConceptTurn(project: Project, settings: JobAgentSettings, job:
     await placePlaceholder(root, job)
     const created = await createJobWorktree(root, job.id)
     job = await transition(root, job, "running", created)
-    const brief = await readBrief(root)
-    const texts: string[] = []
-    let errors: string[] = []
-    const runTurn = deps.runTurn ?? ((r, h) => startAgentTurn(r, h))
-    const turn = (prompt: string, resume?: string) =>
-      runTurn(
-        {
-          root: path.join(created.worktree, job.projectSub),
-          mode: "concept",
-          model: settings.model,
-          prompt,
-          backend: settings.backend,
-          conceptId: job.conceptId,
-          ...(resume ? { sessionId: resume } : {}),
-          ...(brief ? { brief } : {}),
-          ...(settings.apiKey ? { apiKey: settings.apiKey } : {}),
-          ...(settings.claudePath ? { claudePath: settings.claudePath } : {}),
-        },
-        {
-          onEvent: (e) => {
-            deps.onEvent?.(e)
-            if (e.type === "session") sessionId = e.sessionId
-            if (e.type === "text") texts.push(e.text.trim())
-            if (e.type === "error") errors.push(e.message)
-          },
-          onPermission: async () => ({ behavior: "deny", message: "A concept job asks for nothing: it writes only its own folder." }),
-          signal,
-        },
-      )
-    await turn(ask.resume?.prompt ?? ask.prompt, ask.resume?.sessionId)
-    if (ask.resume && !signal.aborted && errors.some((e) => NO_SESSION.test(e))) {
-      // The earlier session is gone (another machine, cleared history): start fresh with everything in the prompt.
-      errors = []
-      sessionId = undefined
-      await turn(ask.prompt)
+    const dir = path.join(created.worktree, job.projectSub)
+    for (const r of ask.renders ?? []) {
+      await mkdir(path.dirname(path.join(dir, r.to)), { recursive: true })
+      await copyFile(r.from, path.join(dir, r.to))
     }
+    const runTurn = deps.runTurn ?? ((r, h) => startAgentTurn(r, h))
+    const brief = await readBrief(root)
+    const fresh = { prompt: ask.prompt, ...(brief ? { brief } : {}) }
+    let result = await conceptTurn(dir, job, settings, ask.resume ? { ...fresh, prompt: ask.resume.prompt, resume: ask.resume.sessionId } : fresh, signal, deps, runTurn)
+    if (ask.resume && !signal.aborted && result.errors.some((e) => NO_SESSION.test(e))) {
+      // The earlier session is gone (another machine, cleared history): start fresh with everything in the prompt.
+      result = await conceptTurn(dir, job, settings, fresh, signal, deps, runTurn)
+    }
+    sessionId = result.sessionId
     if (signal.aborted) return await dismiss(root, await loadJob(root, job.id))
     const kept = sessionId ? { sessionId } : {}
 
     const folder = conceptPath(job.conceptId)
-    const scripts = await writtenScripts(path.join(created.worktree, job.projectSub, folder))
-    const problem = scriptsProblem(folder, scripts, errors)
+    const scripts = await writtenScripts(path.join(dir, folder))
+    const problem = scriptsProblem(folder, scripts, result.errors)
     if (problem) return await fail(root, job, problem, kept)
 
     let headSha = ""
@@ -546,7 +637,7 @@ async function runConceptTurn(project: Project, settings: JobAgentSettings, job:
       headSha = await commitJobFile(root, job.id, inRepo(job, file), s.bytes, `river: concept ${job.conceptId} ${s.name}`)
       records.push({ file, sha256: hash(s.bytes), approved: false, ...(s.variant ? { variant: s.variant } : {}), ...(s.caption ? { caption: s.caption } : {}) })
     }
-    const summary = texts.at(-1) || `The concept artist wrote ${records.map((r) => path.posix.basename(r.file)).join(", ")}.`
+    const summary = clip(result.texts.at(-1) || `The concept artist wrote ${records.map((r) => path.posix.basename(r.file)).join(", ")}.`, SUMMARY_MAX)
     await layoutAnswer(root, job, records, summary)
     return await transition(root, job, "approval", { headSha, summary, scripts: records, ...kept }, summary)
   } catch (err) {
@@ -558,7 +649,8 @@ async function runConceptTurn(project: Project, settings: JobAgentSettings, job:
 
 /**
  * Start a concept job for a mark and run its agent turn. Resolves when the job reaches "approval"
- * (or "failed"). Throws only when no job could be created (unknown mark, a job already active on it).
+ * (or "failed"). Throws only when no job could be created (unknown mark, a job already active on it,
+ * a mark another agent has claimed).
  */
 export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}): Promise<Job> {
   const project = await loadProject(req.workspaceRoot)
@@ -576,18 +668,23 @@ export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}
     await dismissJob(root, previous.id)
     previous = await leadOf(await loadMark(root, req.board, req.markId))
   }
-  if (previous && JOB_NEXT[previous.status].length > 0) {
-    throw new Error(`river: mark ${mark.id} already has job ${previous.id} (${previous.status})${previous.status === "answered" ? "; reply on the mark and revise it, or dismiss it" : ""}`)
+  const queued = queuedJob(mark, req.board, req, undefined, req.jobId)
+  const check = async (m: Mark) => {
+    const lead = await leadOf(m)
+    if (lead && JOB_NEXT[lead.status].length > 0) {
+      throw new Error(`river: mark ${m.id} already has job ${lead.id} (${lead.status})${lead.status === "answered" ? "; reply on the mark and revise it, or dismiss it" : ""}`)
+    }
   }
-  return launchJob(project, queuedJob(mark, req.board, req), req, { prompt: await conceptPrompt(project, req.board, mark) }, deps)
+  const ask = { prompt: await conceptPrompt(project, req.board, mark) }
+  return launchJob(project, queued, req, ask, deps, () => reserveJob(root, queued, req.by ?? "you", check))
 }
 
 /**
  * Answer the user's reply on a mark: a new job (parentJobId = jobId) that gets the previous answer, how its
- * renders went and the reply, and resumes the agent's session when there is one. `jobId` must be the
- * mark's latest job: answered or accepted (with a reply by the user after its answer, such as "I like A, try
- * two more takes on A"), or failed (a reply is optional: the revision fixes what broke). The previous job
- * stays as it is; the user can still accept or dismiss it. Resolves like startConceptJob.
+ * renders went (and copies of them to look at) and the reply, and resumes the agent's session when there is one.
+ * `jobId` must be the mark's latest job: answered or accepted (with a reply by the user after its answer, such as
+ * "I like A, try two more takes on A"), or failed (a reply is optional: the revision fixes what broke). The
+ * previous job stays as it is; the user can still accept or dismiss it. Resolves like startConceptJob.
  */
 export async function reviseJob(workspaceRoot: string, jobId: string, settings: JobAgentSettings, deps: JobDeps = {}): Promise<Job> {
   const project = await loadProject(workspaceRoot)
@@ -598,15 +695,19 @@ export async function reviseJob(workspaceRoot: string, jobId: string, settings: 
   }
   const mark = await loadMark(root, parent.board, parent.markId)
   if (!mark) throw new Error(`river: no mark ${parent.markId} on board ${parent.board}`)
-  if (mark.jobId !== parent.id) throw new Error(`river: job ${jobId} is not the latest answer on mark ${mark.id} (that is ${mark.jobId ?? "none"}); revise that one`)
+  const check = async (m: Mark) => {
+    if (m.jobId !== parent.id) throw new Error(`river: job ${jobId} is not the latest answer on mark ${m.id} (that is ${m.jobId ?? "none"}); revise that one`)
+    if (parent.status !== "failed" && repliesAfter(m, parent).length === 0) throw new Error(`river: reply on mark ${m.id} first: say what to change`)
+  }
+  await check(mark)
   const replies = repliesAfter(mark, parent)
-  if (parent.status !== "failed" && replies.length === 0) throw new Error(`river: reply on mark ${mark.id} first: say what to change`)
 
   const queued = queuedJob(mark, parent.board, settings, parent.id)
+  const renders = renderCopies(root, parent, conceptPath(queued.conceptId, "previous"))
   const request = await conceptPrompt(project, parent.board, mark)
-  const ask: Ask = { prompt: `${request}\n\n${await revisionPrompt(project, parent, replies, queued.conceptId, true)}` }
-  if (parent.sessionId) ask.resume = { sessionId: parent.sessionId, prompt: await revisionPrompt(project, parent, replies, queued.conceptId, false) }
-  return launchJob(project, queued, settings, ask, deps)
+  const ask: Ask = { prompt: `${request}\n\n${await revisionPrompt(project, parent, replies, queued.conceptId, true, renders)}`, renders }
+  if (parent.sessionId) ask.resume = { sessionId: parent.sessionId, prompt: await revisionPrompt(project, parent, replies, queued.conceptId, false, renders) }
+  return launchJob(project, queued, settings, ask, deps, () => reserveJob(root, queued, "you", check))
 }
 
 /** The scripts a job in "approval" wants to run, with the sha256 of each to pass to approveJobScripts. */
@@ -634,12 +735,95 @@ function godotBin(project: Project, env: NodeJS.ProcessEnv): string {
   throw new Error('river: no Godot to render with. Set adapter.godot.bin in river.json (for example "$GODOT_BIN") or the GODOT_BIN environment variable.')
 }
 
+// ---- the look at the renders
+
+const SELF_CHECK_TURNS = 6
+const SELF_CHECK_ASK = "River rendered your scripts."
+
+/** Who looks at the renders, or undefined to skip (see JobDeps.selfCheck). */
+function selfCheckSettings(job: Job, deps: JobDeps): JobAgentSettings | undefined {
+  if (deps.selfCheck === false) return undefined
+  if (deps.selfCheck) return deps.selfCheck
+  if ((deps.env ?? process.env).RIVER_SELF_CHECK === "off") return undefined
+  if (deps.render && !deps.runTurn) return undefined
+  return { model: job.model as AgentModel, backend: job.backend }
+}
+
+/** One line of display text: no control or bidi characters, whitespace collapsed, at most `max` characters. */
+const displayLine = (text: string, max: number) => clip(text.replace(/[\p{Cc}‪-‮⁦-⁩]+/gu, " ").replace(/\s+/g, " ").trim(), max)
+
+/** The note and captions from the turn's last message: the last JSON object in it, or undefined. */
+function parseSelfCheck(text: string): { note: string; captions: Record<string, string> } | undefined {
+  const start = text.lastIndexOf("{\"note\"")
+  const end = text.lastIndexOf("}")
+  if (start < 0 || end < start) return undefined
+  try {
+    const v = JSON.parse(text.slice(start, end + 1)) as { note?: unknown; captions?: unknown }
+    if (typeof v.note !== "string" || !v.note.trim()) return undefined
+    const captions: Record<string, string> = {}
+    if (v.captions && typeof v.captions === "object") for (const [k, c] of Object.entries(v.captions)) if (typeof c === "string") captions[k.toLowerCase()] = c
+    return { note: v.note, captions }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * One more turn, after rendering and before the job is answered: the agent looks at its renders (copied into the
+ * worktree, opened with Read) and may rewrite its note and captions to say what they really show. It cannot
+ * change the scripts: River runs and applies only the approved, committed bytes. Resumes the job's session in
+ * its worktree when it can. Returns the new records and note, or undefined when it is skipped or says nothing usable.
+ */
+async function selfCheck(project: Project, job: Job, scripts: JobScriptRecord[], deps: JobDeps): Promise<{ scripts: JobScriptRecord[]; summary: string } | undefined> {
+  const settings = selfCheckSettings(job, deps)
+  const dir = path.join(job.worktree, job.projectSub)
+  if (!settings || !existsSync(dir)) return undefined
+  const root = project.root
+  const renders = renderCopies(root, { ...job, scripts }, conceptPath(job.conceptId))
+  for (const r of renders) await copyFile(r.from, path.join(dir, r.to))
+  const options = scripts.map((s) => {
+    const seen = renders.find((r) => r.variant === s.variant)
+    return `- ${optionName(s)}${s.variant ? ` (key "${s.variant}")` : ""}${s.caption ? `, caption ${quoted(s.caption)}` : ""}: ${seen ? seen.to : `did not render: ${quoted(s.render?.ok === false ? s.render.error : "", 300)}`}`
+  })
+  const ask = [
+    `${SELF_CHECK_ASK} Look at each render with Read before you answer:`,
+    ...options,
+    `Your note was: ${quoted(job.summary ?? "")}`,
+    "",
+    "Check each picture against what you meant and what the user asked. You cannot change the scripts now: new scripts would need the user's approval again, so do not call concept_write.",
+    "Rewrite the note and the captions so they say what the renders really show (same rules as before: plain text, under 90 words, one line per option). If a render misses its idea, say so in the note and suggest the user asks for a revision.",
+    'Answer with only this JSON: {"note": "...", "captions": {"a": "..."}} (captions keyed by option letter; leave captions out for a single drawing).',
+  ].join("\n")
+  const mark = await loadMark(root, job.board, job.markId)
+  const fresh = mark ? `${await conceptPrompt(project, job.board, mark)}\n\n${ask}` : ask
+  const runTurn = deps.runTurn ?? ((r, h) => startAgentTurn(r, h, { maxTurns: SELF_CHECK_TURNS, effort: "low" }))
+  const never = new AbortController().signal
+  let result = await conceptTurn(dir, job, settings, job.sessionId ? { prompt: ask, resume: job.sessionId } : { prompt: fresh }, never, deps, runTurn)
+  if (job.sessionId && result.errors.some((e) => NO_SESSION.test(e))) result = await conceptTurn(dir, job, settings, { prompt: fresh }, never, deps, runTurn)
+  const parsed = parseSelfCheck(result.texts.join("\n"))
+  if (!parsed) return undefined
+  const summary = clip(parsed.note.trim(), SUMMARY_MAX)
+  const next = scripts.map((s) => {
+    const caption = displayLine(parsed.captions[s.variant ?? ""] ?? "", CAPTION_MAX)
+    return caption ? { ...s, caption } : s
+  })
+  const board = await loadBoard(root, job.board)
+  const ids = answerIds(job)
+  for (const card of ownCards(board, job)) {
+    const script = card.kind === "concept" ? next.find((s) => s.variant === card.variant) : undefined
+    if (card.id === ids.note && card.text !== summary) await saveCard(root, job.board, { ...card, text: summary })
+    else if (script?.caption && card.caption !== script.caption) await saveCard(root, job.board, { ...card, caption: script.caption })
+  }
+  return { scripts: next, summary }
+}
+
 /**
  * The user approves every script's exact bytes at once: `shas` maps each script's file (as readJobScripts
  * gives it) to its sha256. Refuses (throws, nothing changes) unless the job is in "approval" and `shas`
  * names exactly the job's scripts with matching hashes. Then renders each in a sandbox Godot project and
  * puts each PNG on the job branch. A script that fails keeps Godot's output on its record and its card
- * says so; the job is "answered" when at least one rendered, "failed" when none did.
+ * says so; the job is "answered" when at least one rendered, "failed" when none did. Before it is answered,
+ * the agent looks at the renders once (JobDeps.selfCheck) and may rewrite its note and captions.
  */
 export async function approveJobScripts(workspaceRoot: string, jobId: string, shas: Readonly<Record<string, string>>, deps: JobDeps = {}): Promise<Job> {
   const project = await loadProject(workspaceRoot)
@@ -674,7 +858,14 @@ export async function approveJobScripts(workspaceRoot: string, jobId: string, sh
           done.push({ ...record, approved: true, render: { ok: false, error: errMsg(err) } })
         }
       }
-      if (done.some((s) => s.render?.ok)) return await transition(root, job, "answered", { headSha, scripts: done })
+      if (done.some((s) => s.render?.ok)) {
+        const checked = await selfCheck(project, job, done, deps).catch((err: unknown) => {
+          console.warn(`river: job ${job.id}: the look at the renders failed, so the note stays as written: ${errMsg(err)}`)
+          return undefined
+        })
+        if (!checked) return await transition(root, job, "answered", { headSha, scripts: done })
+        return await transition(root, job, "answered", { headSha, scripts: checked.scripts, summary: checked.summary }, checked.summary)
+      }
       const error = done.map((s) => (s.render?.ok === false ? (done.length > 1 ? `${optionName(s)}: ${s.render.error}` : s.render.error) : "")).join("\n\n")
       return await fail(root, job, error, { headSha, scripts: done })
     } catch (err) {
@@ -746,10 +937,26 @@ export async function acceptJob(workspaceRoot: string, jobId: string, opts: { va
     if ((await loadJob(root, jobId)).status !== "accepted") await undo()
     throw err
   }
+  await installKit(root).catch((err: unknown) => console.warn(`river: job ${jobId} is accepted, but ${KIT_FILE} could not be written: ${errMsg(err)}`))
   await finishAccept(root, accepted).catch((err: unknown) =>
     console.warn(`river: job ${jobId} is accepted, but tidying up failed (retried when the project next opens): ${errMsg(err)}`),
   )
   return accepted
+}
+
+/**
+ * Accepted scripts call Kit, which the sandbox gives them as res://kit.gd. The game gets the same bytes at
+ * concepts/kit.gd (class_name Kit), so the scripts parse there too. River replaces its own older copy and
+ * never a file someone edited; then it says so, since the scripts may not match that file's Kit.
+ */
+async function installKit(root: string): Promise<void> {
+  const file = path.join(root, ...KIT_FILE.split("/"))
+  const existing = await readFile(file, "utf8").catch(() => undefined)
+  const action = kitFileAction(existing)
+  if (action === "keep") console.warn(`river: ${KIT_FILE} was edited, so River left it as it is; accepted concept scripts call the Kit functions in it`)
+  if (action !== "write") return
+  await mkdir(path.dirname(file), { recursive: true })
+  await writeFile(file, kitFileText(), "utf8")
 }
 
 /**
@@ -762,13 +969,18 @@ async function dismiss(root: string, job: Job, reason?: string): Promise<Job> {
   await removeJobWorktree(root, job.id)
   await rm(path.join(root, ".river", "jobs", job.id), { recursive: true, force: true, maxRetries: 3 })
   const board = await loadBoard(root, job.board)
-  await removeCards(root, board, ownCards(board, job))
+  const derived = derivedIds(job)
+  await removeCards(root, board, ownCards(board, job), derived.cards, derived.edges)
   if (job.status !== "dismissed") {
+    const dismissed = await transition(root, job, "dismissed")
+    // After the move, so a brief that cannot be written never leaves the job half dismissed.
     if (reason?.trim()) {
       const asked = (await loadMark(root, job.board, job.markId))?.thread.find((m) => m.by === "you")?.text
-      await addTurnedDown(root, job.id, `${reason.trim()}${asked ? ` (asked: "${clip(asked.replace(/\s+/g, " "), 120)}")` : ""}`)
+      await addTurnedDown(root, job.id, `${reason.trim()}${asked ? ` (asked: "${clip(asked.replace(/\s+/g, " "), 120)}")` : ""}`).catch((err: unknown) =>
+        console.warn(`river: job ${job.id} is dismissed, but the reason could not be added to .river/brief.md: ${errMsg(err)}`),
+      )
     }
-    return transition(root, job, "dismissed")
+    return dismissed
   }
   await syncMark(root, job)
   return job
