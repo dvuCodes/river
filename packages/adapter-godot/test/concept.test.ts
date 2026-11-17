@@ -221,6 +221,7 @@ describe("linesToRead", () => {
     expect(marked(`${DRAW}\tKit.no_such(img)\n`)).toEqual([9])
     expect(marked(`${DRAW}\tvar t = Time.get_ticks_msec()\n`)).toEqual([9])
     expect(marked(`${DRAW}\tvar s = "a\n\timg.fill(Color.RED)\n`)).toEqual([9])
+    expect(linesToRead(`${DRAW}\tvar s = "a\\\nb"\n\tvar o = OS\n`).at(-1)).toEqual({ line: 11, reason: "uses OS" })
     expect(marked(`@tool\n${DRAW}`)).toEqual([1])
     expect(marked(`${DRAW}\tvar s = """\nOS\n"""\n`)).toEqual([])
   })
@@ -278,7 +279,7 @@ describe.skipIf(!bin)("renderConcept with real Godot (GODOT_BIN)", { timeout: 60
     expect(existsSync(png)).toBe(false)
   })
 
-  it("runs no script that takes the name Kit: the review's disguises write nothing and render nothing", async () => {
+  it("runs none of the plain forms of taking the name Kit: the review's disguises write nothing and render nothing", async () => {
     const marker = path.join(out, "kit-marker.png").split(path.sep).join("/")
     for (const [name, script] of kitDisguises(marker)) {
       const png = path.join(out, "kit-disguise.png")

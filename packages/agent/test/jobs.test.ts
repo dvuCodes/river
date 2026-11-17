@@ -320,7 +320,7 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect((await loadJob(game, job.id)).status).toBe("approval")
   })
 
-  it("fails a script that takes the name Kit, and will not show or run a waiting one that does", async () => {
+  it("fails a script that plainly takes the name Kit, and will not show or run a waiting one that does", async () => {
     const disguised = DRAW + "\tvar Kit = img\n\tKit.fill(Color.RED)\n"
     const failed = await start({ runTurn: fakeTurn(disguised) })
     expect(failed.status).toBe("failed")

@@ -65,7 +65,8 @@ function codeLines(text: string): { code: string; unclosed: boolean }[] {
       continue
     }
     if (quote) {
-      if (c === "\\") i++
+      // An escaped newline still ends the line here, so the marks after it keep their line numbers.
+      if (c === "\\" && text[i + 1] !== "\n") i++
       else if (text.startsWith(quote, i)) {
         code += quote
         i += quote.length - 1
