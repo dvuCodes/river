@@ -44,7 +44,6 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     expect(job.branch).toBe("river/job/j_test0001")
     expect(job.worktree).toBe(path.join(top, ".git", "river", "worktrees", "j_test0001"))
     expect(git(top, "rev-parse", `${job.baseSha}^`)).toBe(head)
-    // The worktree starts from the user's tree as it is now, uncommitted edits included.
     expect(read(job.worktree, "game/stories/a.twee").toString()).toBe("one, staged\n")
     expect(read(job.worktree, "game/notes.txt").toString()).toBe("untracked\n")
     expect(git(top, "status", "--porcelain")).toBe(status)
@@ -71,7 +70,6 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     const lines = (text: string) => text.trim().split("\n").sort()
     expect(lines(git(top, "status", "--porcelain"))).toEqual(lines(status + "?? game/concepts/\n"))
 
-    // A second apply finds the files already there and changes nothing.
     expect((await applyJobPaths(game, job.baseSha, second, "game/concepts/k1")).length).toBe(2)
     expect(read(top, "game/concepts/k1/draw.gd").toString()).toBe(DRAW)
 
@@ -98,7 +96,6 @@ describe("job worktrees", { timeout: 60_000 }, () => {
     await expect(removeJobWorktree(top, top, job.branch)).rejects.toThrow(/not a River job worktree/)
     expect(existsSync(path.join(top, "river.json"))).toBe(true)
 
-    // A worktree deleted behind git's back is still cleaned up.
     removeDir(job.worktree)
     await removeJobWorktree(top, job.worktree, job.branch)
     expect(git(top, "worktree", "list", "--porcelain")).not.toContain("j_test0002")

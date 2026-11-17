@@ -217,9 +217,24 @@ export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}
   await syncMark(root, job)
   await saveCard(root, req.board, pendingCard(mark, job))
 
+  const abort = new AbortController()
+  const run = runConceptTurn(project, req, mark, job, abort.signal, deps)
+  live.set(id, { abort, run })
+  try {
+    return await run
+  } finally {
+    live.delete(id)
+  }
+}
+
+/** Jobs whose agent turn runs in this process, so a dismiss can stop the turn before removing its worktree. */
+const live = new Map<string, { abort: AbortController; run: Promise<Job> }>()
+
+async function runConceptTurn(project: Project, req: ConceptJobRequest, mark: Mark, job: Job, signal: AbortSignal, deps: JobDeps): Promise<Job> {
+  const root = project.root
   let created: { worktree: string; branch: string } | undefined
   try {
-    created = await createJobWorktree(root, id)
+    created = await createJobWorktree(root, job.id)
     job = await transition(root, job, "running", created)
     const texts: string[] = []
     const errors: string[] = []
@@ -242,8 +257,10 @@ export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}
           if (e.type === "error") errors.push(e.message)
         },
         onPermission: async () => ({ behavior: "deny", message: "A concept job asks for nothing: it writes only its own folder." }),
+        signal,
       },
     )
+    if (signal.aborted) return await dismiss(root, await loadJob(root, job.id))
 
     const file = conceptPath(job.conceptId, CONCEPT_SCRIPT)
     const written = await readFile(path.join(job.worktree, job.projectSub, file)).catch(() => undefined)
@@ -329,15 +346,28 @@ export async function acceptJob(workspaceRoot: string, jobId: string): Promise<J
   return transition(root, job, "accepted")
 }
 
-/** Throw the job away from any non-terminal state: worktree, branch and card go first, then the job is dismissed. */
-export async function dismissJob(workspaceRoot: string, jobId: string): Promise<Job> {
-  const root = await projectRoot(workspaceRoot)
-  const job = await loadJob(root, jobId)
-  if (!JOB_NEXT[job.status].includes("dismissed")) throw new Error(`river: job ${jobId} is ${job.status}; it cannot be dismissed`)
+/** Worktree, branch and card go first, then the job is dismissed. */
+async function dismiss(root: string, job: Job): Promise<Job> {
+  if (!JOB_NEXT[job.status].includes("dismissed")) throw new Error(`river: job ${job.id} is ${job.status}; it cannot be dismissed`)
   await removeJobWorktree(root, job.worktree, job.branch)
   const card = await findPendingCard(root, job)
   if (card) await deleteCard(root, job.board, card.id)
   return transition(root, job, "dismissed")
+}
+
+/**
+ * Throw the job away from any non-terminal state. A turn running in this process is stopped first
+ * (it holds the worktree open). A turn running in another process cannot be stopped from here.
+ */
+export async function dismissJob(workspaceRoot: string, jobId: string): Promise<Job> {
+  const root = await projectRoot(workspaceRoot)
+  const owned = live.get(jobId)
+  if (owned) {
+    owned.abort.abort()
+    await owned.run
+  }
+  const job = await loadJob(root, jobId)
+  return owned && job.status === "dismissed" ? job : dismiss(root, job)
 }
 
 /** Jobs a crashed or closed process left queued, running or rendering become "failed". Call once at startup. */

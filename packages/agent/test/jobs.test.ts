@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawn, type ChildProcess } from "node:child_process"
 import { createHash } from "node:crypto"
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -149,6 +149,34 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect((await loadMark(game, "main", mark.id))!.status).toBe("dismissed")
     await expect(dismissJob(game, job.id)).rejects.toThrow(/cannot be dismissed/)
     await expect(approveJobScript(game, job.id, sha(DRAW))).rejects.toThrow(/only a job waiting for approval/)
+  })
+
+  it("dismisses a job while its agent turn runs: the turn is stopped and the worktree, branch and card go", async () => {
+    let child: ChildProcess | undefined
+    let aborted = false
+    const busyTurn: RunTurn = (req, h) =>
+      new Promise<void>((resolve) => {
+        // Like the claude CLI: a process whose working folder is inside the job worktree.
+        child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: req.root, stdio: "ignore" })
+        child.once("exit", () => resolve())
+        h.signal?.addEventListener("abort", () => {
+          aborted = true
+          child!.kill()
+        })
+      })
+    const run = start({ runTurn: busyTurn })
+    while (!child) await new Promise((r) => setTimeout(r, 50))
+    const job = (await loadBoard(game, "main")).cards.find((c) => c.kind === "concept")!.pending!
+    expect((await loadJob(game, job.jobId)).status).toBe("running")
+
+    const dismissed = await dismissJob(game, job.jobId)
+    expect(aborted).toBe(true)
+    expect(dismissed.status).toBe("dismissed")
+    expect((await run).status).toBe("dismissed")
+    expect((await loadBoard(game, "main")).cards.some((c) => c.kind === "concept")).toBe(false)
+    expect(existsSync(dismissed.worktree)).toBe(false)
+    expect(branchExists(dismissed)).toBe(false)
+    expect((await loadMark(game, "main", mark.id))!.status).toBe("dismissed")
   })
 
   it("fails a script that does not pass the lint, or a turn that wrote none, and a new ask replaces the failed job", async () => {
