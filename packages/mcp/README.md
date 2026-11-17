@@ -34,7 +34,7 @@ A loop that answers the user's requests on the canvas:
    - `board_connect` from the mark to the note, and from the note to each option.
 5. `mark_reply` with `status: "answered"`.
 
-When the user replies on that mark, it opens again and shows up in `marks_open`, still claimed by you. Iterate with a new note and a new row under the first.
+When the user replies on that mark with `river mark reply` (or anything that adds the reply through core `replyToMark`), it opens again and shows up in `marks_open`, still claimed by you. Iterate with a new note and a new row under the first.
 
 Marks that a River concept job works on keep the job's status: `mark_claim` refuses them and `mark_reply` takes no status there. Those requests are answered in the River app.
 

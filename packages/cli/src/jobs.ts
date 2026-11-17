@@ -67,7 +67,7 @@ export async function cmdMark(
     }
     const mark = await replyToMark(root, o.board, o.mark, "you", text)
     out.line(`${mark.id}  ${mark.status}  ${mark.thread.length} messages${mark.jobId ? `  job ${mark.jobId}` : ""}`)
-    if (mark.jobId && mark.status === "answered") out.line(`next: river job revise --root ${root} --job ${mark.jobId}`)
+    if (mark.jobId && ["answered", "accepted", "open"].includes(mark.status)) out.line(`next: river job revise --root ${root} --job ${mark.jobId}`)
     return 0
   }
   await ensureBoard(root, o.board)

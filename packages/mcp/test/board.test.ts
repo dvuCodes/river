@@ -106,6 +106,18 @@ describe("board tools", () => {
     expect(board.edges[0]).toMatchObject({ from: mark.id, to: note.id, madeBy: "claude-code" })
   })
 
+  it("board_add_card makes a captured frame a frame card pinned to its capture, and refuses a file no capture lists", async () => {
+    const stamp = join(dir, ".river", "captures", "pond", "2026-01-01T00-00-00.000Z")
+    mkdirSync(stamp, { recursive: true })
+    writeFileSync(join(stamp, "pond_0.png"), "png")
+    writeFileSync(join(stamp, "stray.png"), "png")
+    writeFileSync(join(stamp, "capture.json"), JSON.stringify({ shotId: "pond", rev: "abc1234", at: "2026-01-01T00:00:00.000Z", files: [join(stamp, "pond_0.png")] }))
+    const frame = (await call("board_add_card", { file: ".river/captures/pond/2026-01-01T00-00-00.000Z/pond_0.png", near: mark.id, caption: "the pond now" })).data as Card
+    expect(frame).toMatchObject({ kind: "frame", ref: "pond", rev: "abc1234", caption: "the pond now", madeBy: "claude-code" })
+    expect(frame.source).toBeUndefined()
+    await expect(call("board_add_card", { file: ".river/captures/pond/2026-01-01T00-00-00.000Z/stray.png" })).rejects.toThrow(/not a frame of a capture/)
+  })
+
   it("board_read shows cards with labels and captions, marks with threads, and edges", async () => {
     const note = (await call("board_add_note", { near: mark.id, text: "A note" })).data as Card
     await call("board_connect", { from: mark.id, to: note.id })

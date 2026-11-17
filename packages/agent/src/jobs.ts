@@ -351,8 +351,8 @@ async function revisionPrompt(project: Project, parent: Job, replies: string[], 
     lines.push(`- ${optionName(s)} (${path.posix.basename(s.file)})${s.caption ? ` "${s.caption}"` : ""}: ${how}`)
   }
   if (parent.status === "failed" && parent.error) lines.push(`The job failed: ${parent.error}`)
+  const kept = parent.status === "accepted" ? (parent.scripts ?? []).filter((s) => s.accepted) : []
   if (parent.status === "accepted") {
-    const kept = (parent.scripts ?? []).filter((s) => s.accepted)
     lines.push(`The user kept ${kept.map(optionName).join(" and ") || "nothing"}; ${kept.length === 1 ? "it is" : "they are"} in the project at concepts/${parent.conceptId}/.`)
   }
   if (withScripts && parent.headSha) {
@@ -370,7 +370,11 @@ async function revisionPrompt(project: Project, parent: Job, replies: string[], 
     "",
     replies.length > 0 ? `The user replied:\n${replies.map((r) => `you: ${r}`).join("\n")}` : "The user asked for a fix: make the scripts render.",
     "",
-    `Answer with new options in this job's own folder, concepts/${conceptId}/ (draw.gd, or draw_a.gd..draw_e.gd). The previous folder is not in this worktree: write out in full whatever you keep. Label and caption the new options for what they are now, and say in your note how they answer the reply.`,
+    `Answer with new options in this job's own folder, concepts/${conceptId}/ (draw.gd, or draw_a.gd..draw_e.gd). ` +
+      (kept.length > 0
+        ? `What the user kept is in this worktree at concepts/${parent.conceptId}/ (read it there; do not write there), and the options they did not keep are not: `
+        : "The previous folder is not in this worktree: ") +
+      "write out in full whatever you keep in the new scripts. Label and caption the new options for what they are now, and say in your note how they answer the reply.",
   )
   return lines.join("\n")
 }
@@ -564,13 +568,16 @@ export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}
   await gitTop(root).catch(() => {
     throw new Error(`river: concept jobs work on a git branch, but ${root} is not in a git repository`)
   })
-  if (mark.jobId) {
-    const previous = await loadJob(root, mark.jobId).catch(() => undefined)
-    // Asking again replaces a failed attempt (its cards and worktree go); anything else still in flight blocks.
-    if (previous?.status === "failed") await dismissJob(root, previous.id)
-    else if (previous && JOB_NEXT[previous.status].length > 0) {
-      throw new Error(`river: mark ${mark.id} already has job ${previous.id} (${previous.status})${previous.status === "answered" ? "; reply on the mark and revise it, or dismiss it" : ""}`)
-    }
+  const leadOf = async (m: Mark | undefined) => (m?.jobId ? await loadJob(root, m.jobId).catch(() => undefined) : undefined)
+  let previous = await leadOf(mark)
+  // Asking again replaces a failed attempt (its cards and worktree go). The mark then follows its next job,
+  // such as the answer a failed revision was revising, which blocks like anything else still in flight.
+  while (previous?.status === "failed") {
+    await dismissJob(root, previous.id)
+    previous = await leadOf(await loadMark(root, req.board, req.markId))
+  }
+  if (previous && JOB_NEXT[previous.status].length > 0) {
+    throw new Error(`river: mark ${mark.id} already has job ${previous.id} (${previous.status})${previous.status === "answered" ? "; reply on the mark and revise it, or dismiss it" : ""}`)
   }
   return launchJob(project, queuedJob(mark, req.board, req), req, { prompt: await conceptPrompt(project, req.board, mark) }, deps)
 }
