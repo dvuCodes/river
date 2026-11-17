@@ -75,8 +75,8 @@ describe("river mark and job", { timeout: 120_000 }, () => {
     const dismissed = await cli(["job", "dismiss", "--root", root, "--job", job.id])
     expect(dismissed.out).toContain(`job ${job.id}  dismissed`)
     const again = await cli(["job", "dismiss", "--root", root, "--job", job.id])
-    expect(again.code).toBe(1)
-    expect(again.err).toContain("cannot be dismissed")
+    expect(again.code).toBe(0)
+    expect(again.out).toContain(`job ${job.id}  dismissed`)
   })
 
   it.skipIf(!process.env.GODOT_BIN)("job approve --yes renders with Godot and job accept applies the concept", async () => {

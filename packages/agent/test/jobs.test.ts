@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { lintConceptScript, type RenderConceptRequest } from "@river/adapter-godot"
-import { ensureBoard, listCheckpoints, loadBoard, loadJob, loadMark, saveCard, saveJob, saveMark, type Job, type Mark } from "@river/core"
+import { ensureBoard, listCheckpoints, listJobs, loadBoard, loadJob, loadMark, saveCard, saveJob, saveMark, type Job, type Mark } from "@river/core"
 import { acceptJob, approveJobScript, dismissJob, readJobScript, recoverJobs, startConceptJob, type JobDeps, type RunTurn } from "../src/jobs"
 import { SYSTEM_PROMPTS } from "../src/prompts"
 import type { AgentTurnRequest } from "../src/types"
@@ -211,8 +211,39 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect(existsSync(job.worktree)).toBe(false)
     expect(branchExists(job)).toBe(false)
     expect((await loadMark(game, "main", mark.id))!.status).toBe("dismissed")
-    await expect(dismissJob(game, job.id)).rejects.toThrow(/cannot be dismissed/)
     await expect(approveJobScript(game, job.id, sha(DRAW))).rejects.toThrow(/only a job waiting for approval/)
+  })
+
+  it("dismissing a dismissed job again removes a pending card left behind, and an accepted job cannot be dismissed", async () => {
+    const job = await start({ runTurn: fakeTurn(DRAW) })
+    await dismissJob(game, job.id)
+    await saveCard(game, "main", { kind: "concept", x: 0, y: 0, w: 260, ref: job.conceptId, madeBy: "concept-artist", pending: { markId: mark.id, jobId: job.id } })
+    expect((await dismissJob(game, job.id)).status).toBe("dismissed")
+    expect(await pending(job)).toBeUndefined()
+
+    const accepted = await answeredJob()
+    await acceptJob(game, accepted.id)
+    await expect(dismissJob(game, accepted.id)).rejects.toThrow(/cannot be dismissed/)
+  })
+
+  it("dismiss removes the job's render folder", async () => {
+    const job = await answeredJob()
+    expect(existsSync(path.join(game, ".river", "jobs", job.id, "render.png"))).toBe(true)
+    await dismissJob(game, job.id)
+    expect(existsSync(path.join(game, ".river", "jobs", job.id))).toBe(false)
+  })
+
+  it("a dismiss the moment the job appears leaves no card, worktree or branch", async () => {
+    const run = start({ runTurn: fakeTurn(DRAW) })
+    let id: string | undefined
+    while (!(id = (await listJobs(game))[0]?.id)) await new Promise((r) => setTimeout(r, 1))
+    expect((await dismissJob(game, id)).status).toBe("dismissed")
+    await run
+    const job = await loadJob(game, id)
+    expect(job.status).toBe("dismissed")
+    expect((await loadBoard(game, "main")).cards.some((c) => c.kind === "concept")).toBe(false)
+    expectNoTrace(job)
+    expect((await loadMark(game, "main", mark.id))!.status).toBe("dismissed")
   })
 
   it("dismisses a job while its agent turn runs: the turn is stopped and the worktree, branch and card go", async () => {

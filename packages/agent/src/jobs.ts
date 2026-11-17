@@ -10,7 +10,7 @@
  * Those bytes are read once, from the job's commit, then hashed, rendered and later applied.
  */
 import { createHash } from "node:crypto"
-import { readFile } from "node:fs/promises"
+import { readFile, rm } from "node:fs/promises"
 import path from "node:path"
 import { godotSettings, lintConceptScript, renderConcept, type RenderConceptRequest } from "@river/adapter-godot"
 import {
@@ -203,7 +203,7 @@ export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}
 
   const id = newBoardId("j_")
   const at = now()
-  let job = await saveJob(root, {
+  const queued: Job = {
     id,
     markId: mark.id,
     board: req.board,
@@ -218,12 +218,10 @@ export async function startConceptJob(req: ConceptJobRequest, deps: JobDeps = {}
     projectSub: "",
     createdAt: at,
     updatedAt: at,
-  })
-  await syncMark(root, job)
-  await saveCard(root, req.board, pendingCard(mark, job))
-
+  }
   const abort = new AbortController()
-  const run = runConceptTurn(project, req, mark, job, abort.signal, deps)
+  // In `live` before the job file exists, so a dismiss from this process always waits for the run.
+  const run = saveJob(root, queued).then((job) => runConceptTurn(project, req, mark, job, abort.signal, deps))
   live.set(id, { abort, run })
   try {
     return await run
@@ -238,6 +236,8 @@ const live = new Map<string, { abort: AbortController; run: Promise<Job> }>()
 async function runConceptTurn(project: Project, req: ConceptJobRequest, mark: Mark, job: Job, signal: AbortSignal, deps: JobDeps): Promise<Job> {
   const root = project.root
   try {
+    await syncMark(root, job)
+    await saveCard(root, req.board, pendingCard(mark, job))
     const created = await createJobWorktree(root, job.id)
     job = await transition(root, job, "running", created)
     const texts: string[] = []
@@ -277,9 +277,8 @@ async function runConceptTurn(project: Project, req: ConceptJobRequest, mark: Ma
     return await transition(root, job, "approval", { headSha, summary, scripts: [{ file, sha256: hash(written), approved: false }] }, summary)
   } catch (err) {
     const ended = await fail(root, job, errMsg(err))
-    // Dismissed while still queued: the dismiss could not know the worktree this call went on to create.
-    if (ended.status === "dismissed") await removeJobWorktree(root, job.id)
-    return ended
+    // Dismissed by another process while this one set up: its dismiss could not see the card or worktree made after it.
+    return ended.status === "dismissed" ? await dismiss(root, ended) : ended
   }
 }
 
@@ -359,28 +358,35 @@ export async function acceptJob(workspaceRoot: string, jobId: string): Promise<J
   return accepted
 }
 
-/** Worktree, branch and card go first, then the job is dismissed. */
+/**
+ * Worktree, branch, render folder and card go first, then the job is dismissed. A dismissed job is
+ * cleaned up again, so whatever an earlier dismiss raced with (a card saved just after it) goes too.
+ */
 async function dismiss(root: string, job: Job): Promise<Job> {
-  if (!JOB_NEXT[job.status].includes("dismissed")) throw new Error(`river: job ${job.id} is ${job.status}; it cannot be dismissed`)
+  if (job.status !== "dismissed" && !JOB_NEXT[job.status].includes("dismissed")) throw new Error(`river: job ${job.id} is ${job.status}; it cannot be dismissed`)
   await removeJobWorktree(root, job.id)
+  await rm(path.join(root, ".river", "jobs", job.id), { recursive: true, force: true, maxRetries: 3 })
   const card = await findPendingCard(root, job)
   if (card) await deleteCard(root, job.board, card.id)
-  return transition(root, job, "dismissed")
+  if (job.status !== "dismissed") return transition(root, job, "dismissed")
+  const mark = await loadMark(root, job.board, job.markId)
+  if (mark?.jobId === job.id && mark.status !== "dismissed") await syncMark(root, job)
+  return job
 }
 
 /**
- * Throw the job away from any non-terminal state. A turn running in this process is stopped first
- * (it holds the worktree open). A turn running in another process cannot be stopped from here.
+ * Throw the job away from any non-terminal state; dismissing it again tidies up anything left. A turn
+ * running in this process is stopped first (it holds the worktree open). A turn running in another
+ * process cannot be stopped from here.
  */
 export async function dismissJob(workspaceRoot: string, jobId: string): Promise<Job> {
   const root = await projectRoot(workspaceRoot)
   const owned = live.get(jobId)
   if (owned) {
     owned.abort.abort()
-    await owned.run
+    await owned.run.catch(() => undefined)
   }
-  const job = await loadJob(root, jobId)
-  return owned && job.status === "dismissed" ? job : dismiss(root, job)
+  return dismiss(root, await loadJob(root, jobId))
 }
 
 /**
