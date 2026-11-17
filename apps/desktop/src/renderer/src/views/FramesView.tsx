@@ -87,6 +87,112 @@ function CapturePicker(props: { label: string; captures: CaptureDTO[]; value: nu
   )
 }
 
+const EVERY = [1, 2, 3, 4] as const
+const everyLabel = (n: number) => (n === 1 ? "every frame" : `every ${n === 2 ? "2nd" : n === 3 ? "3rd" : `${n}th`}`)
+
+/**
+ * Put this capture on the open board. One frame goes as a card; several go as a strip: the frames you tick (all, or
+ * every Nth), in a row joined by connectors. Clicking a thumbnail shows that frame above.
+ */
+function SendToBoard(props: { shotId: string; capture: CaptureDTO; board: string; frame: number; onFrame(i: number): void; onOpenBoard(): void }) {
+  const { capture, board } = props
+  const n = capture.urls.length
+  const [picked, setPicked] = useState<ReadonlySet<number>>(() => new Set(capture.urls.keys()))
+  const [busy, setBusy] = useState(false)
+  const [sent, setSent] = useState<{ count: number; board: string } | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const frames = [...picked].sort((a, b) => a - b)
+  const everyNth = (k: number) => [...capture.urls.keys()].filter((i) => i % k === 0)
+  /** The every-Nth choice the ticks match, or 0 once frames were ticked by hand. */
+  const every = EVERY.find((k) => k < n && everyNth(k).join() === frames.join()) ?? 0
+  const pickEvery = (k: number) => setPicked(new Set(everyNth(k)))
+  const toggle = (i: number) =>
+    setPicked((cur) => {
+      const next = new Set(cur)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      return next
+    })
+  const send = () => {
+    setBusy(true)
+    setErr(null)
+    window.river.boardAddFrames(board, { shotId: props.shotId, capture: capture.at, frames: n === 1 ? [0] : frames }).then(
+      (cards) => {
+        setBusy(false)
+        setSent({ count: cards.length, board })
+      },
+      (e: unknown) => {
+        setBusy(false)
+        setErr(errorText(e))
+      },
+    )
+  }
+  const done = sent && (
+    <p className="send-done" role="status">
+      {sent.count === 1 ? "Sent the frame" : `Sent ${sent.count} frames as a strip`} to <b>{sent.board}</b>.{" "}
+      <button className="link-btn" data-action="open-board" onClick={props.onOpenBoard}>
+        Open the board
+      </button>
+    </p>
+  )
+  if (n === 1) {
+    return (
+      <section className="send-board is-single">
+        <button className="btn btn-primary" data-action="send-frame" disabled={busy} onClick={send}>
+          Send to board
+        </button>
+        <span className="sec-hint">
+          adds this frame to <b>{board}</b>
+        </span>
+        {done}
+        {err && <p className="err-note">{err}</p>}
+      </section>
+    )
+  }
+  return (
+    <section className="send-board" aria-label="Send frames to the board">
+      <header className="strip-head">
+        <span className="strip-title">Strip</span>
+        <select className="strip-every" value={every} aria-label="Which frames" onChange={(e) => pickEvery(Number(e.target.value))}>
+          {every === 0 && (
+            <option value={0} disabled>
+              your pick
+            </option>
+          )}
+          {EVERY.filter((k) => k < n).map((k) => (
+            <option key={k} value={k}>
+              {everyLabel(k)}
+            </option>
+          ))}
+        </select>
+        <span className="sec-hint">
+          {frames.length} of {n} frames
+        </span>
+        <span className="tb-spacer" />
+        <button className="btn btn-primary" data-action="send-strip" disabled={busy || frames.length === 0} onClick={send}>
+          {frames.length === 1 ? "Send to board" : "Send to board as strip"}
+        </button>
+      </header>
+      <ol className="strip-frames">
+        {capture.urls.map((url, i) => (
+          <li key={url} className={cx("strip-frame", picked.has(i) && "is-picked", i === props.frame && "is-viewing")}>
+            <button className="strip-thumb" data-frame={i} title={`Show frame ${i + 1}`} onClick={() => props.onFrame(i)}>
+              <img src={url} alt={`Frame ${i + 1}`} draggable={false} />
+            </button>
+            <label className="strip-pick">
+              <input type="checkbox" data-pick={i} checked={picked.has(i)} onChange={() => toggle(i)} />
+              <span className="mono">{i + 1}</span>
+            </label>
+            {i < n - 1 && <span className="strip-link" aria-hidden />}
+          </li>
+        ))}
+      </ol>
+      {done}
+      {err && <p className="err-note">{err}</p>}
+    </section>
+  )
+}
+
 function ThreadCard(props: { thread: ReviewThread; n: number; active: boolean; onFocus(): void; onAgent(i: AgentIntent): void; onChanged(): void }) {
   const { thread: t, n, active, onFocus, onAgent, onChanged } = props
   const [text, setText] = useState("")
@@ -106,7 +212,7 @@ function ThreadCard(props: { thread: ReviewThread; n: number; active: boolean; o
         <span className="thread-n">{n}</span>
         <span className="mono thread-rev">
           {t.target.rev}
-          {t.target.frame !== undefined ? ` · f${t.target.frame}` : ""}
+          {t.target.frame !== undefined ? ` · frame ${t.target.frame + 1}` : ""}
         </span>
         <select
           className={cx("status-select", `st-${t.status}`)}
@@ -201,8 +307,8 @@ function PlanCard(props: { plan: ChangePlan; onAgent(i: AgentIntent): void; onCh
   )
 }
 
-export function FramesView(props: { tick: number; onAgent(i: AgentIntent): void }) {
-  const { tick, onAgent } = props
+export function FramesView(props: { tick: number; board: string; onAgent(i: AgentIntent): void; onOpenBoard(): void }) {
+  const { tick, board, onAgent } = props
   const [data, setData] = useState<FramesDTO | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [shotId, setShotId] = useState<string | undefined>()
@@ -279,7 +385,7 @@ export function FramesView(props: { tick: number; onAgent(i: AgentIntent): void 
             {(capA?.urls.length ?? 0) > 1 && (
               <label className="tb-field">
                 <span className="tb-label">Frame</span>
-                <input className="mono frame-num" type="number" min={0} max={(capA?.urls.length ?? 1) - 1} value={frame} onChange={(e) => setFrame(Number(e.target.value))} />
+                <input className="mono frame-num" type="number" min={1} max={capA?.urls.length ?? 1} value={frame + 1} onChange={(e) => setFrame(Math.max(0, Number(e.target.value) - 1))} />
               </label>
             )}
             <label className="toggle">
@@ -316,7 +422,7 @@ export function FramesView(props: { tick: number; onAgent(i: AgentIntent): void 
                     className="link-btn shot-pin"
                     title="Add this shot's newest frame to the storyboard canvas"
                     onClick={() => {
-                      window.river.boardPin("main", { kind: "frame", ref: s.id }).then(
+                      window.river.boardPin(board, { kind: "frame", ref: s.id }).then(
                         () => setPinned(s.id),
                         (e) => setError(errorText(e)),
                       )
@@ -378,6 +484,7 @@ export function FramesView(props: { tick: number; onAgent(i: AgentIntent): void 
               <div className="single">
                 <FrameImage url={capA.urls[frame]} threads={frameThreads} draft={draft} onDraw={setDraft} activeThread={activeThread} />
                 <p className="stage-hint">Drag on the frame to mark a box for a new comment.</p>
+                <SendToBoard key={capA.at} shotId={shot.id} capture={capA} board={board} frame={frame} onFrame={setFrame} onOpenBoard={props.onOpenBoard} />
               </div>
             )
           )}

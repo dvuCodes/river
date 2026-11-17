@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { app, safeStorage } from "electron"
 import type { AgentBackend, AgentModel } from "@river/agent"
+import { CANVAS_THEMES, type CanvasTheme } from "../shared/api"
 
 /**
  * Stored in app userData. The API key is kept only as safeStorage ciphertext (base64).
@@ -14,6 +15,11 @@ interface Settings {
   model?: AgentModel
   /** The `claude` executable, when it is not on PATH. */
   claudePath?: string
+  canvasTheme?: CanvasTheme
+  /** False turns off the look at a job's renders after they are drawn. On unless set to false. */
+  selfCheck?: boolean
+  /** Project root -> the board last open in it. */
+  lastBoards?: Record<string, string>
 }
 
 const file = () => join(app.getPath("userData"), "river-settings.json")
@@ -26,6 +32,7 @@ export interface AgentPrefs {
   backend?: AgentBackend
   model: AgentModel
   claudePath?: string
+  selfCheck: boolean
 }
 
 export function getAgentPrefs(): AgentPrefs {
@@ -34,10 +41,11 @@ export function getAgentPrefs(): AgentPrefs {
     ...(s.backend && BACKENDS.includes(s.backend) ? { backend: s.backend } : {}),
     model: s.model && MODELS.includes(s.model) ? s.model : "claude-opus-5-5",
     ...(s.claudePath ? { claudePath: s.claudePath } : {}),
+    selfCheck: s.selfCheck !== false,
   }
 }
 
-export function setAgentPrefs(p: { backend?: AgentBackend; model?: AgentModel; claudePath?: string }): void {
+export function setAgentPrefs(p: { backend?: AgentBackend; model?: AgentModel; claudePath?: string; selfCheck?: boolean }): void {
   const s = read()
   if (p.backend !== undefined) {
     if (!BACKENDS.includes(p.backend)) throw new Error(`Unknown backend ${String(p.backend)}`)
@@ -51,6 +59,10 @@ export function setAgentPrefs(p: { backend?: AgentBackend; model?: AgentModel; c
     const t = p.claudePath.trim()
     if (t) s.claudePath = t
     else delete s.claudePath
+  }
+  if (p.selfCheck !== undefined) {
+    if (typeof p.selfCheck !== "boolean") throw new Error("selfCheck is true or false")
+    s.selfCheck = p.selfCheck
   }
   write(s)
 }
@@ -74,6 +86,31 @@ export function getLastProject(): string | undefined {
 
 export function setLastProject(root: string): void {
   write({ ...read(), lastProject: root })
+}
+
+/** A smoke run on the user's own app data leaves their canvas look and last boards alone, as it leaves their last project. */
+const keepUserSettings = Boolean(process.env["RIVER_SMOKE_DIR"]) && !process.env["RIVER_SMOKE_USERDATA"]
+
+/** Paper unless the user picked another; the canvas does not follow the OS unless asked to. */
+export function getCanvasTheme(): CanvasTheme {
+  const t = read().canvasTheme
+  return t && CANVAS_THEMES.includes(t) ? t : "paper"
+}
+
+export function setCanvasTheme(t: CanvasTheme): void {
+  if (!CANVAS_THEMES.includes(t)) throw new Error(`Unknown canvas theme ${String(t)}`)
+  if (keepUserSettings) return
+  write({ ...read(), canvasTheme: t })
+}
+
+export function getLastBoard(root: string): string | undefined {
+  return read().lastBoards?.[root]
+}
+
+export function setLastBoard(root: string, board: string): void {
+  const s = read()
+  if (keepUserSettings || s.lastBoards?.[root] === board) return
+  write({ ...s, lastBoards: { ...s.lastBoards, [root]: board } })
 }
 
 export function encryptionAvailable(): Promise<boolean> {

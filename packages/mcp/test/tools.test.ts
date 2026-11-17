@@ -1,30 +1,23 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { fileURLToPath } from "node:url"
 import { beforeEach, describe, expect, it } from "vitest"
 import { addThread, loadPlan, loadProject, setPlanStatus } from "@river/core"
 import type { EngineAdapter, Project } from "@river/core"
 import { createRiverTools, RIVER_TOOL_NAMES, selectTools, unifiedDiff } from "../src/index"
 import type { RiverTool } from "../src/index"
+import { tempProject } from "./helpers"
 
-const example = fileURLToPath(new URL("../../../examples/park-walk/", import.meta.url))
 const STORY = "stories/park_walk.twee"
 
 export const EXPECTED_TOOLS = [
   "project_info", "story_list", "story_read", "story_lint", "story_paths", "playtest_run",
-  "frames_list", "review_list", "plan_list", "plan_read",
+  "frames_list", "review_list", "plan_list", "plan_read", "board_read", "marks_open", "brief_read",
+  "card_read", "mark_read", "card_view",
   "story_write_passage", "story_add_passage", "review_reply", "plan_save",
   "implement_edit", "plan_mark_implemented", "frames_capture",
+  "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row",
+  "board_update_note", "board_remove_card", "concept_request",
 ]
-
-export function tempProject(): string {
-  const dir = mkdtempSync(join(tmpdir(), "river-mcp-"))
-  cpSync(example, dir, { recursive: true })
-  mkdirSync(join(dir, "data"))
-  writeFileSync(join(dir, "data/tuning.txt"), "leash_max = 4.0\nsurge_force = 12\nsurge_force_alt = 12\nsurge_force = 12\n")
-  return dir
-}
 
 let dir: string
 let project: Project
@@ -42,19 +35,36 @@ beforeEach(async () => {
 })
 
 describe("tool list", () => {
-  it("has the 17 contract names, with the write tools marked mutating", () => {
+  it("has the 32 contract names, with the write tools marked mutating", () => {
     expect([...tools.map((t) => t.name)].sort()).toEqual([...EXPECTED_TOOLS].sort())
     expect([...RIVER_TOOL_NAMES].sort()).toEqual([...EXPECTED_TOOLS, "concept_write"].sort())
     expect(tools.filter((t) => t.mutating).map((t) => t.name).sort()).toEqual(
-      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture"].sort(),
+      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture", "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row", "board_update_note", "board_remove_card", "concept_request"].sort(),
     )
+  })
+
+  it("a concept job's server has concept_write and no concept_request, so a job never starts another", () => {
+    const names = createRiverTools(project, { conceptId: "j_abc" }).map((t) => t.name)
+    expect(names).toContain("concept_write")
+    expect(names).not.toContain("concept_request")
+    expect(() => selectTools(createRiverTools(project, { conceptId: "j_abc" }), ["concept_request"])).toThrow(/a --concept server has no concept_request/)
+  })
+
+  it("refuses to write as the user or as River's own job role, per server and per review reply", async () => {
+    expect(() => createRiverTools(project, { author: "concept-artist" })).toThrow(/River's own role/)
+    expect(() => createRiverTools(project, { author: " You " })).toThrow(/is the user/)
+    await expect(call("review_reply", { threadId: "t_x", text: "hi", author: "you" })).rejects.toThrow(/is the user/)
+    await expect(call("review_reply", { threadId: "t_x", text: "hi", author: "Concept-Artist" })).rejects.toThrow(/River's own role/)
   })
 })
 
 describe("read tools", () => {
   it("project_info and story_list", async () => {
-    expect((await call("project_info")).text).toContain(`story files: ${STORY}`)
-    expect((await call("story_list")).text).toContain(`${STORY}  "Park Walk"  8 passages, start: Gate`)
+    const info = (await call("project_info")).text
+    expect(info).toContain(`story files: ${STORY}`)
+    expect(info).toContain("state variables (stories/state.json):\n  energy: number 0..100, initial 80\n")
+    expect(info).toContain("  treats: int 0..10, initial 2")
+    expect((await call("story_list")).text).toContain(`${STORY}  "Park Walk"  9 passages, start: Gate`)
   })
 
   it("story_read returns the raw text and the passages", async () => {
@@ -62,6 +72,7 @@ describe("read tools", () => {
     expect(r.text).toContain(readFileSync(join(dir, STORY), "utf8"))
     expect(r.text).toContain("- Pond (id pond) [encounter]")
     expect(r.text).toContain("    1: Throw a treat -> Treat")
+    expect(r.text).toContain("State variables (stories/state.json):\n  energy: number 0..100, initial 80\n")
     const data = r.data as { passages: { id: string; choices: { target: string }[] }[] }
     expect(data.passages.find((p) => p.id === "pond")!.choices.map((c) => c.target)).toEqual(["Calm down", "Treat", "Splash"])
   })
@@ -69,13 +80,16 @@ describe("read tools", () => {
   it("story_lint reports the planted problems", async () => {
     const r = await call("story_lint", { file: STORY })
     expect(r.text).toContain("error  Pond → Splash: no passage has this name")
-    expect(r.text).toContain("1 error, 2 warnings in 8 passages")
-    expect((await call("story_lint")).text).toContain("1 error, 2 warnings in 8 passages")
+    expect(r.text).toContain("1 error, 3 warnings in 9 passages")
+    expect((await call("story_lint")).text).toContain("1 error, 3 warnings in 9 passages")
+    expect(r.text).toContain(
+      "warn   Long path → Fetch: the choice can show while Fetch's @when energy >= 20 is false. Give the choice @when energy >= 20, or loosen Fetch's @when.",
+    )
   })
 
   it("story_paths formats routes like the CLI", async () => {
     const r = await call("story_paths", { file: STORY })
-    expect(r.text).toContain("2  Gate → Pond → Treat → Home happy   [treats >= 1]")
+    expect(r.text).toContain("2  Gate [Go to the pond] → Pond [Throw a treat] → Treat [Head home] → Home happy   when treats >= 1")
   })
 
   it("playtest_run plays choices and shows state", async () => {
@@ -113,6 +127,14 @@ describe("story writes", () => {
     expect(r.text).toContain("2 errors in the file now.")
   })
 
+  it("story_write_passage keeps one blank line before the next passage, and suggests ids for a wrong one", async () => {
+    const r = await call("story_write_passage", { file: STORY, passageId: "fetch", rawText: "@id fetch\n--\nThe dog drops the stick.\n\n[[Head home->Home happy]]\n\n" })
+    expect(readFileSync(join(dir, STORY), "utf8")).toContain("[[Head home->Home happy]]\n\n:: Home happy [ending]")
+    expect(r.text).toContain("+[[Head home->Home happy]]\n \n :: Home happy")
+    await expect(call("story_write_passage", { file: STORY, passageId: "Fetch", rawText: "x" })).rejects.toThrow('no passage with id "Fetch". Did you mean "fetch" (passage Fetch)?')
+    await expect(call("story_write_passage", { file: STORY, passageId: "Long path", rawText: "x" })).rejects.toThrow('Did you mean "long_path" (passage Long path)')
+  })
+
   it("story_add_passage appends a passage", async () => {
     const r = await call("story_add_passage", { file: STORY, name: "Splash", rawText: "@id splash\n@end\n--\nWet dog.", tags: ["ending"] })
     expect(readFileSync(join(dir, STORY), "utf8")).toMatch(/:: Splash \[ending\]\n@id splash\n@end\n--\nWet dog\.\n?$/)
@@ -131,25 +153,25 @@ describe("story writes", () => {
 
 describe("plans and the implementer guard", () => {
   const save = async (files: string[]) =>
-    ((await call("plan_save", { title: "Softer surge", rationale: "Comment says the surge is too strong", steps: files.map((file) => ({ file, change: "lower surge_force" })), recapture: [] })).data as { id: string }).id
+    ((await call("plan_save", { title: "Shorter throw", rationale: "Comment says the ball goes too far", steps: files.map((file) => ({ file, change: "lower ball_throw" })), recapture: [] })).data as { id: string }).id
 
   it("implement_edit is denied while draft, allowed once approved, and only for listed files", async () => {
     const planId = await save(["data/tuning.txt"])
     expect((await loadPlan(project, planId)).status).toBe("draft")
-    const edit = { planId, file: "data/tuning.txt", oldText: "leash_max = 4.0", newText: "leash_max = 3.5" }
+    const edit = { planId, file: "data/tuning.txt", oldText: "walk_speed = 4.0", newText: "walk_speed = 3.5" }
     await expect(call("implement_edit", edit)).rejects.toThrow(/is draft, not approved/)
 
     await setPlanStatus(project, planId, "approved")
     const r = await call("implement_edit", edit)
-    expect(readFileSync(join(dir, "data/tuning.txt"), "utf8")).toContain("leash_max = 3.5\n")
-    expect(r.text).toContain("-leash_max = 4.0\n+leash_max = 3.5")
+    expect(readFileSync(join(dir, "data/tuning.txt"), "utf8")).toContain("walk_speed = 3.5\n")
+    expect(r.text).toContain("-walk_speed = 4.0\n+walk_speed = 3.5")
 
     await expect(call("implement_edit", { ...edit, file: "stories/state.json", oldText: "{", newText: "{" })).rejects.toThrow(/does not name this file/)
-    await expect(call("implement_edit", { ...edit, oldText: "surge_force = 12\n", newText: "surge_force = 8\n" })).rejects.toThrow(/occurs 2 times/)
+    await expect(call("implement_edit", { ...edit, oldText: "ball_throw = 12\n", newText: "ball_throw = 8\n" })).rejects.toThrow(/occurs 2 times/)
     await expect(call("implement_edit", { ...edit, oldText: "missing", newText: "x" })).rejects.toThrow(/not found/)
     // `$&` in newText is literal, not a replace pattern.
-    await call("implement_edit", { ...edit, oldText: "leash_max = 3.5", newText: "leash_max = $&" })
-    expect(readFileSync(join(dir, "data/tuning.txt"), "utf8")).toContain("leash_max = $&\n")
+    await call("implement_edit", { ...edit, oldText: "walk_speed = 3.5", newText: "walk_speed = $&" })
+    expect(readFileSync(join(dir, "data/tuning.txt"), "utf8")).toContain("walk_speed = $&\n")
 
     expect((await call("plan_mark_implemented", { planId })).text).toContain("implemented")
     expect((await loadPlan(project, planId)).status).toBe("implemented")
@@ -163,10 +185,10 @@ describe("plans and the implementer guard", () => {
   })
 
   it("plan_save links a review thread and review_reply answers it", async () => {
-    const thread = await addThread(project, { shotId: "leash", rev: "abc" }, "dat", "Too strong")
+    const thread = await addThread(project, { shotId: "walk", rev: "abc" }, "you", "Throws too far")
     const planId = ((await call("plan_save", { threadId: thread.id, title: "t", rationale: "r", steps: [{ file: "data/tuning.txt", change: "c" }], recapture: [] })).data as { id: string }).id
     await call("review_reply", { threadId: thread.id, text: `See plan ${planId}` })
-    const listed = await call("review_list", { shotId: "leash" })
+    const listed = await call("review_list", { shotId: "walk" })
     expect(listed.text).toContain(`[planned]  plan ${planId}`)
     expect(listed.text).toContain(`agent (`)
     expect((await call("plan_read", { planId })).text).toContain('"status": "draft"')

@@ -66,12 +66,12 @@ describe("parseTwee3", () => {
     const src = [
       ":: Pond! [encounter]",
       "@id pond",
-      "@when distance_m >= 90",
-      "@set fear += 5",
+      "@when energy >= 20",
+      "@set excitement += 5",
       "--",
-      "A pond freezes halfway up the oak.",
-      "[[Leave it->Standoff]] @cost treats 1",
-      "[[Hold tight->Strain]] @set fear += 35, energy -= 8 @when bond < 50",
+      "Ducks paddle across the pond.",
+      "[[Feed the ducks->Ducks]] @cost treats 1",
+      "[[Throw the ball->Fetch]] @set excitement += 15, energy -= 5 @when bond < 50",
       "You could also [[run|Run]] away.",
       ":: End",
       "@end",
@@ -82,16 +82,16 @@ describe("parseTwee3", () => {
     expect(diagnostics.filter((d) => d.severity !== "info")).toEqual([])
     const p = story.passages[0]!
     expect(p.id).toBe("pond")
-    expect(p.when).toEqual({ kind: "cmp", variable: "distance_m", op: ">=", value: 90 })
-    expect(p.onEnter).toEqual([{ variable: "fear", op: "add", amount: 5 }])
-    expect(p.text.startsWith("A pond")).toBe(true)
+    expect(p.when).toEqual({ kind: "cmp", variable: "energy", op: ">=", value: 20 })
+    expect(p.onEnter).toEqual([{ variable: "excitement", op: "add", amount: 5 }])
+    expect(p.text.startsWith("Ducks paddle")).toBe(true)
     expect(p.choices).toHaveLength(3)
-    expect(p.choices[0]).toMatchObject({ label: "Leave it", target: "Standoff", cost: [{ variable: "treats", op: "add", amount: -1 }], set: [] })
+    expect(p.choices[0]).toMatchObject({ label: "Feed the ducks", target: "Ducks", cost: [{ variable: "treats", op: "add", amount: -1 }], set: [] })
     expect(p.choices[0]!.span).toEqual({ file: "s.twee", line: 7, column: 1 })
     expect(p.choices[1]).toMatchObject({
-      label: "Hold tight",
-      target: "Strain",
-      set: [{ variable: "fear", op: "add", amount: 35 }, { variable: "energy", op: "add", amount: -8 }],
+      label: "Throw the ball",
+      target: "Fetch",
+      set: [{ variable: "excitement", op: "add", amount: 15 }, { variable: "energy", op: "add", amount: -5 }],
       when: { kind: "cmp", variable: "bond", op: "<", value: 50 },
     })
     expect(p.choices[2]).toMatchObject({ label: "run", target: "Run", cost: [], set: [] })

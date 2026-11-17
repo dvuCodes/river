@@ -2,7 +2,7 @@ import { createRequire } from "node:module"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import type { CanUseTool, EffortLevel, Options } from "@anthropic-ai/claude-agent-sdk"
 import { BUILTIN_READ_TOOLS, MCP_PREFIX } from "./policy"
-import { SYSTEM_PROMPTS } from "./prompts"
+import { systemPrompt } from "./prompts"
 import { AUTO_ALLOWED_WRITES, MODE_TOOLS, READ_TOOLS, type AgentTurnRequest } from "./types"
 
 /**
@@ -114,7 +114,7 @@ export function buildQueryOptions(req: AgentTurnRequest, deps: QueryOptionDeps):
     systemPrompt: {
       type: "preset",
       preset: "claude_code",
-      append: SYSTEM_PROMPTS[req.mode],
+      append: systemPrompt(req),
       // A resumed session may change mode; render the mode prompt fresh instead of reusing the first one.
       snapshot: false,
     },

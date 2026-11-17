@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto"
-import { mkdir } from "node:fs/promises"
-import { userInfo } from "node:os"
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { mkdir, readFile } from "node:fs/promises"
+import { join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
-import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobDeps, PermissionDecision } from "@river/agent"
-import { createGodotAdapter } from "@river/adapter-godot"
+import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobAgentSettings, JobDeps, PermissionDecision, RunTurn } from "@river/agent"
+import { createGodotAdapter, kitFileText, linesToRead } from "@river/adapter-godot"
 import {
   type Capture,
   type ChangePlan,
@@ -15,6 +14,7 @@ import {
   type ReviewThread,
   type StateSchema,
   type Story,
+  DEFAULT_BOARD,
   addThread,
   captureShot,
   contentPassages,
@@ -22,11 +22,14 @@ import {
   evalCond,
   formatCond,
   lint,
+  listBoards,
   listCaptures,
   listPlans,
   listStories,
   listThreads,
+  loadBoard,
   loadJob,
+  loadMark,
   loadProject,
   loadSchema,
   loadStory,
@@ -48,6 +51,7 @@ import type {
   AgentPrefsUpdate,
   AgentStartRequest,
   AgentStatus,
+  CanvasTheme,
   CaptureDTO,
   FramesDTO,
   JobDTO,
@@ -57,16 +61,21 @@ import type {
   ProjectInfo,
   StoryDTO,
 } from "../shared/api"
+import { asciiLine } from "../shared/approval"
 import { type JobApi, loadAgent } from "./agent"
+import { type Approvals, registerApproval } from "./approval"
 import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
-import { boardHandlers } from "./board"
+import { boardHandlers, closeRowGap, jobLogFile, jobRevisable, lookingJobs } from "./board"
 import { type ProjectWatch, noteOwnWrite, watchProject } from "./watch"
+import { PermissionWaits } from "./permissions"
+import { AgentWork } from "./work"
 
 let project: Project | null = null
 let projectError: { root: string; message: string } | null = null
 let projectWatch: ProjectWatch | null = null
 let getWindow: () => BrowserWindow | null = () => null
+let approvals: Approvals | null = null
 
 export function currentProject(): Project | null {
   return project
@@ -85,13 +94,17 @@ function need(): Project {
 /** Open a project folder (the one with river.json). Remembers it unless `remember` is false. */
 export async function openProject(root: string, remember = true): Promise<void> {
   const abs = resolve(root)
+  approvals?.closeAll()
   await projectWatch?.stop()
   projectWatch = null
   try {
     project = await loadProject(abs)
     projectError = null
     if (remember) settings.setLastProject(project.root)
-    projectWatch = watchProject(project, (changes) => send("fs:change", changes))
+    projectWatch = watchProject(project, (changes) => {
+      approvals?.changed(changes)
+      send("fs:change", changes)
+    })
     const opened = project.root
     // Fails only jobs whose owning process is gone, so a job this app or the CLI is running survives a re-open.
     void loadAgent()
@@ -105,11 +118,14 @@ export async function openProject(root: string, remember = true): Promise<void> 
 
 async function projectInfo(): Promise<ProjectInfo | null> {
   if (!project) {
-    return projectError ? { root: projectError.root, name: "", engine: "", stories: [], shots: [], error: projectError.message } : null
+    return projectError ? { root: projectError.root, name: "", board: DEFAULT_BOARD, engine: "", stories: [], shots: [], error: projectError.message } : null
   }
+  const boards = await listBoards(project.root)
+  const last = settings.getLastBoard(project.root)
   return {
     root: project.root,
     name: project.manifest.name,
+    board: last && boards.includes(last) ? last : boards.includes(DEFAULT_BOARD) || boards.length === 0 ? DEFAULT_BOARD : boards[0]!,
     engine: project.manifest.engine,
     stories: await listStories(project),
     shots: project.manifest.shots,
@@ -183,29 +199,24 @@ function captureDTO(p: Project, c: Capture): CaptureDTO {
   return { shotId: c.shotId, rev: c.rev, at: c.at, urls: c.files.map((f) => fileUrl(p, f)) }
 }
 
-/** Resolve a river-file:// URL to an absolute path inside the project root, or null if it escapes. */
-export function resolveRiverFile(url: string): string | null {
-  if (!project) return null
-  const u = new URL(url)
-  if (u.host !== "project") return null
-  const rel = decodeURIComponent(u.pathname).replace(/^\/+/, "")
-  const abs = resolve(project.root, rel)
-  const back = relative(project.root, abs)
-  if (!back || back.startsWith("..") || isAbsolute(back)) return null
-  return abs
-}
-
-const author = () => {
-  try {
-    return userInfo().username || "you"
-  } catch {
-    return "you"
-  }
-}
-
 // ---- agent turns
+/** Review threads are committed with the game, so the person at this desk is "you", never their account name. */
+const YOU = "you"
+
 const turns = new Map<string, AbortController>()
-const pendingPermissions = new Map<string, (d: PermissionDecision) => void>()
+const permissions = new PermissionWaits()
+const work = new AgentWork()
+
+/** On quit: stop every agent turn (chat, concept drawing, look at renders) and wait for them, at most `timeoutMs`. */
+export function stopAgentWork(timeoutMs: number): Promise<void> {
+  return work.stopAll(timeoutMs)
+}
+
+/** A concept job's turns, stopped with the rest of the app's agent work when it quits. */
+const tracked =
+  (base: RunTurn): RunTurn =>
+  (req, h) =>
+    work.track(base(req, { ...h, signal: work.signal(h.signal) }))
 
 /** Last `claude auth status` result (allowlisted fields only; never written to disk). */
 let claudeCache: ClaudeCodeStatus | null = null
@@ -241,6 +252,7 @@ async function agentStatus(refreshClaude = false): Promise<AgentStatus> {
     backendChosen: prefs.backend !== undefined,
     model: prefs.model,
     ...(prefs.claudePath ? { claudePath: prefs.claudePath } : {}),
+    selfCheck: prefs.selfCheck,
     claudeCode,
   }
 }
@@ -262,8 +274,38 @@ async function jobApi(): Promise<JobApi> {
   return agent.jobs
 }
 
-/** `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn). */
-export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: JobDeps } = {}): void {
+/** The look at a job's renders runs as the job's own turns do: the user's model, backend, key or claude path. */
+async function lookSettings(): Promise<false | JobAgentSettings> {
+  if (!settings.getAgentPrefs().selfCheck) return false
+  try {
+    const status = await agentStatus()
+    return { model: status.model, ...(await turnAuth(status)) }
+  } catch (err) {
+    // Without a way to run the look, the renders are still worth showing: answer with the note as written.
+    console.warn("river: skipping the look at the renders:", err instanceof Error ? err.message : String(err))
+    return false
+  }
+}
+
+/** A short turn, as core's own look at the renders runs it. */
+const LOOK_LIMITS = { maxTurns: 6, effort: "low" } as const
+
+/** Approve runs still going (rendering, then the look), settled either way. */
+const approving = new Map<string, Promise<void>>()
+
+/** Tell the canvas a job's cards changed although its file did not (the look started or ended). */
+const jobTouched = (jobId: string) => send("fs:change", [{ kind: "job", rel: `.river/jobs/${jobId}.json` }])
+
+/** The approval window open now, if any (smoke mode drives it). */
+export function approvalWindow(): BrowserWindow | null {
+  return approvals?.window() ?? null
+}
+
+/**
+ * `jobDeps` goes to startConceptJob as its deps (smoke mode passes a fake agent turn); `onApprove` lets a smoke count
+ * approve calls; `smoke` gives the approval window smoke mode's window settings.
+ */
+export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jobDeps?: JobDeps; onApprove?: () => void; smoke?: boolean } = {}): void {
   getWindow = windowGetter
   const handle = <A extends unknown[], R>(channel: string, fn: (...args: A) => Promise<R> | R) =>
     ipcMain.handle(channel, (_e, ...args) => fn(...(args as A)))
@@ -306,11 +348,11 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     }))
   })
   handle("story:openState", async (rel: string, state: GameState): Promise<OpenStateDTO> => {
-    const { story } = await readStory(rel)
+    const { story, schema } = await readStory(rel)
     const out: OpenStateDTO = { passages: {}, choices: {} }
     for (const p of contentPassages(story)) {
       out.passages[p.id] = p.when ? evalCond(p.when, state) : true
-      out.choices[p.id] = openChoices(p, state).map((c) => c.open)
+      out.choices[p.id] = openChoices(p, state, { story, schema }).map((c) => c.open)
     }
     return out
   })
@@ -349,12 +391,12 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     if (p.manifest.engine !== "godot") throw new Error(`Engine "${p.manifest.engine}" has no capture adapter.`)
     return captureDTO(p, await captureShot(p, shotId, createGodotAdapter()))
   })
-  handle("review:add", (target: ReviewThread["target"], text: string) => addThread(need(), target, author(), text))
-  handle("review:reply", (threadId: string, text: string) => reply(need(), threadId, author(), text))
+  handle("review:add", (target: ReviewThread["target"], text: string) => addThread(need(), target, YOU, text))
+  handle("review:reply", (threadId: string, text: string) => reply(need(), threadId, YOU, text))
   handle("review:status", (threadId: string, status: ReviewStatus) => setStatus(need(), threadId, status))
   handle("plan:status", (planId: string, status: ChangePlan["status"]) => setPlanStatus(need(), planId, status))
 
-  for (const [channel, fn] of Object.entries(boardHandlers(need, (dir) => projectWatch?.add(dir), getWindow))) {
+  for (const [channel, fn] of Object.entries(boardHandlers(need, { add: (dir) => projectWatch?.add(dir), remove: (dir) => projectWatch?.remove(dir) }, getWindow))) {
     handle(channel, fn as (...args: unknown[]) => Promise<unknown>)
   }
 
@@ -370,6 +412,8 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     if (!agent.claudeSignIn) throw new Error(agent.reason ?? "The agent is unavailable.")
     await agent.claudeSignIn(settings.getAgentPrefs().claudePath)
   })
+  handle("settings:canvasTheme", () => settings.getCanvasTheme())
+  handle("settings:setCanvasTheme", (t: CanvasTheme) => settings.setCanvasTheme(t))
   handle("settings:setKey", async (key: string) => {
     await settings.setApiKey(key)
     return agentStatus()
@@ -389,26 +433,20 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     if (turn.model !== status.model) settings.setAgentPrefs({ model: turn.model })
     const ac = new AbortController()
     turns.set(turnId, ac)
+    const signal = work.signal(ac.signal)
     let ended = false
     const emit = (event: AgentEvent) => {
       if (event.type === "done" || event.type === "error") ended = true
       send("agent:event", { turnId, event })
     }
-    Promise.resolve()
+    const run = Promise.resolve()
       .then(() =>
         agent.start!(
           { ...turn, root: p.root, ...auth },
           {
             onEvent: emit,
-            onPermission: (request) =>
-              new Promise<PermissionDecision>((resolveDecision) => {
-                pendingPermissions.set(request.id, resolveDecision)
-                ac.signal.addEventListener("abort", () => {
-                  if (pendingPermissions.delete(request.id)) resolveDecision({ behavior: "deny", message: "Turn stopped." })
-                })
-                send("agent:permission", { turnId, request })
-              }),
-            signal: ac.signal,
+            onPermission: (request) => permissions.wait(request.id, signal, () => send("agent:permission", { turnId, request })),
+            signal,
           },
         ),
       )
@@ -418,46 +456,122 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
         // The renderer stops "working…" only on done/error; make sure one arrives.
         if (!ended) emit({ type: "done" })
       })
+    void work.track(run)
     return turnId
   })
   handle("agent:respond", (requestId: string, decision: PermissionDecision) => {
-    const resolveDecision = pendingPermissions.get(requestId)
-    pendingPermissions.delete(requestId)
-    resolveDecision?.(decision)
+    permissions.answer(requestId, decision)
   })
   handle("agent:abort", (turnId: string) => {
     turns.get(turnId)?.abort()
   })
   handle("agent:restore", (ref: string) => restoreCheckpoint(need().root, ref))
 
-  handle("job:start", async (board: string, markId: string) => {
+  /** Jobs run in the background; one that fails before its job file exists (bad mark, no git) is thrown here. */
+  const runJob = async (start: (jobs: JobApi, settings: JobAgentSettings, deps: JobDeps) => Promise<unknown>) => {
     const p = need()
     const jobs = await jobApi()
+    const agent = await loadAgent()
+    const base: RunTurn | undefined = opts.jobDeps?.runTurn ?? agent.start
+    const deps: JobDeps = { ...opts.jobDeps, ...(base ? { runTurn: tracked(base) } : {}) }
     const status = await agentStatus()
     const auth = await turnAuth(status)
     // Watch the jobs folder before the first job file appears in it.
     const jobsDir = join(p.root, ".river", "jobs")
     await mkdir(jobsDir, { recursive: true })
     projectWatch?.add(jobsDir)
-    const run = jobs.startConceptJob({ workspaceRoot: p.root, board, markId, model: status.model, ...auth }, opts.jobDeps)
+    const run = start(jobs, { model: status.model, ...auth }, deps)
     run.catch((err: unknown) => console.warn("river: concept job failed", err))
-    // Once the job exists its errors land in its file; one that fails before that (bad mark, no git) is thrown here.
     await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
-  })
+  }
+  handle("job:start", (board: string, markId: string) => runJob((jobs, settings, deps) => jobs.startConceptJob({ workspaceRoot: need().root, board, markId, ...settings }, deps)))
+  handle("job:revise", (jobId: string) => runJob((jobs, settings, deps) => jobs.reviseJob(need().root, jobId, settings, deps)))
   handle("job:get", async (jobId: string): Promise<JobDTO> => {
     const p = need()
     const job = await loadJob(p.root, jobId)
-    if (job.status !== "approval") return { job }
-    // The committed bytes, hashed as read: the only bytes approveJobScript will run.
-    return { job, script: await (await jobApi()).readJobScript(p.root, jobId) }
+    return { job, revisable: await jobRevisable(p.root, job) }
   })
-  handle("job:approve", async (jobId: string, sha256: string) => {
-    await (await jobApi()).approveJobScript(need().root, jobId, sha256)
+  /**
+   * Approving renders the scripts and then lets the agent look at the renders. During approve only that look runs an
+   * agent turn, so the turn is wrapped here: the canvas shows it, and jobStopLook aborts it. Returns once the job has
+   * started rendering; a refusal (changed bytes) comes before that and is thrown here.
+   */
+  const approve = async (root: string, jobId: string, shas: Record<string, string>) => {
+    const jobs = await jobApi()
+    const agent = await loadAgent()
+    const selfCheck = await lookSettings()
+    const base: RunTurn | undefined = opts.jobDeps?.runTurn ?? (agent.start ? (req, h) => agent.start!(req, h, LOOK_LIMITS) : undefined)
+    const stop = new AbortController()
+    const runTurn: RunTurn | undefined =
+      base &&
+      (async (req, h) => {
+        lookingJobs.set(jobId, stop)
+        jobTouched(jobId)
+        try {
+          await work.track(base(req, { ...h, signal: work.signal(stop.signal) }))
+        } finally {
+          lookingJobs.delete(jobId)
+          jobTouched(jobId)
+        }
+      })
+    const run = jobs.approveJobScripts(root, jobId, shas, { ...opts.jobDeps, selfCheck, ...(runTurn ? { runTurn } : {}) })
+    const settled = run.then(
+      () => undefined,
+      (err: unknown) => console.warn("river: approving the scripts failed", err),
+    )
+    approving.set(jobId, settled)
+    void settled.finally(() => approving.delete(jobId))
+    await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
+  }
+  approvals = registerApproval({
+    parent: getWindow,
+    root: () => project?.root ?? null,
+    async read(root, jobId) {
+      const job = await loadJob(root, jobId)
+      if (job.status !== "approval") throw new Error(`This job is ${job.status} now; there is nothing to run.`)
+      const [scripts, mark] = await Promise.all([(await jobApi()).readJobScripts(root, jobId), loadMark(root, job.board, job.markId).catch(() => undefined)])
+      return {
+        jobId,
+        board: asciiLine(job.board),
+        // Only your own words: a mark can carry an agent's messages too.
+        request: asciiLine(mark?.thread.find((t) => t.by === YOU)?.text ?? "").slice(0, 300),
+        scripts: scripts.map((s) => ({
+          file: s.file,
+          text: s.text,
+          sha256: s.sha256,
+          ...(s.variant ? { variant: s.variant } : {}),
+          ...(s.caption ? { caption: asciiLine(s.caption) } : {}),
+          toRead: linesToRead(s.text),
+        })),
+      }
+    },
+    run: approve,
+    kit: kitFileText,
+    ...(opts.onApprove ? { onApprove: opts.onApprove } : {}),
+    smoke: opts.smoke ?? false,
   })
-  handle("job:accept", async (jobId: string) => {
-    await (await jobApi()).acceptJob(need().root, jobId)
+  handle("job:stopLook", (jobId: string) => {
+    lookingJobs.get(jobId)?.abort()
   })
-  handle("job:dismiss", async (jobId: string) => {
-    await (await jobApi()).dismissJob(need().root, jobId)
+  handle("job:log", async (jobId: string): Promise<string | null> => {
+    try {
+      return await readFile(jobLogFile(need().root, jobId), "utf8")
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null
+      throw err
+    }
+  })
+  handle("job:accept", async (jobId: string, variants?: string[]) => {
+    const p = need()
+    const { board } = await loadJob(p.root, jobId)
+    const options = variants ? (await loadBoard(p.root, board)).cards.filter((c) => c.pending?.jobId === jobId && c.kind === "concept") : []
+    await (await jobApi()).acceptJob(p.root, jobId, variants ? { variants } : {})
+    if (options.length > 1) await closeRowGap(p.root, board, options).catch((err: unknown) => console.warn("river: could not close the row after accepting", err))
+  })
+  handle("job:dismiss", async (jobId: string, reason?: string) => {
+    // Core's dismissJob does not wait for an approve run, whose last write ("answered") could land after "dismissed".
+    lookingJobs.get(jobId)?.abort()
+    await approving.get(jobId)
+    await (await jobApi()).dismissJob(need().root, jobId, typeof reason === "string" ? reason : undefined)
   })
 }

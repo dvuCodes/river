@@ -4,7 +4,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { conceptScriptBytesProblem, lintConceptScript, type RenderConceptRequest } from "@river/adapter-godot"
+import { conceptScriptProblem, lintConceptScript, type RenderConceptRequest } from "@river/adapter-godot"
 import { commitJobFile, ensureBoard, listCheckpoints, listJobs, loadBoard, loadJob, loadMark, saveCard, saveJob, saveMark, type Job, type Mark } from "@river/core"
 import { acceptJob, approveJobScript, dismissJob, readJobScript, recoverJobs, startConceptJob, type JobDeps, type RunTurn } from "../src/jobs"
 import { SYSTEM_PROMPTS } from "../src/prompts"
@@ -73,7 +73,7 @@ function fakeRender(seen: Buffer[] = []): JobDeps["render"] {
 }
 
 const start = (deps: JobDeps) => startConceptJob({ workspaceRoot: game, board: "main", markId: mark.id, model: "claude-sonnet-5-5", backend: "claude-code" }, deps)
-const pending = async (job: Job) => (await loadBoard(game, "main")).cards.find((c) => c.pending?.jobId === job.id)
+const pending = async (job: Job) => (await loadBoard(game, "main")).cards.find((c) => c.pending?.jobId === job.id && c.kind === "concept")
 const branchExists = (job: Job) => git("branch", "--list", `river/job/${job.id}`).trim() !== ""
 
 async function answeredJob(): Promise<Job> {
@@ -114,14 +114,21 @@ describe("concept jobs", { timeout: 120_000 }, () => {
 
     const [turn] = turns
     expect(turn).toMatchObject({ mode: "concept", conceptId: job.id, root: path.join(job.worktree, "game"), backend: "claude-code" })
-    expect(turn!.prompt).toContain("you: make this calmer")
+    expect(turn!.prompt).toContain(`- you: "make this calmer"`)
     expect(turn!.prompt).toMatch(/passage "Pond" \(stories\/park_walk\.twee#pond\): Ducks, edited\./)
-    expect(turn!.prompt).toContain("note: dusk, not night")
+    expect(turn!.prompt).toContain(`note: "dusk, not night"`)
 
     let m = (await loadMark(game, "main", mark.id))!
     expect(m).toMatchObject({ status: "working", jobId: job.id })
     expect(m.thread.at(-1)).toMatchObject({ by: "concept-artist", text: SUMMARY })
-    expect(await pending(job)).toMatchObject({ kind: "concept", ref: job.conceptId, x: 400, y: 30, w: 260, madeBy: "concept-artist", pending: { markId: mark.id, jobId: job.id } })
+    // The answer beside the mark, level with its top: the agent's note, then the drawing; edges mark -> note -> drawing.
+    const answer = (await loadBoard(game, "main")).cards.filter((c) => c.pending?.jobId === job.id)
+    const note = answer.find((c) => c.kind === "note")!
+    expect(note).toMatchObject({ x: 400, y: 30, w: 320, text: SUMMARY, madeBy: "concept-artist", pending: { markId: mark.id, jobId: job.id } })
+    const drawing = answer.find((c) => c.kind === "concept")!
+    expect(drawing).toMatchObject({ ref: job.conceptId, x: 760, y: 30, w: 260, madeBy: "concept-artist", pending: { markId: mark.id, jobId: job.id } })
+    expect(drawing.label).toBeUndefined()
+    expect((await loadBoard(game, "main")).edges.map((e) => [e.from, e.to])).toEqual([[mark.id, note.id], [note.id, drawing.id]])
 
     const script = await readJobScript(game, job.id)
     expect(script).toEqual({ file: `concepts/${job.id}/draw.gd`, text: DRAW, sha256: sha(DRAW) })
@@ -141,9 +148,8 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     expect(accepted.status).toBe("accepted")
     expect(readFileSync(path.join(game, "concepts", job.id, "draw.gd"), "utf8")).toBe(DRAW)
     expect(readFileSync(path.join(game, "concepts", job.id, "concept.png")).equals(FAKE_PNG)).toBe(true)
-    const card = (await loadBoard(game, "main")).cards.find((c) => c.kind === "concept")!
-    expect(card.ref).toBe(job.conceptId)
-    expect(card.pending).toBeUndefined()
+    const settled = (await loadBoard(game, "main")).cards.filter((c) => c.id === note.id || c.id === drawing.id)
+    expect(settled.map((c) => [c.kind, c.pending]).sort()).toEqual([["concept", undefined], ["note", undefined]])
     m = (await loadMark(game, "main", mark.id))!
     expect(m.status).toBe("accepted")
     expect(existsSync(job.worktree)).toBe(false)
@@ -312,6 +318,84 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     await expect(approveJobScript(game, job.id, sha(hidden), { render: fakeRender(rendered), env: { GODOT_BIN: "godot-not-run" } })).rejects.toThrow(/Line 6, column \d+/)
     expect(rendered).toEqual([])
     expect((await loadJob(game, job.id)).status).toBe("approval")
+  })
+
+  it("fails a script that plainly takes the name Kit, and will not show or run a waiting one that does", async () => {
+    const disguised = DRAW + "\tvar Kit = img\n\tKit.fill(Color.RED)\n"
+    const failed = await start({ runTurn: fakeTurn(disguised) })
+    expect(failed.status).toBe("failed")
+    expect(failed.error).toMatch(/Line 6: [\s\S]*Kit/)
+    await dismissJob(game, failed.id)
+
+    const job = await start({ runTurn: fakeTurn(DRAW) })
+    const bytes = Buffer.from(disguised)
+    const headSha = await commitJobFile(game, job.id, `game/concepts/${job.id}/draw.gd`, bytes, "river: concept from a crafted job")
+    await saveJob(game, { ...job, headSha, scripts: [{ file: job.scripts![0]!.file, sha256: sha(bytes), approved: false }] })
+    const rendered: Buffer[] = []
+    await expect(readJobScript(game, job.id)).rejects.toThrow(/Line 6: [\s\S]*Kit/)
+    await expect(approveJobScript(game, job.id, sha(bytes), { render: fakeRender(rendered), env: { GODOT_BIN: "godot-not-run" } })).rejects.toThrow(/Line 6: [\s\S]*Kit/)
+    expect(rendered).toEqual([])
+    expect((await loadJob(game, job.id)).status).toBe("approval")
+  })
+
+  it("a script the refusals miss waits for the user's approval, and only its exact bytes render", async () => {
+    const missed = [
+      DRAW + "\tvar tools = {}\n\tvar sun = [tools.  # the sun\n\t\tKit.glow(img, Vector2(180, 60), 40.0, Color.YELLOW)]\n",
+      DRAW + '\tvar o = OS\n\to.execute("cmd", ["/c", "echo"])\n\t["C:/x.png"].map(img.get("sa" + "ve_png"))\n',
+    ]
+    for (const script of missed) {
+      expect(conceptScriptProblem(Buffer.from(script))).toBeUndefined()
+      expect(lintConceptScript(script)).toEqual([])
+      const rendered: Buffer[] = []
+      const job = await start({ runTurn: fakeTurn(script), render: fakeRender(rendered) })
+      expect(job.status).toBe("approval")
+      expect(rendered).toEqual([])
+      await expect(approveJobScript(game, job.id, sha(DRAW), { render: fakeRender(rendered), env: { GODOT_BIN: "godot-not-run" } })).rejects.toThrow(/refused/)
+      expect(rendered).toEqual([])
+      expect((await loadJob(game, job.id)).status).toBe("approval")
+      const answered = await approveJobScript(game, job.id, sha(script), { render: fakeRender(rendered), env: { GODOT_BIN: "godot-not-run" } })
+      expect(answered.status).toBe("answered")
+      expect(rendered.map((b) => b.toString("utf8"))).toEqual([script])
+      await dismissJob(game, job.id)
+    }
+  })
+
+  it("accepts nothing from a crafted job commit whose tree names paths out of the concept folder", async () => {
+    const job = await answeredJob()
+    const object = (type: string, input: Buffer) =>
+      execFileSync("git", ["hash-object", "-t", type, "--literally", "-w", "--stdin"], { cwd: top, input }).toString().trim()
+    const tree = (entries: [mode: string, name: string, sha: string][]) =>
+      object("tree", Buffer.concat(entries.flatMap(([mode, name, id]) => [Buffer.from(`${mode} ${name}\0`), Buffer.from(id, "hex")])))
+    const escaped = `escaped-${job.id}.txt`
+    const blob = object("blob", Buffer.from("written by Accept\n"))
+    let nested = tree([["100644", escaped, blob]])
+    for (let i = 0; i < 5; i++) nested = tree([["40000", "..", nested]])
+    const png = tree([
+      ["40000", "..", nested],
+      ["100644", `..\\..\\..\\..\\..\\${escaped}`, blob],
+    ])
+    const folder = tree([
+      ["40000", "concept.png", png],
+      ["100644", "draw.gd", object("blob", Buffer.from(DRAW))],
+    ])
+    const root = tree([["40000", "game", tree([["40000", "concepts", tree([["40000", job.id, folder]])]])]])
+    const crafted = git("commit-tree", root, "-m", "crafted").trim()
+    await saveJob(game, { ...job, headSha: crafted })
+
+    await expect(acceptJob(game, job.id)).rejects.toThrow(/refused/)
+    for (const dir of [top, path.dirname(top), path.dirname(path.dirname(top))]) expect(existsSync(path.join(dir, escaped)), dir).toBe(false)
+    expect(existsSync(path.join(game, "concepts", job.id))).toBe(false)
+    expect((await loadJob(game, job.id)).status).toBe("answered")
+  })
+
+  it("accepts nothing for a job file whose script path is not its own concept folder's", async () => {
+    const job = await answeredJob()
+    const record = job.scripts![0]!
+    for (const file of ["concepts/elsewhere/draw.gd", `concepts/${job.id}/../${job.id}/draw.gd`, `concepts/${job.id}/draw_a.gd`]) {
+      await saveJob(game, { ...job, scripts: [{ ...record, file }] })
+      await expect(acceptJob(game, job.id), file).rejects.toThrow(/refused|cannot/)
+    }
+    expect(existsSync(path.join(game, "concepts"))).toBe(false)
   })
 
   it("keeps working after the repo folder moves: approve and accept from the new place", async () => {
@@ -495,6 +579,6 @@ describe("concept prompt", () => {
     const example = prompt.slice(prompt.indexOf("  extends RefCounted"), prompt.indexOf("\n\n- ")).split("\n").map((l) => l.replace(/^ {2}/, "")).join("\n")
     expect(example).toContain("func draw(img: Image) -> void:")
     expect(lintConceptScript(example)).toEqual([])
-    expect(conceptScriptBytesProblem(Buffer.from(example))).toBeUndefined()
+    expect(conceptScriptProblem(Buffer.from(example))).toBeUndefined()
   })
 })

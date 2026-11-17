@@ -2,7 +2,7 @@
 /**
  * river-mcp: the River MCP server over stdio.
  *
- *   river-mcp --root <game repo> [--tools a,b,c] [--approval-pipe <name>] [--concept <id>]
+ *   river-mcp --root <game repo> [--tools a,b,c] [--author <role>] [--approval-pipe <name>] [--concept <id>]
  *
  * stdout carries MCP messages only; everything else goes to stderr.
  */
@@ -10,11 +10,13 @@ import { parseArgs } from "node:util"
 import { RIVER_TOOL_NAMES } from "./tools"
 import { startServer } from "./server"
 
-const USAGE = `river-mcp --root <dir> [--tools name,name,...] [--approval-pipe <name>] [--concept <id>]
+const USAGE = `river-mcp --root <dir> [--tools name,name,...] [--author <role>] [--approval-pipe <name>] [--concept <id>]
 
   --root   the game repo (the folder with river.json). Required.
   --tools  only serve these tools. Default: all.
            ${RIVER_TOOL_NAMES.join(", ")}
+  --author who the board and review writes are from (madeBy, the thread
+           message's by). Default "agent"; Claude Code uses "claude-code".
   --approval-pipe  also serve approval_prompt (the Claude Code permission prompt
            tool), answered by the River agent host on this local pipe/socket.
   --concept  serve concept_write for this concept job; it writes only in
@@ -30,6 +32,7 @@ async function main(): Promise<number> {
       options: {
         root: { type: "string" },
         tools: { type: "string" },
+        author: { type: "string" },
         "approval-pipe": { type: "string" },
         concept: { type: "string" },
         help: { type: "boolean", short: "h" },
@@ -52,6 +55,7 @@ async function main(): Promise<number> {
     await startServer({
       root: values.root,
       ...(tools ? { tools } : {}),
+      ...(values.author ? { author: values.author } : {}),
       ...(values["approval-pipe"] ? { approvalPipe: values["approval-pipe"] } : {}),
       ...(values.concept !== undefined ? { conceptId: values.concept } : {}),
     })

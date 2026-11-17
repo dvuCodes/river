@@ -9,6 +9,20 @@ import type { RiverTool, RiverToolsOptions } from "./tools"
 export const SERVER_NAME = "river"
 export const SERVER_VERSION = "0.1.0"
 
+/** What Claude Code and other clients put in the model's context about this server. Kept short: clients may clip it. */
+export const SERVER_INSTRUCTIONS = `River is the user's storyboard for a narrative game. The user draws marks (requests) on the board; you answer them beside the mark.
+
+The loop for each request:
+1. marks_open: the requests nobody is working on.
+2. mark_claim the one you take, so no other agent does it too.
+3. Read its context: mark_read (the full thread and the cards it is on), story_read, brief_read.
+4. Answer with board_add_note answers: <markId>, then any images with board_add_card answers: <markId>. River places them beside the mark and draws the arrows.
+5. mark_reply with status "answered" (or "dismissed" with the reason, or "open" to give it back).
+
+When the request asks to draw, show or picture something, call concept_request: River's concept artist draws options and the user approves them in River. Do not answer it with words or images of your own.
+
+card_view shows an image card; card_read and mark_read show text that board_read clips.`
+
 export interface ServerOptions extends RiverToolsOptions {
   /** Only register these tools. Default: all of them. */
   tools?: readonly string[]
@@ -48,13 +62,13 @@ export function selectTools(all: RiverTool[], names?: readonly string[]): RiverT
   const unknown = names.filter((n) => !(RIVER_TOOL_NAMES as readonly string[]).includes(n))
   if (unknown.length > 0) throw new Error(`unknown tools: ${unknown.join(", ")}. Known: ${RIVER_TOOL_NAMES.join(", ")}`)
   const unavailable = names.filter((n) => !all.some((t) => t.name === n))
-  if (unavailable.length > 0) throw new Error(`tools not available on this server: ${unavailable.join(", ")} (concept_write needs --concept <id>)`)
+  if (unavailable.length > 0) throw new Error(`tools not available on this server: ${unavailable.join(", ")} (concept_write needs --concept <id>; a --concept server has no concept_request)`)
   return all.filter((t) => names.includes(t.name))
 }
 
 /** An MCP server named "river" with the River tools registered. Errors become isError results. */
 export function createServer(project: Project, opts: ServerOptions = {}): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION })
+  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS })
   for (const tool of selectTools(createRiverTools(project, opts), opts.tools)) {
     server.registerTool(
       tool.name,
@@ -66,13 +80,9 @@ export function createServer(project: Project, opts: ServerOptions = {}): McpSer
       async (input: unknown) => {
         try {
           const result = await tool.handler(input)
-          const content = [{ type: "text" as const, text: result.text }]
-          // Plain-object data also goes out as structuredContent (plan ids, capture files, diffs).
-          const data = result.data
-          if (data !== null && typeof data === "object" && !Array.isArray(data)) {
-            return { content, structuredContent: data as Record<string, unknown> }
-          }
-          return { content }
+          // Text only, no structuredContent: Claude Code gives the model that JSON instead of the text, and it is several times longer.
+          const images = (result.images ?? []).map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType }))
+          return { content: [{ type: "text" as const, text: result.text }, ...images] }
         } catch (e) {
           return { content: [{ type: "text" as const, text: `Error: ${(e as Error).message}` }], isError: true }
         }

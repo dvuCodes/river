@@ -14,6 +14,7 @@ import type {
 import type {
   Card,
   ChangePlan,
+  Edge,
   Job,
   Mark,
   Diagnostic,
@@ -27,9 +28,15 @@ import type {
 export type ViewId = "story-map" | "paths" | "playtest" | "canvas" | "frames" | "agent"
 export const VIEWS: readonly ViewId[] = ["story-map", "paths", "playtest", "canvas", "frames", "agent"]
 
+/** The canvas's look: paper (the default), dark, or whatever the OS uses. The rest of the app follows the OS. */
+export type CanvasTheme = "paper" | "dark" | "system"
+export const CANVAS_THEMES: readonly CanvasTheme[] = ["paper", "dark", "system"]
+
 export interface ProjectInfo {
   root: string
   name: string
+  /** The board to open: the one last open in this project if it still exists, else "main" or the first board. */
+  board: string
   engine: string
   stories: string[]
   shots: ShotDef[]
@@ -129,6 +136,8 @@ export interface AgentStatus {
   backendChosen: boolean
   model: AgentModel
   claudePath?: string
+  /** After Godot renders a job's scripts, one more short turn looks at the pictures and may rewrite the note and captions. */
+  selfCheck: boolean
   /** Only installed / version / loggedIn / authMethod / subscriptionType. Null while unknown. */
   claudeCode: ClaudeCodeStatus | null
 }
@@ -138,6 +147,7 @@ export interface AgentPrefsUpdate {
   model?: AgentModel
   /** Empty string clears it (use PATH). */
   claudePath?: string
+  selfCheck?: boolean
 }
 
 export interface AgentStartRequest {
@@ -152,49 +162,88 @@ export interface AgentStartRequest {
   sessionId?: string
 }
 
+/** Pixel size of an image, read from its header so the card has its final height before the image loads. */
+export interface ImageSize {
+  w: number
+  h: number
+}
+
 /** What a card shows, resolved by main (the renderer cannot read stories or captures itself). */
 export type CardView =
-  | { kind: "frame"; shotId: string; rev?: string; url?: string; missing?: string }
+  | { kind: "frame"; shotId: string; rev?: string; frame?: number; url?: string; size?: ImageSize; missing?: string }
   | { kind: "passage"; story: string; passageId: string; title: string; tags: string[]; lines: string[]; missing?: string }
-  | { kind: "ref"; url: string }
+  | { kind: "ref"; url: string; size?: ImageSize }
   | {
       kind: "concept"
       id: string
-      /** Pending card: the job's render. Accepted card: concepts/<id>/concept.png. Absent until the file exists. */
+      /**
+       * Pending card: the job's render (.river/jobs/<job>/render_<variant>.png, or render.png without a variant).
+       * Accepted card: concepts/<id>/concept_<variant>.png (or concept.png). Absent until the file exists.
+       */
       url?: string
+      size?: ImageSize
       /** Only on a pending card. */
       job?: ConceptJob
       /** The pending card's job file could not be read. */
       missing?: string
     }
-  | { kind: "note" }
+  /** A pending note is a job's answer note: it carries the job, for the answer's actions. */
+  | { kind: "note"; job?: ConceptJob }
 
-export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error">
-
-/** A job and, while it waits for approval, the exact script bytes it wants to run. */
-export interface JobDTO {
-  job: Job
-  /** sha256 of exactly these bytes: approving sends it back, so only the shown script can run. */
-  script?: { file: string; sha256: string; text: string }
+export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error" | "scripts"> & {
+  /** The user replied on the mark since this answer, or the job failed: it can be revised. */
+  revisable: boolean
+  /** The agent is looking at the renders this app approved (the job is still "rendering"); jobStopLook ends it. */
+  looking?: boolean
+  /** The job has a runner log, .river/logs/<job>.log (jobs started outside the app by concept_request). */
+  log?: boolean
 }
 
+export interface JobDTO {
+  job: Job
+  revisable: boolean
+}
+
+/**
+ * A card as River writes it. Frame cards in a strip also name their capture (its `at`) and frame index, since a rev
+ * can have several captures and a capture several frames. Core's Card does not declare these two fields yet.
+ */
+export type BoardCard = Card & { capture?: string; frame?: number }
+
 export interface CardDTO {
-  card: Card
+  card: BoardCard
   view: CardView
+}
+
+/** Frames of one capture to put on a board as a row joined by connectors. */
+export interface FrameStrip {
+  shotId: string
+  /** The capture's `at`. */
+  capture: string
+  /** Frame indices, in the order they go on the board. */
+  frames: number[]
 }
 
 export interface BoardDTO {
   name: string
   cards: CardDTO[]
   marks: Mark[]
+  edges: Edge[]
   /** Count of marks with status "open" (core openMarks). */
   openMarks: number
   /** Files that did not parse, as "<path>: <message>". */
   errors: string[]
 }
 
-export type NewCard = Omit<Card, "id" | "createdAt"> & Partial<Pick<Card, "id" | "createdAt">>
+export type NewCard = Omit<BoardCard, "id" | "createdAt"> & Partial<Pick<BoardCard, "id" | "createdAt">>
 export type NewMark = Omit<Mark, "id" | "createdAt" | "status"> & Partial<Pick<Mark, "id" | "createdAt" | "status">>
+export type NewEdge = Omit<Edge, "id" | "createdAt"> & Partial<Pick<Edge, "id" | "createdAt">>
+
+/** An image the user picked, pasted or dropped, held by main until the licence form adds it as a card. */
+export interface StagedImage {
+  token: string
+  fileName: string
+}
 
 export type FsChangeKind = "story" | "state" | "manifest" | "review" | "plans" | "board" | "job"
 export interface FsChange {
@@ -228,31 +277,65 @@ export interface RiverApi {
   setThreadStatus(threadId: string, status: ReviewStatus): Promise<ReviewThread>
   setPlanStatus(planId: string, status: ChangePlan["status"]): Promise<ChangePlan>
   // storyboard canvas
+  /** Board folder names under .river/boards. */
+  boardList(): Promise<string[]>
   /** Open (and on first use create) a board; its folder is watched from then on. */
   boardOpen(name: string): Promise<BoardDTO>
-  /** One card or mark as it is on disk now; null when it was deleted. */
+  /** One card, mark or edge as it is on disk now; null when it was deleted. */
   boardCard(name: string, cardId: string): Promise<CardDTO | null>
   boardMark(name: string, markId: string): Promise<Mark | null>
+  boardEdge(name: string, edgeId: string): Promise<Edge | null>
+  boardSaveEdge(name: string, edge: NewEdge): Promise<Edge>
+  boardDeleteEdge(name: string, edgeId: string): Promise<void>
   boardSaveCard(name: string, card: NewCard): Promise<CardDTO>
   boardDeleteCard(name: string, cardId: string): Promise<void>
-  /** Saves the mark; returns it with the board's open mark count. */
+  /**
+   * Saves a mark under its lock. A new mark is written whole; for one already on disk only its shape, path, breaks and
+   * anchors come from `mark`, and its thread, status, job and claim stay as an agent may have just written them.
+   * Returns the mark as saved, with the board's open mark count.
+   */
   boardSaveMark(name: string, mark: NewMark): Promise<{ mark: Mark; openMarks: number }>
   boardDeleteMark(name: string, markId: string): Promise<number>
+  /** Add your message to a mark's thread (core replyToMark); returns it with the open mark count. */
+  boardReply(name: string, markId: string, text: string): Promise<{ mark: Mark; openMarks: number }>
+  /** Close a mark that follows no job: dismissed (`text` says why) or accepted as resolved. `text` joins the thread when not empty. */
+  boardCloseMark(name: string, markId: string, status: "dismissed" | "accepted", text: string): Promise<{ mark: Mark; openMarks: number }>
   boardOpenCount(name: string): Promise<number>
+  /** Rename a board's folder (and the jobs that point at it). Refused while one of its jobs is still working. */
+  boardRename(from: string, to: string): Promise<void>
+  /** Move a board's folder to the OS trash. Refused for the last board, or while one of its jobs is still working. Returns the boards left. */
+  boardDelete(name: string): Promise<string[]>
+  /** Frame cards for `strip.frames`, captioned, in a row at a free spot, each joined to the next by a connector. */
+  boardAddFrames(name: string, strip: FrameStrip): Promise<CardDTO[]>
   /** Add a passage ("<story>#<id>") or frame (shot id) card at the next free spot. */
   boardPin(name: string, pin: { kind: "passage" | "frame"; ref: string; rev?: string }): Promise<CardDTO>
   /** Pick an image file to import; null when cancelled. */
-  boardPickImage(): Promise<{ token: string; fileName: string } | null>
-  /** Copy the picked image into .river/refs/<hash>.<ext> and add a ref card. */
+  boardPickImage(): Promise<StagedImage | null>
+  /** Hold a pasted or dropped image's bytes for boardAddRef. `fileName` gives the type (its extension). */
+  boardStageImage(bytes: Uint8Array, fileName: string): Promise<StagedImage>
+  /** Copy the staged image into .river/refs/<hash>.<ext> and add a ref card. */
   boardAddRef(name: string, token: string, source: { title?: string; url?: string; licence: string }, at: { x: number; y: number }): Promise<CardDTO>
   // concept jobs
   /** Ask the concept artist about a mark. Runs in the background; progress shows on the mark and its concept card. */
   jobStart(board: string, markId: string): Promise<void>
   jobGet(jobId: string): Promise<JobDTO>
-  /** Run the script whose bytes hash to `sha256` (from jobGet) and render it. */
-  jobApprove(jobId: string, sha256: string): Promise<void>
-  jobAccept(jobId: string): Promise<void>
-  jobDismiss(jobId: string): Promise<void>
+  /** Open the approval window for a job waiting for approval: main reads its scripts and shows them there. */
+  jobReview(jobId: string): Promise<void>
+  /**
+   * Always refused: main runs a job's scripts only on a Run from the approval window. River's window keeps the call so
+   * the refusal is checked through the same channel the approval window uses.
+   */
+  jobApprove(jobId: string, shas: Record<string, string>): Promise<void>
+  /** Keep the rendered options `variants` ("a".."e"), or all of them. */
+  jobAccept(jobId: string, variants?: string[]): Promise<void>
+  /** `reason`, when given, goes into the project brief so later answers avoid it. */
+  jobDismiss(jobId: string, reason?: string): Promise<void>
+  /** A new job revising this answer after the user's replies on the mark. Runs in the background like jobStart. */
+  jobRevise(jobId: string): Promise<void>
+  /** End the agent's look at the renders; the job is answered with its note as first written. */
+  jobStopLook(jobId: string): Promise<void>
+  /** The runner's output for a job started outside the app (.river/logs/<job>.log); null when there is none. */
+  jobLog(jobId: string): Promise<string | null>
   // agent
   agentStatus(): Promise<AgentStatus>
   agentStart(req: AgentStartRequest): Promise<string>
@@ -262,6 +345,8 @@ export interface RiverApi {
   setApiKey(key: string): Promise<AgentStatus>
   clearApiKey(): Promise<AgentStatus>
   setAgentPrefs(p: AgentPrefsUpdate): Promise<AgentStatus>
+  canvasTheme(): Promise<CanvasTheme>
+  setCanvasTheme(t: CanvasTheme): Promise<void>
   /** Re-run `claude auth status` (on window focus, or the Refresh button). */
   refreshAgentStatus(): Promise<AgentStatus>
   /** Open a new terminal window running `claude auth login`. */

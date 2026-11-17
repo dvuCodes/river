@@ -1,9 +1,15 @@
 import { lint } from "../lint/lint"
-import { contentPassages, resolveTarget, startPassage } from "../story/model"
+import { choiceTarget, contentPassages, isInterrupt, startPassage } from "../story/model"
 import { findLinks } from "../story/passage"
+import { RETURN_TARGET } from "../story/types"
 import type { Cond, Effect, StateSchema, Story } from "../story/types"
 
-/** What a game engine loads. Version 1. Engines never parse Twee. */
+/**
+ * What a game engine loads. Version 1. Engines never parse Twee. A choice is open when its `when` holds, the
+ * player can pay every `cost` (a cost of -n on a variable needs it at n or more), and the target's `when` holds
+ * after `cost` then `set`. Effects with op "mul" multiply (`/= 4` is mul 0.25); numbers clamp to the `state`
+ * range and int variables drop the fraction. A variable with `engine: true` is one the game moves itself.
+ */
 export interface ExportedStory {
   schema: 1
   id: string
@@ -17,9 +23,12 @@ export interface ExportedStory {
     when?: Cond
     onEnter: Effect[]
     ending: boolean
+    /** True for a passage tagged `interrupt`: the game may enter it from any passage while its `when` holds. */
+    interrupt?: true
     /** Prose without rule lines and without link lines. */
     text: string
-    choices: { label: string; to: string; cost: Effect[]; set: Effect[]; when?: Cond }[]
+    /** `to` is a passage id, or "@return": go back to the passage the running interrupt started from. */
+    choices: { label: string; to: string; cost: Effect[]; set: Effect[]; when?: Cond; hint?: string }[]
   }>
 }
 
@@ -63,14 +72,20 @@ export function exportStory(story: Story, schema: StateSchema, id: string): Expo
       ...(p.when ? { when: p.when } : {}),
       onEnter: p.onEnter,
       ending: p.isEnding,
+      ...(isInterrupt(p) ? { interrupt: true as const } : {}),
       text: proseText(p.text),
-      choices: p.choices.map((c) => ({
-        label: c.label,
-        to: resolveTarget(story, c.target)!.id,
-        cost: c.cost,
-        set: c.set,
-        ...(c.when ? { when: c.when } : {}),
-      })),
+      choices: p.choices.map((c) => {
+        const to = choiceTarget(story, c.target)
+        return {
+          label: c.label,
+          // lint has no errors, so every target exists.
+          to: to.kind === "passage" ? to.passage.id : RETURN_TARGET,
+          cost: c.cost,
+          set: c.set,
+          ...(c.when ? { when: c.when } : {}),
+          ...(c.hint !== undefined ? { hint: c.hint } : {}),
+        }
+      }),
     }
   }
   return { schema: 1, id, title: story.title, start: start.id, state: schema, passages }

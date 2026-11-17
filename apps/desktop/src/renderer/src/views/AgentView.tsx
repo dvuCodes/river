@@ -348,7 +348,7 @@ export function AgentView(props: {
                       )}
                       {it.state === "confirm" && (
                         <span className="cp-confirm">
-                          Restore the game files to before this turn?
+                          Restore the game files to before this turn? River's own review threads, plans and boards (.river/) are kept.
                           <button className="btn" onClick={() => session.setCheckpoint(i, { state: "idle" })}>
                             Cancel
                           </button>

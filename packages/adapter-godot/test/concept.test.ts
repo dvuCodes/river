@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { afterAll, describe, expect, it } from "vitest"
-import { conceptScriptBytesProblem, lintConceptScript, renderConcept } from "../src/index"
+import { conceptScriptProblem, lintConceptScript, linesToRead, renderConcept } from "../src/index"
 
 const DRAW = `extends RefCounted
 
@@ -31,12 +31,18 @@ describe("lintConceptScript", () => {
     const cases: [string, string][] = [
       ["static var cache = 1", "static"],
       ["const P = preload(\"res://x.gd\")", "preload"],
-      ["var r = load(\"res://x.tres\")", "load("],
+      ["var r = load(\"res://x.tres\")", "load"],
+      ["\tvar i = Image.load_from_file(\"C:/x.png\")", "load"],
+      ["\timg.load_png_from_buffer(PackedByteArray())", "load"],
+      ["\timg.save_png(\"C:/x.png\")", "save"],
+      ["\timg.save_exr(\"C:/x.exr\")", "save"],
+      ["\tvar f = img.save_webp", "save"],
+      ["\tvar c := Callable(img, \"fill\")", "Callable"],
       ["\tOS.execute(\"cmd\", [])", "OS."],
       ["\tvar f = FileAccess.open(\"user://x\", FileAccess.WRITE)", "FileAccess"],
       ["\tDirAccess.remove_absolute(\"x\")", "DirAccess"],
       ["\tResourceLoader.exists(\"x\")", "ResourceLoader"],
-      ["\tResourceSaver.save(null, \"x\")", "ResourceSaver"],
+      ["\tResourceSaver.get_recognized_extensions(null)", "ResourceSaver"],
       ["\tProjectSettings.get_setting(\"x\")", "ProjectSettings"],
       ["\tEngine.get_main_loop()", "Engine."],
       ["\tClassDB.instantiate(\"Node\")", "ClassDB"],
@@ -59,7 +65,7 @@ describe("lintConceptScript", () => {
   })
 
   it("does not flag words that only contain a token", () => {
-    expect(lintConceptScript(DRAW + "\tvar is_static_sky = true\n\tvar reload_count = 0\n\tvar recall = 1\n")).toEqual([])
+    expect(lintConceptScript(DRAW + "\tvar is_static_sky = true\n\tvar reload_count = 0\n\tvar recall = 1\n\tvar saved = 1\n\tvar unloaded = 0\n")).toEqual([])
   })
 
   it("names the ways to build and run a script at runtime, and reflection", () => {
@@ -87,13 +93,206 @@ describe("lintConceptScript", () => {
   })
 })
 
-describe("conceptScriptBytesProblem", () => {
+/** Scripts from the PR review that each give a name of their own the name Kit, so a line that reads as a Kit call runs the agent's code. */
+const kitDisguises = (marker: string): [string, string][] => [
+  ["a local var", `${DRAW}\tvar Kit = img\n\tKit.save_png("${marker}")\n`],
+  ["a member var", `extends RefCounted\n\nvar Kit\n\nfunc draw(img: Image) -> void:\n\timg.fill(Color.RED)\n\tKit = img\n\tKit.save_png("${marker}")\n`],
+  ["a loop variable", `${DRAW}\tfor Kit in [img]:\n\t\tKit.save_png("${marker}")\n`],
+  ["a const", `${DRAW}\tvar n := 1\n\nconst Kit = 3\n`],
+  ["an enum", `${DRAW}\tvar n := 1\n\nenum Kit { A }\n`],
+]
+
+describe("the name Kit", () => {
+  const kitProblem = (text: string) => lintConceptScript(text).find((p) => p.includes("Kit"))
+
+  it("refuses the review's disguises, and every other declaration or binding named Kit, in any case", () => {
+    for (const [name, script] of kitDisguises("C:/x.png")) expect(kitProblem(script), name).toMatch(/^Line \d+: /)
+    const cases: [string, string][] = [
+      ["a parameter", "\nfunc paint(Kit: Image) -> void:\n\tpass\n"],
+      ["a signal parameter", "\nsignal moved(Kit)\n"],
+      ["an inner class", "\nclass Kit:\n\tvar a := 1\n"],
+      ["a match binding", "\tmatch 1:\n\t\tvar Kit:\n\t\t\tpass\n"],
+      ["a lambda parameter", "\tvar f := func(Kit): return 1\n"],
+      ["a lower-case local", "\tvar kit = img\n"],
+      ["an upper-case local", "\tvar KIT = img\n"],
+      ["a member of something else", "\tvar d := {}\n\td.Kit.rect(img, Rect2i(0, 0, 1, 1), Color.RED)\n"],
+      ["space before the dot", "\tKit .rect(img, Rect2i(0, 0, 1, 1), Color.RED)\n"],
+      ["a line continuation", "\tKit.\\\n\t\trect(img, Rect2i(0, 0, 1, 1), Color.RED)\n"],
+      ["an Image method", '\tKit.save_png("C:/x.png")\n'],
+      ["a private Kit helper", "\tvar h = Kit._hash(1, 2, 3)\n"],
+      ["a Kit function not called", "\tvar e = Kit.ellipse\n"],
+      ["a comment", "\t# Kit draws the sky\n"],
+      ["a string", '\tprint("Kit")\n'],
+    ]
+    for (const [name, text] of cases) expect(kitProblem(DRAW + text), name).toMatch(/^Line (9|10): /)
+  })
+
+  it("passes Kit calls written Kit.name(...), and names that only contain the word", () => {
+    expect(lintConceptScript(DRAW + "\tKit.rect(img, Rect2i(0, 0, 4, 4), Color.RED)\n\tvar l := Kit.image(4, 4)\n\tvar kit_size := 4\n\tvar toolkit := 1\n")).toEqual([])
+  })
+
+  it("refuses before Godot starts: no process is launched for such a script", async () => {
+    const [, script] = kitDisguises("C:/x.png")[0]!
+    const png = path.join(out, "never.png")
+    await expect(renderConcept({ bin: path.join(out, "no-such-godot.exe"), script, outPng: png })).rejects.toThrow(/refused to render: Line 9: [\s\S]*Kit/)
+    expect(existsSync(png)).toBe(false)
+  })
+})
+
+/**
+ * Scripts from the second PR review that pass every refusal and, in real Godot, wrote a file. The text rules
+ * cannot prove what GDScript does, so River does not claim they do: the user's approval of the exact bytes is
+ * the gate (see "a script the refusals miss" in the agent's jobs tests).
+ */
+const MISSED: [string, string][] = [
+  [
+    "a comment between a member dot and Kit",
+    `extends RefCounted
+
+class Brush:
+	var canvas: Image
+	func glow(a, b, c, d) -> void:
+		["C:/x.png"].map(canvas.get("sa" + "ve_png"))
+
+func draw(img: Image) -> void:
+	var tools = {}
+	tools["K" + "it"] = Brush.new()
+	tools.values()[0].canvas = img
+	Kit.vgradient(img, Rect2i(0, 0, 256, 256), Color.BLUE, Color.ORANGE)
+	var sun = [tools.  # the sun
+		Kit.glow(img, Vector2(180, 60), 40.0, Color.YELLOW)]
+`,
+  ],
+  [
+    "OS through a variable, and save_png by a built name",
+    `extends RefCounted
+
+func draw(img: Image) -> void:
+	img.fill(Color.RED)
+	var o = OS
+	o.execute("cmd", ["/c", "echo"])
+	["C:/x.png"].map(img.get("sa" + "ve_png"))
+`,
+  ],
+]
+
+describe("what the refusals do not catch", () => {
+  it("passes the review's bypasses: the byte rule, the Kit rule and the lint are a refusal list, not a proof", () => {
+    for (const [name, script] of MISSED) {
+      expect(conceptScriptProblem(Buffer.from(script)), name).toBeUndefined()
+      expect(lintConceptScript(script), name).toEqual([])
+    }
+  })
+})
+
+describe("linesToRead", () => {
+  const marked = (text: string) => linesToRead(text).map((l) => l.line)
+
+  it("marks the bypasses' lines that reach past the image", () => {
+    const [split, alias] = MISSED.map(([, s]) => linesToRead(s))
+    expect(split!.map((l) => l.line)).toEqual([3, 6, 10, 11, 13])
+    expect(split!.find((l) => l.line === 13)!.reason).toBe("continues on the next line")
+    expect(alias!.map((l) => [l.line, l.reason])).toEqual([
+      [5, "uses OS"],
+      [6, "uses execute"],
+      [7, "uses map, get"],
+    ])
+  })
+
+  it("leaves a drawing made of Kit calls, the Image API, math and its own names unmarked", () => {
+    const park = `${DRAW}	var w := img.get_width()
+	var ink := Color("#1b1626")
+	var r := Kit.rng(7)
+	Kit.vgradient(img, Rect2i(0, 0, w, 180), Color("#2e2a5c"), Color.ORANGE) # sky
+	for i in range(4):
+		Kit.ellipse(img, Vector2(40 + i * 60, r.randf_range(50, 90)), Vector2(46, 4), Color("#e88a7a", 0.45))
+	Kit.polygon(img, [Vector2(120, 186), Vector2(150, 186),
+		Vector2(230, 256), Vector2(40, 256)], ink.lightened(0.2))
+	Kit.person(img, Vector2(118, 236), 46, ink)
+	Kit.stamp(img, [".a.", "aba"], {"a": "#3d7a4a", "b": Color.BROWN}, Vector2i(60, 2), 4)
+	img.set_pixel(clampi(w - 1, 0, 255), 0, Color(1, 1, 1).lerp(Color.RED, 0.5))
+	var fog := 1e-3 * sin(PI / 4.0)
+`
+    expect(linesToRead(park)).toEqual([])
+  })
+
+  it("marks other names, members outside the Image API and the Kit, and a string that does not close", () => {
+    expect(marked(`${DRAW}\tvar d = self.get("x")\n`)).toEqual([9])
+    expect(marked(`${DRAW}\tKit.no_such(img)\n`)).toEqual([9])
+    expect(marked(`${DRAW}\tvar t = Time.get_ticks_msec()\n`)).toEqual([9])
+    expect(linesToRead(`${DRAW}\tvar s = "a\\\nb"\n\tvar o = OS\n`).at(-1)).toEqual({ line: 11, reason: "uses OS" })
+    expect(marked(`@tool\n${DRAW}`)).toEqual([1])
+  })
+
+  it("follows a string across lines as Godot does, and marks every line a string spans", () => {
+    // Godot keeps a "…" string open across a newline, escaped or not; the line it runs onto is code to Godot only after the quote.
+    expect(linesToRead(`${DRAW}\tvar s = "a\n\timg.fill(Color.RED)\n`)).toEqual([
+      { line: 9, reason: "has a string that goes on to the next line" },
+      { line: 10, reason: "starts inside the string from line 9" },
+      { line: 11, reason: "starts inside the string from line 9" },
+    ])
+    expect(linesToRead(`${DRAW}\tvar s = """\nOS\n"""\n`)).toEqual([
+      { line: 9, reason: "has a string that goes on to the next line" },
+      { line: 10, reason: "starts inside the string from line 9" },
+      { line: 11, reason: "starts inside the string from line 9" },
+    ])
+    expect(marked(`${DRAW}\tvar s = 'a\\'b' # it's\n\tvar t = """x\\"""" + str(s)\n`)).toEqual([10])
+    // In a raw string too, a backslash keeps the quote after it from closing the string.
+    expect(linesToRead(`${DRAW}\tvar s = r"\\" + OS.get_name()\n`)).toEqual([
+      { line: 9, reason: "has a string that goes on to the next line" },
+      { line: 10, reason: "starts inside the string from line 9" },
+    ])
+    expect(marked(`${DRAW}\tvar n = &"name"\n\tvar r = r"raw"\n`)).toEqual([])
+    expect(linesToRead(`${DRAW}\tvar p = ^"Node/Path"\n`)).toEqual([{ line: 9, reason: "has an annotation or a node path" }])
+  })
+
+  it("marks a line of code whatever the quotes, comments and backslashes above it", () => {
+    // Whether the lines above leave it in code or inside a string, the line is marked, by its name or by the string.
+    const pieces = ['"', "'", "\\", "\n", "#", "a", " ", "\t", ".", "(", '"""', "'''", "r", "&", "^", "img"]
+    let seed = 7
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31
+    for (let n = 0; n < 20_000; n++) {
+      const above = Array.from({ length: Math.floor(next() * 30) }, () => pieces[Math.floor(next() * pieces.length)]).join("")
+      const line = above.split("\n").length + 1
+      expect(marked(`${above}\nOS.execute("x", [])\n`), JSON.stringify(above)).toContain(line)
+    }
+  })
+
+  it("highlights a code line disguised as the wrapped tail of a comment after a string Godot continues", () => {
+    // A third review's script: the comment on line 10 fills the dialog row, line 11 starts at column 0 inside the brackets.
+    const disguised = `extends RefCounted
+
+func draw(img: Image) -> void:
+	var w := img.get_width()
+	var h := img.get_height()
+	var sky = "dusk\\
+" + str(w) + """
+"""
+	Kit.vgradient(img, Rect2i(0, 0, w, h), Color(0.2, 0.2, 0.4), Color(0.9, 0.6, 0.4))
+	var pts = [Vector2(0, h), # the hill, left to right so the sky meets the ground evenly and the path runs from the
+["/tmp/out.png"].map(img.get("sa" + "ve_png"))]
+	Kit.ridge(img, h * 0.7, 30.0, Color(0.3, 0.45, 0.3), 1)
+	var t = """
+"""
+`
+    expect(linesToRead(disguised)).toEqual([
+      { line: 6, reason: "has a string that goes on to the next line" },
+      { line: 7, reason: "uses str; starts inside the string from line 6; has a string that goes on to the next line" },
+      { line: 8, reason: "starts inside the string from line 7" },
+      { line: 11, reason: "uses map, get" },
+      { line: 13, reason: "has a string that goes on to the next line" },
+      { line: 14, reason: "starts inside the string from line 13" },
+    ])
+  })
+})
+
+describe("conceptScriptProblem", () => {
   it("passes printable ASCII with tabs and LF line ends", () => {
-    expect(conceptScriptBytesProblem(Buffer.from(DRAW))).toBeUndefined()
+    expect(conceptScriptProblem(Buffer.from(DRAW))).toBeUndefined()
   })
 
   it("refuses CR, escape codes, other control bytes and anything not ASCII, with where it is", () => {
-    const at = (text: string) => conceptScriptBytesProblem(Buffer.from(DRAW + text, "utf8"))
+    const at = (text: string) => conceptScriptProblem(Buffer.from(DRAW + text, "utf8"))
     for (const text of ["\t# a\r\n", "\tpass # \u001b[2K\u001b[1G\n", "\tpass # ‮ x\n", "\tpass # \u0000\n", "\tpass # \u007f\n", "\t# dusk — calm\n", "\t# 20°\n"]) {
       expect(at(text), JSON.stringify(text)).toMatch(/^Line 9, column \d+: /)
     }
@@ -137,6 +336,16 @@ describe.skipIf(!bin)("renderConcept with real Godot (GODOT_BIN)", { timeout: 60
     await expect(renderConcept({ bin: bin!, script: Buffer.from(script), outPng: png })).rejects.toThrow(/Line 5, column \d+/)
     expect(existsSync(marker)).toBe(false)
     expect(existsSync(png)).toBe(false)
+  })
+
+  it("runs none of the plain forms of taking the name Kit: the review's disguises write nothing and render nothing", async () => {
+    const marker = path.join(out, "kit-marker.png").split(path.sep).join("/")
+    for (const [name, script] of kitDisguises(marker)) {
+      const png = path.join(out, "kit-disguise.png")
+      await expect(renderConcept({ bin: bin!, script, outPng: png }), name).rejects.toThrow(/refused to render: Line \d+: [\s\S]*Kit/)
+      expect(existsSync(marker), name).toBe(false)
+      expect(existsSync(png), name).toBe(false)
+    }
   })
 
   it("renders a script that infers a type from a Variant, which Godot's default settings treat as an error", async () => {

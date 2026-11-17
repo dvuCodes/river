@@ -10,7 +10,7 @@ export {
   type McpLaunch,
   type QueryOptionDeps,
 } from "./options"
-export { SYSTEM_PROMPTS, turnContext } from "./prompts"
+export { BRIEF_MAX, SYSTEM_PROMPTS, systemPrompt, turnContext } from "./prompts"
 export {
   createCanUseTool,
   decideToolCall,
@@ -43,12 +43,17 @@ export { unifiedDiff } from "./diff"
 export {
   acceptJob,
   approveJobScript,
+  approveJobScripts,
   dismissJob,
   readJobScript,
+  readJobScripts,
   recoverJobs,
+  repliesAfter,
+  reviseJob,
   startConceptJob,
   CONCEPT_ROLE,
   type ConceptJobRequest,
+  type JobAgentSettings,
   type JobDeps,
   type JobScript,
   type RunTurn,

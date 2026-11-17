@@ -1,0 +1,191 @@
+/* The approval window: one dialog filling its own window, and nothing else in it. */
+
+body {
+  background: var(--chrome);
+}
+/* A definite row, so the list scrolls inside the window; when the warning and legend alone overfill a small or zoomed
+   window, the window scrolls to its note and buttons. */
+.review-window {
+  height: 100%;
+  overflow: auto;
+  display: grid;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto auto;
+  gap: 10px;
+  padding: 16px;
+  background: var(--chrome);
+  color: var(--ink);
+}
+.approval-context {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 11.5px;
+  contain: paint;
+  overflow: clip;
+  overflow-wrap: anywhere;
+}
+.concept-warn {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--cond-soft);
+  color: var(--cond);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.review-kit {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.review-kit .link-btn {
+  font-size: 11.5px;
+}
+.review-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+}
+.review-script {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+/* The agent writes the caption, so the header wraps rather than widen the list past the window, and draws nothing
+   outside its own box. */
+.concept-script-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  color: var(--text-2);
+  contain: paint;
+  overflow: clip;
+}
+.concept-script-head > * {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.concept-script-head b {
+  color: var(--ink);
+}
+.review-caption {
+  color: var(--cap);
+}
+.review-window > .dialog-foot {
+  justify-content: flex-end;
+}
+.review-blocked {
+  flex: 1;
+  margin: 0;
+}
+
+.concept-script-text {
+  margin: 0;
+  padding: 6px 8px 6px 0;
+  font: 11px/16px var(--mono);
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  tab-size: 4;
+  user-select: text;
+  cursor: text;
+}
+.review-kit,
+.concept-script-text {
+  --wrap-hook: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='16' viewBox='0 0 12 16'%3E%3Cpath d='M3 3.5v5.5h6.5M7 6.5 9.5 9 7 11.5' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.script-row {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: var(--ln-w, 6ch) minmax(0, 1fr);
+}
+.script-ln {
+  padding-right: 1.5ch;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+.script-row.is-read .script-ln {
+  color: var(--cond);
+  font-weight: 600;
+}
+/* Wrap rather than scroll sideways: code pushed far right after a run of spaces must still be in view. */
+.script-code {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* The rows a long line wraps onto, from its second row down: a hook in the gutter for each, a tint behind them. */
+.script-row::before,
+.script-row::after {
+  content: "";
+  position: absolute;
+  top: 16px;
+  bottom: 0;
+  pointer-events: none;
+}
+.script-row::before {
+  left: var(--ln-w, 6ch);
+  right: 0;
+  z-index: -1;
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
+}
+.script-row::after {
+  left: 0;
+  width: var(--ln-w, 6ch);
+  background: var(--muted);
+  mask: var(--wrap-hook) right 4px top / 12px 16px repeat-y;
+}
+/* The same hook in the legend, so the legend shows exactly what a wrapped row looks like. */
+.wrap-hook {
+  display: inline-block;
+  width: 12px;
+  height: 16px;
+  vertical-align: -4px;
+  background: var(--muted);
+  mask: var(--wrap-hook) center / 12px 16px no-repeat;
+}
+.read-line {
+  background: var(--cond-soft);
+  color: inherit;
+  border-radius: 2px;
+  box-shadow: inset 2px 0 0 var(--cond);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* The Kit takes the list's place, so nothing is ever drawn over the scripts. */
+.kit-view {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  min-height: 0;
+}
+.kit-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.kit-text {
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: 11.5px/1.5 var(--mono);
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}

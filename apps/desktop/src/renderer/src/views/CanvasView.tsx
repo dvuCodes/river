@@ -1,671 +1,228 @@
 import {
   Background,
   BackgroundVariant,
-  type Node,
-  type NodeProps,
-  NodeResizeControl,
+  type EdgeTypes,
+  MiniMap,
   type NodeTypes,
-  type OnNodeDrag,
+  Panel,
   ReactFlow,
   ReactFlowProvider,
-  ResizeControlVariant,
   useNodesInitialized,
   useReactFlow,
-  useViewport,
+  ViewportPortal,
 } from "@xyflow/react"
-import { type ReactNode, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
-import type { Mark, MarkShape, MarkStatus } from "@river/core"
-import type { BoardDTO, CardDTO, JobDTO, NewMark } from "../../../shared/api"
-import { type Pt, type Rect, anchorsFor, arrowPath, bounds, ellipsePoints, flatten, grow, intersects, pointsOf, smoothPath, strokesOf } from "../canvas/geometry"
-import { cx, errorText, shortTime, useSmokeReady } from "../util"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import "@fontsource/caveat/600.css"
+import type { Card, Edge, Mark, MarkShape } from "@river/core"
+import type { BoardDTO, CanvasTheme, CardDTO, StagedImage } from "../../../shared/api"
+import { AskBox, BoardPill, DismissDialog, type JumpItem, Lightbox, type LightboxItem, MarkPanel, QuickJump, RefForm, SelectionBar, TextPanel, TOOLS, type Tool, ToolBar, ZoomControls } from "../canvas/chrome"
+import { type Pt, type Rect, anchorsFor, bounds, ellipsePoints, flatten, grow, intersects, markBox, readingOrder, translatePath } from "../canvas/geometry"
+import { type Step, createHistory } from "../canvas/history"
+import { LinkEdge, type LinkEdgeType, linkEdge } from "../canvas/LinkEdge"
+import { Actions, AnswerNotes, type BoardNode, type CanvasActions, CardView, ME, MarkShapeView, MarkView, cardNode, markNode } from "../canvas/nodes"
+import { cx, errorText, useSmokeReady } from "../util"
 import "../canvas/canvas.css"
 
-export const DEFAULT_BOARD = "main"
-const ME = "you"
 /** Pen strokes this close in time (ms) that overlap the previous stroke join its mark. */
 const STROKE_JOIN_MS = 2000
-
-type Tool = "select" | "hand" | "pen" | "circle" | "note" | "arrow" | "pin" | "image"
 const DRAW_TOOLS = new Set<Tool>(["pen", "circle", "arrow", "pin", "note"])
+const MULTI_SELECT_KEYS = ["Shift", "Control", "Meta"]
+/** Offset of a duplicate from its original, and the gap between cards in an arranged row, in board units. */
+const NUDGE = 32
+const ROW_GAP = 24
+/** Smoke runs can compare with and without culling (?cull=0). */
+const CULL = new URLSearchParams(window.location.search).get("cull") !== "0"
 
-type CardNodeData = { dto: CardDTO }
-type CardNode = Node<CardNodeData, "card">
+const nodeTypes: NodeTypes = { card: CardView, mark: MarkView } as unknown as NodeTypes
+const edgeTypes: EdgeTypes = { link: LinkEdge } as unknown as EdgeTypes
 
-interface CanvasActions {
-  saveText(id: string, text: string): void
-  resize(id: string, w: number): void
-  /** Deletes the card; a pending agent card dismisses its job instead. */
-  remove(id: string): void
-  /** Read the card from disk again. */
-  refresh(id: string): void
-  fail(err: unknown): void
-}
-const Actions = createContext<CanvasActions | null>(null)
-
-// ---------- cards ----------
-
-function Maker({ by, pending }: { by: string; pending: boolean }) {
-  if (by === ME && !pending) return null
-  return (
-    <span className={cx("cnode-maker", pending && "is-pending")} title={pending ? `${by} · waiting for you to accept` : `Made by ${by}`}>
-      <span className="star">✦</span> {by}
-      {pending && <span className="cnode-pending"> · pending</span>}
-    </span>
-  )
-}
-
-function NoteBody({ id, text }: { id: string; text: string }) {
-  const actions = useContext(Actions)!
-  const [draft, setDraft] = useState(text)
-  const focused = useRef(false)
-  const timer = useRef<number | undefined>(undefined)
-  const area = useRef<HTMLTextAreaElement>(null)
-  // Follow outside edits unless the user is typing here.
-  useEffect(() => {
-    if (!focused.current) setDraft(text)
-  }, [text])
-  useEffect(() => {
-    const el = area.current
-    if (!el) return
-    el.style.height = "auto"
-    el.style.height = `${el.scrollHeight}px`
-  }, [draft])
-  useEffect(() => {
-    if (text === "" && area.current) area.current.focus()
-    // only on mount: a new empty note is focused for typing
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-  const flush = (value: string) => {
-    window.clearTimeout(timer.current)
-    if (value !== text) actions.saveText(id, value)
-  }
-  return (
-    <textarea
-      ref={area}
-      className="cnode-note-text nodrag nowheel"
-      value={draft}
-      placeholder="Write a note…"
-      rows={2}
-      onFocus={() => (focused.current = true)}
-      onBlur={() => {
-        focused.current = false
-        flush(draft)
-      }}
-      onChange={(e) => {
-        const v = e.target.value
-        setDraft(v)
-        window.clearTimeout(timer.current)
-        timer.current = window.setTimeout(() => flush(v), 700)
-      }}
-    />
-  )
-}
-
-function CardImage({ url, alt }: { url: string | undefined; alt: string }) {
-  const [failed, setFailed] = useState(false)
-  useEffect(() => setFailed(false), [url])
-  if (!url || failed) return <div className="cnode-img-missing">{failed ? "Image not found" : "No image"}</div>
-  return <img className="cnode-img" src={url} alt={alt} draggable={false} onError={() => setFailed(true)} />
-}
-
-type ConceptViewData = Extract<CardDTO["view"], { kind: "concept" }>
-
-/** A concept card follows its job: drawing, waiting for the user to approve the script, rendering, then Accept or Dismiss. */
-function ConceptBody({ cardId, jobId, view }: { cardId: string; jobId: string | undefined; view: ConceptViewData }) {
-  const actions = useContext(Actions)!
-  const [script, setScript] = useState<JobDTO["script"] | null>(null)
-  const [busy, setBusy] = useState(false)
-  const status = view.job?.status
-  useEffect(() => {
-    if (status !== "approval") setScript(null)
-  }, [status])
-  const act = (fn: () => Promise<unknown>) => {
-    setBusy(true)
-    fn()
-      .catch(actions.fail)
-      .finally(() => {
-        setBusy(false)
-        actions.refresh(cardId)
-      })
-  }
-  const image = <CardImage url={view.url} alt={`Concept ${view.id}`} />
-  if (!jobId) return image
-  const summary = view.job?.summary && <p className="concept-summary">{view.job.summary}</p>
-  let content: ReactNode
-  if (view.missing) content = <p className="cnode-missing">{view.missing}</p>
-  else
-    switch (status) {
-      case "queued":
-      case "running":
-        content = <p className="concept-line is-working">✦ concept artist is drawing…</p>
-        break
-      case "approval":
-        content = (
-          <>
-            {summary}
-            <p className="concept-warn">Running the script executes its code on this computer. Read it before you run it.</p>
-            {script && (
-              <div className="concept-script">
-                <div className="concept-script-head">
-                  <span className="mono" title={script.file}>
-                    {script.file.split("/").pop()}
-                  </span>
-                  <span className="mono" title={script.sha256}>
-                    sha256 {script.sha256.slice(0, 12)}
-                  </span>
-                </div>
-                <pre className="concept-script-text nodrag nowheel">{script.text}</pre>
-              </div>
-            )}
-          </>
-        )
-        break
-      case "rendering":
-        content = <p className="concept-line is-working">Running the approved script in Godot…</p>
-        break
-      case "failed":
-        content = <p className="cnode-missing concept-error nodrag nowheel">{view.job?.error ?? "The job failed."}</p>
-        break
-      default:
-        content = (
-          <>
-            {image}
-            {summary}
-          </>
-        )
-    }
-  const open = status !== "accepted" && status !== "dismissed"
-  return (
-    <div className="concept" data-job-status={status ?? "missing"}>
-      {content}
-      {open && (
-        <div className="concept-actions">
-          {status === "approval" &&
-            (script ? (
-              <button className="btn btn-primary nodrag" data-action="run" disabled={busy} onClick={() => act(() => window.river.jobApprove(jobId, script.sha256))}>
-                Run script
-              </button>
-            ) : (
-              <button className="btn btn-primary nodrag" data-action="review" disabled={busy} onClick={() => act(() => window.river.jobGet(jobId).then((d) => setScript(d.script ?? null)))}>
-                Review script
-              </button>
-            ))}
-          {status === "answered" && (
-            <button className="btn btn-primary nodrag" data-action="accept" disabled={busy} onClick={() => act(() => window.river.jobAccept(jobId))}>
-              Accept
-            </button>
-          )}
-          <button className="btn nodrag" data-action="dismiss" disabled={busy} onClick={() => actions.remove(cardId)}>
-            Dismiss
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-const CardView = memo(function CardView({ id, data, selected }: NodeProps<CardNode>) {
-  const actions = useContext(Actions)!
-  const { card, view } = data.dto
-  const pending = Boolean(card.pending)
-  let body: ReactNode
-  let caption: ReactNode
-  switch (view.kind) {
-    case "frame":
-      body = <CardImage url={view.url} alt={`Frame ${view.shotId}`} />
-      caption = (
-        <>
-          <span className="mono">{view.shotId}</span>
-          {view.rev && <span className="mono"> · {view.rev}</span>}
-          {view.missing && <span> · {view.missing}</span>}
-        </>
-      )
-      break
-    case "passage":
-      body = (
-        <div className="cnode-passage-body">
-          <div className="cnode-title">{view.title}</div>
-          {view.tags.length > 0 && (
-            <div className="cnode-tags">
-              {view.tags.map((t) => (
-                <span key={t} className="chip">
-                  {t}
-                </span>
-              ))}
-            </div>
-          )}
-          {view.lines.map((l, i) => (
-            <p key={i} className="cnode-line">
-              {l}
-            </p>
-          ))}
-          {view.missing && <p className="cnode-missing">{view.missing}</p>}
-        </div>
-      )
-      caption = (
-        <>
-          passage · <span className="mono">{view.story.split("/").pop()}</span>
-        </>
-      )
-      break
-    case "ref":
-      body = <CardImage url={view.url} alt={card.source?.title ?? "Reference"} />
-      caption = (
-        <>
-          {card.source?.title && <span>{card.source.title} · </span>}
-          {card.source?.url && (
-            <span className="mono" title={card.source.url}>
-              {hostOf(card.source.url)} ·{" "}
-            </span>
-          )}
-          <span>{card.source?.licence ?? "no licence"}</span>
-        </>
-      )
-      break
-    case "concept":
-      body = <ConceptBody cardId={id} jobId={card.pending?.jobId} view={view} />
-      caption = (
-        <>
-          concept · <span className="mono">concepts/{view.id}/</span>
-        </>
-      )
-      break
-    default:
-      body = <NoteBody id={id} text={card.text ?? ""} />
-  }
-  return (
-    <div className={cx("cnode", `cnode-${card.kind}`, selected && "is-selected", pending && "is-pending")}>
-      {selected && (
-        <NodeResizeControl
-          position="right"
-          variant={ResizeControlVariant.Line}
-          className="cnode-resize"
-          minWidth={140}
-          maxWidth={900}
-          onResizeEnd={(_e, p) => actions.resize(id, p.width)}
-        />
-      )}
-      {(card.madeBy !== ME || pending) && (
-        <div className="cnode-head">
-          <Maker by={card.madeBy} pending={pending} />
-        </div>
-      )}
-      {body}
-      {caption && <div className="cnode-cap">{caption}</div>}
-      {selected && (
-        <button className="cnode-del nodrag" title="Delete card" aria-label="Delete card" onClick={() => actions.remove(id)}>
-          ×
-        </button>
-      )}
-    </div>
-  )
-})
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host || url
-  } catch {
-    return url
-  }
-}
-
-const nodeTypes: NodeTypes = { card: CardView } as unknown as NodeTypes
-
-function toNode(dto: CardDTO, prev: CardNode | undefined): CardNode {
-  const n: CardNode = {
-    id: dto.card.id,
-    type: "card",
-    position: { x: dto.card.x, y: dto.card.y },
-    width: dto.card.w,
-    data: { dto },
-    selected: prev?.selected ?? false,
-  }
-  if (prev?.measured && prev.width === dto.card.w) n.measured = prev.measured
-  return n
-}
-
-// ---------- marks ----------
-
-const STATUS_LABEL: Record<MarkStatus, string> = {
-  open: "open",
-  working: "working",
-  answered: "answered",
-  accepted: "accepted",
-  dismissed: "dismissed",
-}
-
-function markD(m: Pick<Mark, "shape" | "path" | "breaks">): string {
-  switch (m.shape) {
-    case "arrow":
-      return arrowPath(m.path)
-    case "circle":
-      return smoothPath(pointsOf(m.path), true)
-    case "pin":
-      return ""
-    default:
-      return strokesOf(m.path, m.breaks)
-        .map((s) => smoothPath(s))
-        .join("")
-  }
-}
-
-function PinGlyph({ x, y }: { x: number; y: number }) {
-  return (
-    <g transform={`translate(${x} ${y})`}>
-      <path className="mark-pin" d="M0 0C-2 -6 -8 -10 -8 -16a8 8 0 0 1 16 0C8 -10 2 -6 0 0z" />
-      <circle className="mark-pin-dot" cx={0} cy={-16} r={2.6} />
-    </g>
-  )
-}
-
-function MarkShapeView({ m, selected, hit, onPick }: { m: Pick<Mark, "shape" | "path" | "breaks" | "madeBy">; selected?: boolean; hit?: boolean; onPick?: () => void }) {
-  const cls = cx("mark", m.madeBy === ME ? "by-you" : "by-agent", selected && "is-selected")
-  if (m.shape === "pin") {
-    const [x, y] = [m.path[0] ?? 0, m.path[1] ?? 0]
-    return (
-      <g className={cls} onPointerDown={hit ? (e) => (e.stopPropagation(), onPick?.()) : undefined} style={hit ? { pointerEvents: "all", cursor: "pointer" } : undefined}>
-        <PinGlyph x={x} y={y} />
-      </g>
-    )
-  }
-  const d = markD(m)
-  return (
-    <g className={cls}>
-      {selected && <path className="mark-halo" d={d} />}
-      <path className="mark-ink" d={d} />
-      {hit && (
-        <path
-          className="mark-hit"
-          d={d}
-          onPointerDown={(e) => {
-            e.stopPropagation()
-            onPick?.()
-          }}
-        />
-      )}
-    </g>
-  )
-}
-
-function statusDotAt(m: Mark): Pt {
-  if (m.shape === "pin") return [(m.path[0] ?? 0) + 7, (m.path[1] ?? 0) - 24]
-  // On the stroke, at the point nearest the top-right corner of its bounds.
-  const b = bounds(m.path)
-  let best: Pt = [b.x + b.w, b.y]
-  let bestD = Infinity
-  for (const [px, py] of pointsOf(m.path)) {
-    const d = Math.hypot(px - (b.x + b.w), py - b.y)
-    if (d < bestD) {
-      bestD = d
-      best = [px, py]
-    }
-  }
-  return best
+interface BoardState {
+  cards: Record<string, CardDTO>
+  marks: Record<string, Mark>
+  edges: Record<string, Edge>
+  openMarks: number
+  errors: string[]
 }
 
 interface Draft {
   shape: MarkShape
   points: Pt[]
+  /** Arrow drags that start on a card or mark: they become a connector if they end on another one. */
+  from?: string
 }
 
-function MarksLayer(props: { marks: Mark[]; draft: Draft | null; selectedId: string | undefined; pickable: boolean; onPick(id: string): void }) {
-  const { x, y, zoom } = useViewport()
-  const { marks, draft, selectedId, pickable, onPick } = props
-  let draftView: ReactNode = null
-  if (draft && draft.points.length > 0) {
-    const a = draft.points[0]!
-    const b = draft.points[draft.points.length - 1]!
-    const path =
-      draft.shape === "circle" ? flatten(ellipsePoints(a, b)) : draft.shape === "arrow" ? flatten([a, b]) : flatten(draft.points)
-    draftView = <MarkShapeView m={{ shape: draft.shape, path, madeBy: ME }} />
-  }
-  return (
-    <svg className="marks-layer" aria-hidden={!pickable}>
-      <g transform={`translate(${x} ${y}) scale(${zoom})`}>
-        {marks.map((m) => (
-          <g key={m.id} data-mark={m.id}>
-            <MarkShapeView m={m} selected={m.id === selectedId} hit={pickable} onPick={() => onPick(m.id)} />
-            {(() => {
-              const [dx, dy] = statusDotAt(m)
-              return <circle className={cx("mark-dot", `ms-${m.status}`)} cx={dx} cy={dy} r={4 / Math.max(zoom, 0.4)} />
-            })()}
-          </g>
-        ))}
-        {draftView}
-      </g>
-    </svg>
-  )
+/** A staged image waiting for its licence form, and where it goes on the board. */
+interface RefPending {
+  image: StagedImage
+  at: Pt
+  licence: string
 }
 
-/** "What do you want?" box placed beside a fresh mark. */
-function AskBox(props: { at: Pt; onDone(text: string | null): void }) {
-  const { x, y, zoom } = useViewport()
-  const [text, setText] = useState("")
-  const input = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    const t = window.setTimeout(() => input.current?.focus(), 0)
-    return () => window.clearTimeout(t)
-  }, [])
-  return (
-    <form
-      className="ask-box"
-      style={{ left: props.at[0] * zoom + x + 8, top: props.at[1] * zoom + y + 8 }}
-      onSubmit={(e) => {
-        e.preventDefault()
-        props.onDone(text.trim())
-      }}
-      onPointerDown={(e) => e.stopPropagation()}
-    >
-      <input
-        ref={input}
-        className="ask-input"
-        value={text}
-        placeholder="What do you want?"
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") {
-            e.preventDefault()
-            props.onDone(null)
-          }
-        }}
-      />
-      <span className="ask-hint">Enter to save · Esc to skip</span>
-    </form>
-  )
+function newId(prefix: "c_" | "m_" | "e_"): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(8))
+  return prefix + Array.from(bytes, (b) => (b % 36).toString(36)).join("")
 }
 
-function MarkPanel(props: { mark: Mark; cardTitle(id: string): string; onAsk(): Promise<void>; onDelete(): void; onClose(): void }) {
-  const { mark: m } = props
-  const [asking, setAsking] = useState(false)
-  return (
-    <aside className="mark-panel" onPointerDown={(e) => e.stopPropagation()}>
-      <header className="mark-panel-head">
-        <span className={cx("mark-dot-static", `ms-${m.status}`)} />
-        <span className="mark-panel-title">
-          {m.shape} · {STATUS_LABEL[m.status]}
-        </span>
-        <span className="tb-spacer" />
-        <button className="icon-btn" onClick={props.onClose} aria-label="Close">
-          ×
-        </button>
-      </header>
-      {m.anchors.length > 0 && (
-        <p className="mark-panel-anchors">
-          On{" "}
-          {m.anchors.map((a, i) => (
-            <span key={a}>
-              {i > 0 && ", "}
-              <b>{props.cardTitle(a)}</b>
-            </span>
-          ))}
-        </p>
-      )}
-      <ul className="mark-thread">
-        {m.thread.length === 0 && <li className="mark-thread-empty">No request written.</li>}
-        {m.thread.map((t, i) => (
-          <li key={i}>
-            <span className={cx("msg-who", t.by !== ME && "is-agent")}>
-              {t.by !== ME && "✦ "}
-              {t.by}
-            </span>
-            <span className="msg-at">{shortTime(t.at)}</span>
-            <p>{t.text}</p>
-          </li>
-        ))}
-      </ul>
-      {m.status === "open" && (
-        <button
-          className="btn btn-primary mark-ask"
-          data-action="ask-concept"
-          disabled={asking}
-          onClick={() => {
-            setAsking(true)
-            void props.onAsk().finally(() => setAsking(false))
-          }}
-        >
-          {asking ? "Starting…" : "✦ Ask concept artist"}
-        </button>
-      )}
-      {m.status === "working" && <p className="mark-working">✦ The concept artist is on it. Its card beside the mark shows each step.</p>}
-      <footer className="mark-panel-foot">
-        <span className="mono sec-hint">{m.id}</span>
-        <span className="tb-spacer" />
-        <button className="btn btn-danger" onClick={props.onDelete}>
-          Delete
-        </button>
-      </footer>
-    </aside>
-  )
+const byCreated = (a: { createdAt: string; id: string }, b: { createdAt: string; id: string }) =>
+  a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+
+const isTyping = (el: EventTarget | null) => {
+  const t = el as HTMLElement | null
+  return Boolean(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable))
 }
 
-// ---------- reference image form ----------
-
-function RefForm(props: { fileName: string; onSubmit(s: { title: string; url: string; licence: string }): Promise<void>; onCancel(): void }) {
-  const [title, setTitle] = useState(props.fileName.replace(/\.[^.]+$/, ""))
-  const [url, setUrl] = useState("")
-  const [licence, setLicence] = useState("")
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  return (
-    <div className="canvas-modal" onPointerDown={(e) => e.stopPropagation()}>
-      <form
-        className="ref-form"
-        onSubmit={(e) => {
-          e.preventDefault()
-          if (!licence.trim()) return setErr("Write the licence (for example CC0, CC BY 4.0, or “own photo”).")
-          setBusy(true)
-          props.onSubmit({ title, url, licence }).catch((x: unknown) => {
-            setErr(errorText(x))
-            setBusy(false)
-          })
-        }}
-      >
-        <header className="dialog-head">
-          <h2>Reference image</h2>
-          <span className="mono sec-hint">{props.fileName}</span>
-        </header>
-        <label className="field">
-          <span>Title</span>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} />
-        </label>
-        <label className="field">
-          <span>Source URL</span>
-          <input value={url} placeholder="https://…" onChange={(e) => setUrl(e.target.value)} />
-        </label>
-        <label className="field">
-          <span>
-            Licence <b className="req">required</b>
-          </span>
-          <input value={licence} placeholder="CC0, CC BY 4.0, own photo…" onChange={(e) => setLicence(e.target.value)} autoFocus />
-        </label>
-        {err && <p className="err-note">{err}</p>}
-        <footer className="dialog-foot">
-          <button type="button" className="btn" onClick={props.onCancel}>
-            Cancel
-          </button>
-          <button className="btn btn-primary" disabled={busy}>
-            Add to canvas
-          </button>
-        </footer>
-      </form>
-    </div>
-  )
+function imageOf(dto: CardDTO | undefined): LightboxItem | undefined {
+  const v = dto?.view
+  if (!dto || !v || (v.kind !== "ref" && v.kind !== "frame" && v.kind !== "concept") || !v.url) return undefined
+  const fallback = v.kind === "frame" ? `${v.shotId}${v.frame !== undefined ? ` · frame ${v.frame + 1}` : ""}` : v.kind === "concept" ? v.id : ""
+  return { id: dto.card.id, url: v.url, caption: dto.card.caption || dto.card.source?.title || fallback }
 }
 
-// ---------- toolbar ----------
+/** Where a card sits on the board; its height from the image's own shape, so the order does not depend on what has rendered. */
+function boardRect(dto: CardDTO): Rect {
+  const { card, view } = dto
+  const size = "size" in view ? view.size : undefined
+  return { x: card.x, y: card.y, w: card.w, h: size ? (card.w * size.h) / size.w : card.w * 0.75 }
+}
 
-const TOOLS: { id: Tool; label: string; key: string; icon: ReactNode }[] = [
-  { id: "select", label: "Select", key: "v", icon: <path d="M4 2.5l8 5.2-3.6.8 2.2 4.3-1.6.8-2.2-4.3L4 12z" /> },
-  { id: "hand", label: "Hand (pan)", key: "h", icon: <path d="M5 8V4.2a1 1 0 0 1 2 0V7.5M7 7V3.2a1 1 0 0 1 2 0V7M9 7V4a1 1 0 0 1 2 0v4.5M5 8.2V7a1 1 0 0 0-2 0v2.2c0 2.6 1.8 4.3 4.4 4.3h1c2.2 0 3.6-1.6 3.6-3.8V6.2a1 1 0 0 0-2 0" /> },
-  { id: "pen", label: "Pen", key: "p", icon: <path d="M3 13l1-3.2 6.6-6.6 2.2 2.2L6.2 12zM9.6 4.2l2.2 2.2" /> },
-  { id: "circle", label: "Circle", key: "o", icon: <ellipse cx="8" cy="8" rx="5.6" ry="4.6" /> },
-  { id: "note", label: "Note", key: "n", icon: <path d="M3 3h10v6.5L9.5 13H3zM9.5 13V9.5H13" /> },
-  { id: "arrow", label: "Arrow", key: "a", icon: <path d="M3 13L12.5 3.5M7 3.5h5.5V9" /> },
-  { id: "pin", label: "Pin", key: "m", icon: <path d="M8 14C7 11 4.5 9.5 4.5 6.5a3.5 3.5 0 0 1 7 0C11.5 9.5 9 11 8 14zM8 6.6h0" /> },
-  { id: "image", label: "Image", key: "i", icon: <path d="M2.5 3.5h11v9h-11zM2.5 10.5l3-2.6 2.6 2 2-1.4 3.4 2.5M10.5 6.2h0" /> },
-]
-
-function ToolBar(props: { tool: Tool; onTool(t: Tool): void }) {
+/** The first steps on an empty board. Drawn on the paper, out of the way of the pointer. */
+function EmptyBoard() {
   return (
-    <div className="canvas-tools" role="toolbar" aria-label="Canvas tools">
-      {TOOLS.map((t, i) => (
-        <span key={t.id} className="canvas-tool-wrap">
-          {(i === 2 || i === 4) && <span className="canvas-tool-sep" />}
-          <button className={cx("canvas-tool", props.tool === t.id && "is-on")} data-tool={t.id} title={`${t.label} (${t.key.toUpperCase()})`} aria-label={t.label} onClick={() => props.onTool(t.id)}>
-            <svg viewBox="0 0 16 16" aria-hidden>
-              {t.icon}
+    <div className="canvas-empty" aria-label="An empty board">
+      <div className="empty-sheet">
+        <h2 className="empty-title">A blank board</h2>
+        <p className="empty-lede">Lay out shots, passages and references, then ask for what you want right where you want it.</p>
+        <ol className="empty-steps">
+          <li>
+            <svg viewBox="0 0 48 40" aria-hidden className="empty-glyph glyph-pen">
+              <ellipse cx="18" cy="21" rx="14" ry="11" />
+              <path className="glyph-note" d="M33 6h12v9H37l-4 3z" />
             </svg>
-          </button>
-        </span>
-      ))}
+            <div>
+              <b>Draw a mark, write a request</b>
+              <span>
+                Circle or scribble on anything with the pen <kbd>P</kbd> or circle <kbd>O</kbd>, then say what you want. An agent answers beside it.
+              </span>
+            </div>
+          </li>
+          <li>
+            <svg viewBox="0 0 48 40" aria-hidden className="empty-glyph glyph-strip">
+              <rect x="2" y="12" width="12" height="9" rx="1.5" />
+              <rect x="18" y="12" width="12" height="9" rx="1.5" />
+              <rect x="34" y="12" width="12" height="9" rx="1.5" />
+              <path d="M14.5 16.5h3M30.5 16.5h3" />
+              <path className="glyph-cap" d="M2 26h9M18 26h9M34 26h9" />
+            </svg>
+            <div>
+              <b>Pin passages and frames</b>
+              <span>From the Story map, or send a capture from Frames as a strip of frames joined in order.</span>
+            </div>
+          </li>
+          <li>
+            <svg viewBox="0 0 48 40" aria-hidden className="empty-glyph glyph-drop">
+              <rect x="9" y="8" width="26" height="20" rx="2" />
+              <path d="M9 24l7-6 6 5 4-3 9 7" />
+              <path className="glyph-arrow" d="M38 2v12M34 10l4 4 4-4" />
+            </svg>
+            <div>
+              <b>Drop in images</b>
+              <span>
+                Drag reference images here or paste them <kbd>Ctrl</kbd> <kbd>V</kbd>. Each one keeps its source and licence.
+              </span>
+            </div>
+          </li>
+        </ol>
+      </div>
     </div>
   )
 }
 
-// ---------- the canvas ----------
-
-interface BoardState {
-  cards: Record<string, CardDTO>
-  marks: Record<string, Mark>
-  openMarks: number
-  errors: string[]
+function titleOf(dto: CardDTO): string {
+  const { card, view } = dto
+  if (card.caption) return card.caption
+  switch (view.kind) {
+    case "passage":
+      return view.title
+    case "frame":
+      return view.shotId
+    case "concept":
+      return `concept ${view.id}${card.variant ? ` (${card.variant})` : ""}`
+    case "ref":
+      return card.source?.title ?? "reference"
+    default:
+      return (card.text ?? "").split("\n")[0]?.trim() || "empty note"
+  }
 }
 
-const byCreated = <T extends { card?: { createdAt: string }; createdAt?: string }>(a: T, b: T) => {
-  const ka = a.card?.createdAt ?? a.createdAt ?? ""
-  const kb = b.card?.createdAt ?? b.createdAt ?? ""
-  return ka < kb ? -1 : ka > kb ? 1 : 0
+/** Only image files; a pasted image has no useful name, so it is named after its type. */
+function imageFiles(list: FileList | null | undefined): File[] {
+  return Array.from(list ?? []).filter((f) => f.type.startsWith("image/"))
 }
 
-function CanvasInner(props: { board: string; storyTick: { rel: string; n: number } | null }) {
+async function stageFile(file: File): Promise<StagedImage> {
+  const ext = file.type.split("/")[1]?.replace("jpeg", "jpg").replace(/\+.*$/, "") ?? "png"
+  const name = file.name && /\.[a-z0-9]+$/i.test(file.name) ? file.name : `pasted.${ext}`
+  return window.river.boardStageImage(new Uint8Array(await file.arrayBuffer()), name)
+}
+
+interface CanvasProps {
+  board: string
+  onBoard(name: string): void
+  storyTick: { rel: string; n: number } | null
+  theme: CanvasTheme
+  onTheme(t: CanvasTheme): void
+}
+
+function CanvasInner(props: CanvasProps) {
   const { board } = props
-  const flow = useReactFlow()
+  const flow = useReactFlow<BoardNode, LinkEdgeType>()
   const [state, setState] = useState<BoardState | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [nodes, setNodes] = useState<CardNode[]>([])
+  const [nodes, setNodes] = useState<BoardNode[]>([])
+  const [links, setLinks] = useState<LinkEdgeType[]>([])
   const [tool, setTool] = useState<Tool>("select")
   const [draft, setDraft] = useState<Draft | null>(null)
   const [ask, setAsk] = useState<{ markId: string; at: Pt } | null>(null)
-  const [selectedMark, setSelectedMark] = useState<string | undefined>()
-  const [refPick, setRefPick] = useState<{ token: string; fileName: string } | null>(null)
+  const [refs, setRefs] = useState<RefPending[]>([])
   const [actionError, setActionError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
+  const [jumping, setJumping] = useState(false)
+  const [lightbox, setLightbox] = useState<string | null>(null)
+  const [dropping, setDropping] = useState(false)
+  const [dismissing, setDismissing] = useState<string | null>(null)
+  const [logOf, setLogOf] = useState<string | null>(null)
   const lastPen = useRef<{ id: string; endedAt: number; box: Rect } | null>(null)
+  const pointer = useRef<Pt | null>(null)
+  /** Ids to select once their nodes exist (after a duplicate). */
+  const selectNext = useRef<Set<string> | null>(null)
   const stateRef = useRef(state)
   stateRef.current = state
   const wrap = useRef<HTMLDivElement>(null)
 
-  const fail = (err: unknown) => setActionError(errorText(err))
+  const fail = useCallback((err: unknown) => setActionError(errorText(err)), [])
+  /**
+   * A file drag over the board: enters and leaves are counted, and dragover (sent many times a second while a drag is
+   * over the board) keeps the drop hint up, so the hint goes once the drag leaves the window, even if a leave never comes.
+   */
+  const drag = useRef({ depth: 0, timer: 0 })
+  const endDrag = useCallback(() => {
+    drag.current.depth = 0
+    window.clearTimeout(drag.current.timer)
+    setDropping(false)
+  }, [])
 
-  // Load the board (creating it on first open).
+  // Marks for the perf smoke: open, board loaded, ready (fitted).
   useEffect(() => {
     let live = true
+    performance.mark("canvas:open")
     window.river.boardOpen(board).then(
       (b: BoardDTO) => {
         if (!live) return
+        performance.mark("canvas:loaded")
         setState({
           cards: Object.fromEntries(b.cards.map((c) => [c.card.id, c])),
           marks: Object.fromEntries(b.marks.map((m) => [m.id, m])),
+          edges: Object.fromEntries(b.edges.map((e) => [e.id, e])),
           openMarks: b.openMarks,
           errors: b.errors,
         })
@@ -695,8 +252,18 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
       return { ...s, marks, ...(openMarks !== undefined ? { openMarks } : {}) }
     })
   }, [])
+  const putEdge = useCallback((id: string, e: Edge | null) => {
+    setState((s) => {
+      if (!s) return s
+      const edges = { ...s.edges }
+      if (e) edges[id] = e
+      else delete edges[id]
+      return { ...s, edges }
+    })
+  }, [])
+  const refresh = useCallback((id: string) => void window.river.boardCard(board, id).then((d) => putCard(id, d), fail), [board, putCard, fail])
 
-  // Live reload: only the cards and marks whose files changed are read again.
+  // Live reload: only the cards, marks and edges whose files changed are read again.
   useEffect(
     () =>
       window.river.onFsChange((changes) => {
@@ -705,15 +272,16 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
           if (c.kind === "job") {
             const jobId = /^\.river\/jobs\/([^/]+)\.json$/.exec(c.rel)?.[1]
             for (const dto of Object.values(stateRef.current?.cards ?? {})) {
-              if (jobId && dto.card.pending?.jobId === jobId) void window.river.boardCard(board, dto.card.id).then((d) => putCard(dto.card.id, d), fail)
+              if (jobId && dto.card.pending?.jobId === jobId) refresh(dto.card.id)
             }
             continue
           }
           if (c.kind !== "board") continue
-          const m = /^\.river\/boards\/([^/]+)\/(cards|marks)\/([^/]+)\.json$/.exec(c.rel)
+          const m = /^\.river\/boards\/([^/]+)\/(cards|marks|edges)\/([^/]+)\.json$/.exec(c.rel)
           if (!m || m[1] !== board) continue
           const id = m[3]!
-          if (m[2] === "cards") void window.river.boardCard(board, id).then((dto) => putCard(id, dto), fail)
+          if (m[2] === "cards") refresh(id)
+          else if (m[2] === "edges") void window.river.boardEdge(board, id).then((e) => putEdge(id, e), fail)
           else {
             marksChanged = true
             void window.river.boardMark(board, id).then((mk) => putMark(id, mk), fail)
@@ -721,7 +289,7 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
         }
         if (marksChanged) void window.river.boardOpenCount(board).then((n) => setState((s) => (s ? { ...s, openMarks: n } : s)))
       }),
-    [board, putCard, putMark],
+    [board, putMark, putEdge, refresh, fail],
   )
 
   // Passage cards follow their story file.
@@ -729,101 +297,295 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
     const t = props.storyTick
     const s = stateRef.current
     if (!t || !s) return
-    for (const dto of Object.values(s.cards)) {
-      if (dto.view.kind === "passage" && dto.view.story === t.rel) {
-        void window.river.boardCard(board, dto.card.id).then((d) => putCard(dto.card.id, d), fail)
+    for (const dto of Object.values(s.cards)) if (dto.view.kind === "passage" && dto.view.story === t.rel) refresh(dto.card.id)
+  }, [props.storyTick, refresh])
+
+  /**
+   * Writes one side of a step: a null side deletes the entity, an edit patches the entity as it is now, a whole entity
+   * (it has createdAt) is written as is. The canvas updates first; main's answer replaces the guess.
+   */
+  const applyStep = useCallback(
+    async (step: Step, side: "before" | "after") => {
+      for (const c of step) {
+        const s = stateRef.current
+        const patch = c[side]
+        if (!s) return
+        if (c.kind === "card") {
+          const cur = s.cards[c.id]
+          if (patch === null) {
+            if (!cur) continue
+            putCard(c.id, null)
+            await window.river.boardDeleteCard(board, c.id)
+          } else if (cur || "createdAt" in patch) {
+            const next = { ...cur?.card, ...patch } as Card
+            if (cur) putCard(c.id, { ...cur, card: next })
+            putCard(c.id, await window.river.boardSaveCard(board, next))
+          }
+        } else if (c.kind === "mark") {
+          const cur = s.marks[c.id]
+          if (patch === null) {
+            if (!cur) continue
+            putMark(c.id, null)
+            putMark(c.id, null, await window.river.boardDeleteMark(board, c.id))
+          } else if (cur || "createdAt" in patch) {
+            const next = { ...cur, ...patch } as Mark
+            putMark(c.id, next)
+            const saved = await window.river.boardSaveMark(board, next)
+            putMark(c.id, saved.mark, saved.openMarks)
+          }
+        } else {
+          const cur = s.edges[c.id]
+          if (patch === null) {
+            if (!cur) continue
+            putEdge(c.id, null)
+            await window.river.boardDeleteEdge(board, c.id)
+          } else if (cur || "createdAt" in patch) {
+            const next = { ...cur, ...patch } as Edge
+            putEdge(c.id, next)
+            putEdge(c.id, await window.river.boardSaveEdge(board, next))
+          }
+        }
       }
-    }
-  }, [props.storyTick, board, putCard])
+    },
+    [board, putCard, putMark, putEdge],
+  )
+  const history = useMemo(() => createHistory(applyStep), [applyStep])
+  const commit = useCallback((step: Step) => history.commit(step).catch(fail), [history, fail])
 
-  const cardList = useMemo(() => (state ? Object.values(state.cards).sort(byCreated) : []), [state])
-  const markList = useMemo(() => (state ? Object.values(state.marks).sort(byCreated) : []), [state])
+  const cardList = useMemo(() => (state ? Object.values(state.cards).sort((a, b) => byCreated(a.card, b.card)) : []), [state?.cards])
+  const markList = useMemo(() => (state ? Object.values(state.marks).sort(byCreated) : []), [state?.marks])
+  const edgeList = useMemo(() => (state ? Object.values(state.edges).sort(byCreated) : []), [state?.edges])
 
+  // Nodes keep their identity while their card or mark is unchanged, so one change re-renders one node.
   useEffect(() => {
     setNodes((prev) => {
       const old = new Map(prev.map((n) => [n.id, n]))
-      return cardList.map((dto) => toNode(dto, old.get(dto.card.id)))
+      const next: BoardNode[] = [...cardList.map((dto) => cardNode(dto, old.get(dto.card.id))), ...markList.map((m) => markNode(m, old.get(m.id)))]
+      const select = selectNext.current
+      if (!select) return next
+      // The copies arrive one by one as main saves them.
+      if (next.filter((n) => select.has(n.id)).length === select.size) selectNext.current = null
+      return next.map((n) => (n.selected === select.has(n.id) ? n : { ...n, selected: select.has(n.id) }))
     })
-  }, [cardList])
+  }, [cardList, markList])
+  useEffect(() => {
+    setLinks((prev) => {
+      const old = new Map(prev.map((e) => [e.id, e]))
+      const s = stateRef.current
+      // An agent may write an edge before the card it points at.
+      const exists = (id: string) => Boolean(s?.cards[id] || s?.marks[id])
+      return edgeList.filter((e) => exists(e.from) && exists(e.to)).map((e) => linkEdge(e, old.get(e.id)))
+    })
+  }, [edgeList, cardList, markList])
 
-  // Fit once the first cards have sizes.
+  // Fit once the first nodes have sizes.
   const measured = useNodesInitialized()
   const fitted = useRef(false)
   useEffect(() => {
     if (fitted.current || !state) return
-    if (cardList.length === 0) {
+    if (cardList.length + markList.length === 0) {
       fitted.current = true
       setReady(true)
       return
     }
     if (!measured) return
     fitted.current = true
-    void Promise.resolve(flow.fitView({ padding: 120, maxZoom: 1 })).then(() => setReady(true))
+    void Promise.resolve(flow.fitView({ padding: 64, maxZoom: 1 })).then(() => {
+      performance.mark("canvas:ready")
+      setReady(true)
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [measured, state, cardList.length])
+  }, [measured, state, cardList.length, markList.length])
   useSmokeReady("canvas", ready || loadError !== null)
 
-  const saveCard = useCallback(
-    (dto: CardDTO, patch: Partial<CardDTO["card"]>) => {
-      const next = { ...dto.card, ...patch }
-      putCard(next.id, { ...dto, card: next })
-      window.river.boardSaveCard(board, next).then((d) => putCard(d.card.id, d), fail)
+  /** Deletes nodes and the given edges, and every edge touching a deleted node, as one step. A live job's card dismisses the job instead. */
+  const deleteItems = useCallback(
+    (ids: string[], edgeIds: string[] = []) => {
+      const s = stateRef.current
+      if (!s) return
+      const step: Step = []
+      const gone = new Set(ids)
+      for (const id of ids) {
+        const dto = s.cards[id]
+        if (dto) {
+          // A live answer's cards belong to its job: deleting one asks to dismiss the whole answer, which is not undoable.
+          const live = dto.card.pending && "job" in dto.view && dto.view.job && dto.view.job.status !== "accepted" && dto.view.job.status !== "dismissed"
+          if (live) {
+            gone.delete(id)
+            setDismissing(dto.card.pending!.jobId)
+          } else step.push({ kind: "card", id, before: dto.card, after: null })
+        }
+        const m = s.marks[id]
+        if (m) step.push({ kind: "mark", id, before: m, after: null })
+      }
+      const edges = new Set(edgeIds)
+      for (const e of Object.values(s.edges)) if (edges.has(e.id) || gone.has(e.from) || gone.has(e.to)) step.push({ kind: "edge", id: e.id, before: e, after: null })
+      void commit(step)
     },
-    [board, putCard],
+    [commit],
   )
 
-  const actions = useMemo<CanvasActions>(() => {
-    const refresh = (id: string) => void window.river.boardCard(board, id).then((d) => putCard(id, d), fail)
-    return {
-      saveText: (id, text) => {
-        const dto = stateRef.current?.cards[id]
-        if (dto) saveCard(dto, { text })
+  const actions = useMemo<CanvasActions>(
+    () => ({
+      editText: (id, text) => {
+        const card = stateRef.current?.cards[id]?.card
+        if (card) void commit([{ kind: "card", id, before: { text: card.text ?? "" }, after: { text } }])
+      },
+      editCaption: (id, caption) => {
+        const card = stateRef.current?.cards[id]?.card
+        if (card && caption !== (card.caption ?? "")) void commit([{ kind: "card", id, before: { caption: card.caption ?? "" }, after: { caption } }])
       },
       resize: (id, w) => {
-        const dto = stateRef.current?.cards[id]
-        if (dto) saveCard(dto, { w: Math.round(w) })
-      },
-      remove: (id) => {
-        const v = stateRef.current?.cards[id]?.view
-        // A live job owns its card (and worktree): dismissing it removes both. Any other card is just deleted.
-        const job = v?.kind === "concept" && v.job && v.job.status !== "accepted" && v.job.status !== "dismissed" ? v.job : undefined
-        putCard(id, null)
-        ;(job ? window.river.jobDismiss(job.id) : window.river.boardDeleteCard(board, id)).catch((e: unknown) => {
-          fail(e)
-          refresh(id)
-        })
+        const card = stateRef.current?.cards[id]?.card
+        if (card && Math.round(w) !== card.w) void commit([{ kind: "card", id, before: { w: card.w }, after: { w: Math.round(w) } }])
       },
       refresh,
       fail,
-    }
-  }, [board, saveCard, putCard])
+      review: (jobId) => void window.river.jobReview(jobId).catch(fail),
+      dismissJob: setDismissing,
+      viewLog: setLogOf,
+    }),
+    [commit, refresh, fail],
+  )
+  const answerNotes = useMemo(() => new Set(cardList.flatMap((d) => (d.card.kind === "note" && d.card.pending ? [d.card.pending.jobId] : []))), [cardList])
 
-  const onDragStop: OnNodeDrag = useCallback(
-    (_e, _n, dragged) => {
-      for (const n of dragged) {
-        const dto = stateRef.current?.cards[n.id]
-        if (!dto) continue
+  const reply = async (markId: string, text: string) => {
+    const { mark, openMarks } = await window.river.boardReply(board, markId, text)
+    putMark(mark.id, mark, openMarks)
+  }
+  const settleMark = async (markId: string, status: "dismissed" | "accepted", text: string) => {
+    const { mark, openMarks } = await window.river.boardCloseMark(board, markId, status, text)
+    putMark(mark.id, mark, openMarks)
+  }
+  const loadLog = useCallback(() => (logOf ? window.river.jobLog(logOf) : Promise.resolve(null)), [logOf])
+
+  /** Saves where dragged cards and marks ended up, as one step. A moved mark is re-anchored to the cards under it. */
+  const persistMoves = (moved: BoardNode[]) => {
+    const s = stateRef.current
+    if (!s) return
+    const step: Step = []
+    for (const n of moved) {
+      if (n.type === "card") {
+        const card = s.cards[n.id]?.card
         const x = Math.round(n.position.x)
         const y = Math.round(n.position.y)
-        if (x !== dto.card.x || y !== dto.card.y) saveCard(dto, { x, y })
+        if (card && (x !== card.x || y !== card.y)) step.push({ kind: "card", id: n.id, before: { x: card.x, y: card.y }, after: { x, y } })
+      } else {
+        const m = s.marks[n.id]
+        if (!m) continue
+        const b = markBox(m.shape, m.path)
+        const dx = Math.round(n.position.x - b.x)
+        const dy = Math.round(n.position.y - b.y)
+        if (dx === 0 && dy === 0) continue
+        const path = translatePath(m.path, dx, dy)
+        step.push({ kind: "mark", id: n.id, before: { path: m.path, anchors: m.anchors }, after: { path, anchors: anchorsFor(m.shape, path, cardRects()) } })
       }
-    },
-    [saveCard],
-  )
-
-  const cardRects = (): { id: string; rect: Rect }[] =>
-    flow.getNodes().map((n) => ({
-      id: n.id,
-      rect: { x: n.position.x, y: n.position.y, w: n.measured?.width ?? n.width ?? 200, h: n.measured?.height ?? n.height ?? 120 },
-    }))
-
-  const saveMark = async (mark: NewMark): Promise<Mark> => {
-    const { mark: saved, openMarks } = await window.river.boardSaveMark(board, mark)
-    putMark(saved.id, saved, openMarks)
-    return saved
+    }
+    void commit(step)
   }
 
-  /** A finished stroke or shape becomes a mark (or joins the last pen mark), then asks what the user wants. */
+  /** Arrow keys move a focused node without a drag; those moves are saved once the keys rest, as one step. */
+  const keyMoves = useRef<{ ids: Set<string>; timer: number | undefined }>({ ids: new Set(), timer: undefined })
+  const noteSettledMoves = (ids: string[]) => {
+    if (ids.length === 0) return
+    const km = keyMoves.current
+    for (const id of ids) km.ids.add(id)
+    window.clearTimeout(km.timer)
+    km.timer = window.setTimeout(() => {
+      const moved = flow.getNodes().filter((n) => km.ids.has(n.id))
+      km.ids.clear()
+      persistMoves(moved)
+    }, 250)
+  }
+
+  const selection = () => ({ nodes: flow.getNodes().filter((n) => n.selected), edges: flow.getEdges().filter((e) => e.selected) })
+
+  const deleteSelection = () => {
+    const sel = selection()
+    deleteItems(
+      sel.nodes.map((n) => n.id),
+      sel.edges.map((e) => e.id),
+    )
+  }
+
+  const duplicateSelection = () => {
+    const s = stateRef.current
+    if (!s) return
+    const now = new Date().toISOString()
+    const copies = new Map<string, string>()
+    const step: Step = []
+    for (const n of selection().nodes) {
+      const card = s.cards[n.id]?.card
+      const mark = s.marks[n.id]
+      // A pending card belongs to its job; a copy of it would show nothing.
+      if (card && !card.pending) {
+        const id = newId("c_")
+        copies.set(card.id, id)
+        step.push({ kind: "card", id, before: null, after: { ...card, id, x: card.x + NUDGE, y: card.y + NUDGE, createdAt: now } })
+      } else if (mark) {
+        const id = newId("m_")
+        copies.set(mark.id, id)
+        const { jobId: _job, ...rest } = mark
+        step.push({ kind: "mark", id, before: null, after: { ...rest, id, path: translatePath(mark.path, NUDGE, NUDGE), status: "open", createdAt: now } })
+      }
+    }
+    for (const e of Object.values(s.edges)) {
+      const from = copies.get(e.from)
+      const to = copies.get(e.to)
+      if (from && to) {
+        const id = newId("e_")
+        step.push({ kind: "edge", id, before: null, after: { ...e, id, from, to, createdAt: now } })
+      }
+    }
+    if (step.length === 0) return
+    selectNext.current = new Set(copies.values())
+    void commit(step)
+  }
+
+  /** Lines the selected cards up left to right, in their current left-to-right order, top-aligned. */
+  const arrangeRow = () => {
+    const s = stateRef.current
+    if (!s) return
+    const cards = selection()
+      .nodes.filter((n) => n.type === "card")
+      .sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y)
+    if (cards.length < 2) return
+    const y = Math.round(Math.min(...cards.map((n) => n.position.y)))
+    let x = Math.round(cards[0]!.position.x)
+    const step: Step = []
+    for (const n of cards) {
+      const card = s.cards[n.id]?.card
+      if (!card) continue
+      if (card.x !== x || card.y !== y) step.push({ kind: "card", id: card.id, before: { x: card.x, y: card.y }, after: { x, y } })
+      x += Math.round(n.measured?.width ?? card.w) + ROW_GAP
+    }
+    void commit(step)
+  }
+
+  const cardRects = (): { id: string; rect: Rect }[] =>
+    flow
+      .getNodes()
+      .filter((n) => n.type === "card")
+      .map((n) => ({
+        id: n.id,
+        rect: { x: n.position.x, y: n.position.y, w: n.measured?.width ?? n.width ?? 200, h: n.measured?.height ?? n.height ?? 120 },
+      }))
+
+  /** The card under a board point (the smallest, if they overlap), else the mark whose box holds it. */
+  const nodeAt = (p: Pt): string | undefined => {
+    let best: { id: string; area: number; card: boolean } | undefined
+    for (const n of flow.getNodes()) {
+      const w = n.measured?.width ?? n.width ?? 0
+      const h = n.measured?.height ?? n.height ?? 0
+      if (p[0] < n.position.x || p[0] > n.position.x + w || p[1] < n.position.y || p[1] > n.position.y + h) continue
+      const card = n.type === "card"
+      const area = w * h
+      if (!best || (card && !best.card) || (card === best.card && area < best.area)) best = { id: n.id, area, card }
+    }
+    return best?.id
+  }
+
+  /** A finished stroke or shape becomes a mark (or joins the last pen mark), or a connector, then asks what the user wants. */
   const finishDraft = async (d: Draft) => {
     const pts = d.points
     if (pts.length === 0) return
@@ -836,6 +598,12 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
       path = flatten(ellipsePoints(a, b))
     } else if (shape === "arrow") {
       if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 8) return
+      const to = d.from && nodeAt(b)
+      if (d.from && to && to !== d.from) {
+        const id = newId("e_")
+        void commit([{ kind: "edge", id, before: null, after: { id, from: d.from, to, madeBy: ME, createdAt: new Date().toISOString() } }])
+        return
+      }
       path = flatten([a, b])
     } else if (shape === "pin") {
       path = flatten([b])
@@ -847,22 +615,22 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
     const now = Date.now()
     const last = lastPen.current
     const prev = last ? stateRef.current?.marks[last.id] : undefined
-    try {
-      if (shape === "pen" && last && prev && now - last.endedAt <= STROKE_JOIN_MS && intersects(grow(box, 4), grow(last.box, 4))) {
-        const merged = [...prev.path, ...path]
-        const breaks = [...(prev.breaks ?? []), prev.path.length / 2]
-        const saved = await saveMark({ ...prev, path: merged, breaks, anchors: anchorsFor("pen", merged, cardRects()) })
-        const mb = bounds(merged)
-        lastPen.current = { id: saved.id, endedAt: Date.now(), box: mb }
-        setAsk((cur) => (cur && cur.markId === saved.id ? { markId: saved.id, at: [mb.x + mb.w, mb.y + mb.h] } : cur))
-        return
-      }
-      const saved = await saveMark({ shape, path, anchors: anchorsFor(shape, path, cardRects()), thread: [], madeBy: ME })
-      lastPen.current = shape === "pen" ? { id: saved.id, endedAt: Date.now(), box } : null
-      setAsk({ markId: saved.id, at: shape === "pin" ? [box.x, box.y] : [box.x + box.w, box.y + box.h] })
-    } catch (e) {
-      fail(e)
+    if (shape === "pen" && last && prev && now - last.endedAt <= STROKE_JOIN_MS && intersects(grow(box, 4), grow(last.box, 4))) {
+      const merged = [...prev.path, ...path]
+      const breaks = [...(prev.breaks ?? []), prev.path.length / 2]
+      await commit([
+        { kind: "mark", id: prev.id, before: { path: prev.path, breaks: prev.breaks ?? [], anchors: prev.anchors }, after: { path: merged, breaks, anchors: anchorsFor("pen", merged, cardRects()) } },
+      ])
+      const mb = bounds(merged)
+      lastPen.current = { id: prev.id, endedAt: Date.now(), box: mb }
+      setAsk((cur) => (cur && cur.markId === prev.id ? { markId: prev.id, at: [mb.x + mb.w, mb.y + mb.h] } : cur))
+      return
     }
+    const id = newId("m_")
+    const mark: Mark = { id, shape, path, anchors: anchorsFor(shape, path, cardRects()), thread: [], madeBy: ME, status: "open", createdAt: new Date().toISOString() }
+    await commit([{ kind: "mark", id, before: null, after: mark }])
+    lastPen.current = shape === "pen" ? { id, endedAt: Date.now(), box } : null
+    setAsk({ markId: id, at: shape === "pin" ? [box.x, box.y] : [box.x + box.w, box.y + box.h] })
   }
 
   const answerAsk = (text: string | null) => {
@@ -870,49 +638,120 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
     setAsk(null)
     lastPen.current = null
     if (!a || !text) return
-    const m = stateRef.current?.marks[a.markId]
-    if (!m) return
-    void saveMark({ ...m, thread: [...m.thread, { by: ME, at: new Date().toISOString(), text }] }).catch(fail)
+    reply(a.markId, text).catch(fail)
   }
 
-  const placeNote = async (p: Pt) => {
-    try {
-      const dto = await window.river.boardSaveCard(board, { kind: "note", ref: "", text: "", x: Math.round(p[0]), y: Math.round(p[1]), w: 220, madeBy: ME })
-      putCard(dto.card.id, dto)
-      setTool("select")
-    } catch (e) {
-      fail(e)
-    }
+  const placeNote = (p: Pt) => {
+    const id = newId("c_")
+    void commit([{ kind: "card", id, before: null, after: { id, kind: "note", ref: "", text: "", x: Math.round(p[0]), y: Math.round(p[1]), w: 220, madeBy: ME, createdAt: new Date().toISOString() } }])
+    setTool("select")
+  }
+
+  const viewCenter = (): Pt => {
+    const el = wrap.current?.getBoundingClientRect()
+    const c = el ? flow.screenToFlowPosition({ x: el.left + el.width / 2, y: el.top + el.height / 2 }) : { x: 0, y: 0 }
+    return [c.x, c.y]
+  }
+
+  /** Paste and drop: each image goes to the licence form, "own work" filled in, placed at `at` and stepping right. */
+  const stageImages = (files: File[], at: Pt) => {
+    files.forEach((f, i) => {
+      stageFile(f).then(
+        (image) => setRefs((q) => [...q, { image, at: [at[0] + i * NUDGE, at[1] + i * NUDGE], licence: "own work" }]),
+        fail,
+      )
+    })
   }
 
   const chooseTool = (t: Tool) => {
     if (t === "image") {
-      void window.river.boardPickImage().then((r) => r && setRefPick(r), fail)
+      const at = viewCenter()
+      void window.river.boardPickImage().then((image) => image && setRefs((q) => [...q, { image, at: [at[0] - 120, at[1] - 90], licence: "" }]), fail)
       return
     }
     setTool(t)
     setDraft(null)
-    if (t !== "select") setSelectedMark(undefined)
   }
 
-  // Tool keys (not while typing).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const el = e.target as HTMLElement | null
-      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return
-      if (e.ctrlKey || e.metaKey || e.altKey) return
-      if (e.key === "Escape") {
-        setDraft(null)
-        setSelectedMark(undefined)
-        setTool("select")
-        return
-      }
-      const t = TOOLS.find((x) => x.key === e.key.toLowerCase())
+  const setSelected = (pick: (id: string) => boolean) => {
+    setNodes((ns) => ns.map((n) => (n.selected === pick(n.id) ? n : { ...n, selected: pick(n.id) })))
+    setLinks((es) => es.map((e) => (e.selected === pick(e.id) ? e : { ...e, selected: pick(e.id) })))
+  }
+
+  /** Cards answering a mark: the job's pending cards and whatever the mark has connectors to. */
+  const answersTo = (markId: string): string[] => {
+    const s = stateRef.current
+    if (!s) return []
+    const ids = new Set(Object.values(s.cards).filter((d) => d.card.pending?.markId === markId).map((d) => d.card.id))
+    for (const e of Object.values(s.edges)) if (e.from === markId && s.cards[e.to]) ids.add(e.to)
+    return [...ids]
+  }
+
+  const showAnswer = (markId: string) => {
+    const answers = answersTo(markId)
+    setSelected((x) => answers.includes(x))
+    void flow.fitView({ nodes: [markId, ...answers].map((id) => ({ id })), maxZoom: 1, padding: 120, duration: 300 })
+  }
+
+  const jumpTo = (id: string) => {
+    setJumping(false)
+    setSelected((x) => x === id)
+    void flow.fitView({ nodes: [{ id }], maxZoom: 1.2, padding: 120, duration: 320 })
+  }
+
+  const onKey = (e: KeyboardEvent) => {
+    if (isTyping(e.target)) return
+    const mod = e.ctrlKey || e.metaKey
+    const key = e.key.toLowerCase()
+    if (mod && key === "z") {
+      e.preventDefault()
+      void (e.shiftKey ? history.redo() : history.undo()).catch(fail)
+    } else if (mod && key === "y") {
+      e.preventDefault()
+      void history.redo().catch(fail)
+    } else if (mod && key === "d") {
+      e.preventDefault()
+      duplicateSelection()
+    } else if (mod && key === "k") {
+      e.preventDefault()
+      setJumping(true)
+    } else if (mod && key === "a") {
+      e.preventDefault()
+      setSelected(() => true)
+    } else if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault()
+      deleteSelection()
+    } else if (e.key === "Escape") {
+      setDraft(null)
+      setSelected(() => false)
+      setTool("select")
+    } else if (e.shiftKey && (e.code === "Digit1" || e.key === "!" || e.key === "1")) {
+      void flow.fitView({ padding: 48, duration: 260 })
+    } else if (!mod && !e.altKey) {
+      const t = TOOLS.find((x) => x.key === key)
       if (t) chooseTool(t.id)
     }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }
+  const keyRef = useRef(onKey)
+  keyRef.current = onKey
+  const pasteRef = useRef((_e: ClipboardEvent) => {})
+  pasteRef.current = (e: ClipboardEvent) => {
+    if (isTyping(e.target)) return
+    const files = imageFiles(e.clipboardData?.files)
+    if (files.length === 0) return
+    e.preventDefault()
+    const [x, y] = pointer.current ?? viewCenter()
+    stageImages(files, [x - 120, y - 90])
+  }
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => keyRef.current(e)
+    const paste = (e: ClipboardEvent) => pasteRef.current(e)
+    window.addEventListener("keydown", key)
+    window.addEventListener("paste", paste)
+    return () => {
+      window.removeEventListener("keydown", key)
+      window.removeEventListener("paste", paste)
+    }
   }, [])
 
   const toFlow = (e: { clientX: number; clientY: number }): Pt => {
@@ -929,28 +768,51 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
       </div>
     )
   }
-  const selected = selectedMark ? state?.marks[selectedMark] : undefined
-  const titleOf = (id: string) => {
-    const v = state?.cards[id]?.view
-    if (!v) return id
-    return v.kind === "passage" ? v.title : v.kind === "frame" ? v.shotId : v.kind === "concept" ? v.id : (state?.cards[id]?.card.source?.title ?? v.kind)
+
+  const selectedNodes = nodes.filter((n) => n.selected)
+  const selectedLinks = links.filter((e) => e.selected)
+  const soleMark = selectedNodes.length === 1 && selectedLinks.length === 0 && selectedNodes[0]!.type === "mark" ? state?.marks[selectedNodes[0]!.id] : undefined
+  const cardTitle = (id: string) => {
+    const dto = state?.cards[id]
+    return dto ? titleOf(dto) : id
   }
+  const images = lightbox ? readingOrder(cardList.filter((d) => imageOf(d)).map((d) => ({ id: d.card.id, rect: boardRect(d) }))) : []
+  const ref = refs[0]
 
   return (
     <div className="view canvas-view">
-      <div className="toolbar">
-        <span className="tb-label">Canvas</span>
-        <span className="canvas-board-name">{board}</span>
-        <span className="tb-meta">
-          {cardList.length} card{cardList.length === 1 ? "" : "s"}
-        </span>
-        <div className="tb-spacer" />
-        <span className={cx("open-marks", (state?.openMarks ?? 0) > 0 && "has-open")} data-open-marks={state?.openMarks ?? 0}>
-          <span className="open-marks-dot" />
-          {state?.openMarks ?? 0} open mark{state?.openMarks === 1 ? "" : "s"}
-        </span>
-      </div>
-      <div className={cx("canvas-wrap", `tool-${tool}`)} ref={wrap}>
+      <div
+        className={cx("canvas-wrap", `tool-${tool}`, dropping && "is-dropping")}
+        data-canvas-theme={props.theme}
+        ref={wrap}
+        onPointerMove={(e) => (pointer.current = toFlow(e))}
+        onDragEnter={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return
+          drag.current.depth++
+          setDropping(true)
+        }}
+        onDragOver={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return
+          e.preventDefault()
+          e.dataTransfer.dropEffect = "copy"
+          setDropping(true)
+          window.clearTimeout(drag.current.timer)
+          drag.current.timer = window.setTimeout(endDrag, 1_000)
+        }}
+        onDragLeave={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return
+          if (--drag.current.depth <= 0) endDrag()
+        }}
+        onDrop={(e) => {
+          endDrag()
+          if (!e.dataTransfer.types.includes("Files")) return
+          e.preventDefault()
+          const files = imageFiles(e.dataTransfer.files)
+          if (files.length === 0) return setActionError("Only images can be dropped on the board.")
+          const [x, y] = toFlow(e)
+          stageImages(files, [x - 120, y - 90])
+        }}
+      >
         {(state?.errors.length ?? 0) > 0 && (
           <div className="banner banner-warn canvas-banner">
             Skipped {state!.errors.length} file{state!.errors.length === 1 ? "" : "s"} that did not parse: <span className="mono">{state!.errors.join(" · ")}</span>
@@ -962,32 +824,38 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
           </div>
         )}
         <Actions.Provider value={actions}>
-          <ReactFlow
+          <AnswerNotes.Provider value={answerNotes}>
+          <ReactFlow<BoardNode, LinkEdgeType>
             nodes={nodes}
-            edges={[]}
+            edges={links}
             nodeTypes={nodeTypes}
-            onNodesChange={(changes) =>
-              // Height follows the content: never keep a height that a resize wrote.
-              setNodes((ns) => changes.applyTo(ns).map((n) => (n.height !== undefined ? { ...n, height: undefined } : n)))
-            }
-            onNodeDragStop={onDragStop}
-            onNodesDelete={(ns) => ns.forEach((n) => actions.remove(n.id))}
-            onPaneClick={() => setSelectedMark(undefined)}
-            onNodeClick={() => setSelectedMark(undefined)}
+            edgeTypes={edgeTypes}
+            onNodesChange={(changes) => {
+              noteSettledMoves([...changes].filter((c) => c.type === "position" && c.position && !c.dragging).map((c) => c.id))
+              // A card's height follows its content: never keep a height that a resize wrote.
+              setNodes((ns) => changes.applyTo(ns).map((n) => (n.type === "card" && n.height !== undefined ? { ...n, height: undefined } : n)))
+            }}
+            onEdgesChange={(changes) => setLinks((es) => changes.applyTo(es))}
+            onNodeDragStop={(_e, _n, moved) => persistMoves(moved)}
+            onSelectionDragStop={(_e, moved) => persistMoves(moved)}
+            onNodeDoubleClick={(_e, n) => imageOf(state?.cards[n.id]) && setLightbox(n.id)}
             nodesConnectable={false}
             nodesDraggable={tool === "select"}
             elementsSelectable={tool === "select"}
             panOnDrag={tool === "hand" ? true : [1, 2]}
             selectionOnDrag={tool === "select"}
+            multiSelectionKeyCode={MULTI_SELECT_KEYS}
+            deleteKeyCode={null}
             panOnScroll
             zoomOnDoubleClick={false}
-            deleteKeyCode={["Delete", "Backspace"]}
-            minZoom={0.1}
-            maxZoom={3}
+            onlyRenderVisibleElements={CULL}
+            elevateEdgesOnSelect={false}
+            minZoom={0.05}
+            maxZoom={4}
             proOptions={{ hideAttribution: true }}
           >
-            <Background variant={BackgroundVariant.Dots} gap={22} size={1} />
-            <MarksLayer marks={markList} draft={draft} selectedId={selectedMark} pickable={tool === "select"} onPick={setSelectedMark} />
+            <Background variant={BackgroundVariant.Dots} gap={20} size={1.4} />
+            {draft && draft.points.length > 0 && <DraftLayer draft={draft} />}
             {DRAW_TOOLS.has(tool) && (
               <div
                 className={cx("draw-capture", `draw-${tool}`)}
@@ -995,11 +863,9 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
                   if (e.button !== 0) return
                   e.currentTarget.setPointerCapture(e.pointerId)
                   const p = toFlow(e)
-                  if (tool === "note") {
-                    void placeNote(p)
-                    return
-                  }
-                  const d: Draft = { shape: tool as MarkShape, points: [p] }
+                  if (tool === "note") return placeNote(p)
+                  const from = tool === "arrow" ? nodeAt(p) : undefined
+                  const d: Draft = { shape: tool as MarkShape, points: [p], ...(from ? { from } : {}) }
                   drawing.current = d
                   setDraft(d)
                 }}
@@ -1020,43 +886,96 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
                   setDraft(null)
                   if (!d) return
                   if (d.shape !== "pen" && d.shape !== "pin") d.points = [d.points[0]!, toFlow(e)]
-                  void finishDraft(d)
+                  finishDraft(d).catch(fail)
                 }}
               />
             )}
             {ask && <AskBox key={ask.markId} at={ask.at} onDone={answerAsk} />}
+            <MiniMap
+              className="canvas-minimap"
+              position="bottom-right"
+              pannable
+              zoomable
+              ariaLabel="Board overview"
+              nodeBorderRadius={2}
+              nodeStrokeWidth={0}
+              nodeColor={(n) => minimapColor(n as BoardNode)}
+              maskColor="var(--mm-mask)"
+              maskStrokeColor="var(--mm-view)"
+              maskStrokeWidth={1.5}
+              bgColor="var(--mm-bg)"
+              style={{ width: 168, height: 108 }}
+            />
+            <Panel position="bottom-right" className="zoom-panel">
+              <ZoomControls />
+            </Panel>
           </ReactFlow>
+          </AnswerNotes.Provider>
         </Actions.Provider>
-        {selected && (
+        <BoardPill board={board} items={cardList.length} openMarks={state?.openMarks ?? 0} onBoard={props.onBoard} theme={props.theme} onTheme={props.onTheme} />
+        {selectedNodes.length + selectedLinks.length > 0 && !soleMark && (
+          <SelectionBar
+            count={selectedNodes.length + selectedLinks.length}
+            cards={selectedNodes.filter((n) => n.type === "card").length}
+            onRow={arrangeRow}
+            onDuplicate={duplicateSelection}
+            onDelete={deleteSelection}
+          />
+        )}
+        {soleMark && (
           <MarkPanel
-            mark={selected}
-            cardTitle={titleOf}
-            onAsk={() => window.river.jobStart(board, selected.id).catch(fail)}
-            onClose={() => setSelectedMark(undefined)}
-            onDelete={() => {
-              const id = selected.id
-              setSelectedMark(undefined)
-              putMark(id, null)
-              window.river.boardDeleteMark(board, id).then((n) => setState((s) => (s ? { ...s, openMarks: n } : s)), fail)
+            mark={soleMark}
+            answers={answersTo(soleMark.id).length}
+            onShowAnswer={() => showAnswer(soleMark.id)}
+            cardTitle={cardTitle}
+            onAsk={() => window.river.jobStart(board, soleMark.id).catch(fail)}
+            onReply={(text) => reply(soleMark.id, text).catch(fail)}
+            onRevise={(jobId) => window.river.jobRevise(jobId).catch(fail)}
+            onSettle={(status, text) => settleMark(soleMark.id, status, text).catch(fail)}
+            onClose={() => setSelected(() => false)}
+            onDelete={() => deleteItems([soleMark.id])}
+          />
+        )}
+        {state && cardList.length === 0 && markList.length === 0 && <EmptyBoard />}
+        <ToolBar tool={tool} onTool={chooseTool} />
+        {ref && (
+          <RefForm
+            key={ref.image.token}
+            fileName={ref.image.fileName}
+            licence={ref.licence}
+            left={refs.length - 1}
+            onCancel={() => setRefs((q) => q.slice(1))}
+            onSubmit={async (s) => {
+              const dto = await window.river.boardAddRef(board, ref.image.token, s, { x: ref.at[0], y: ref.at[1] })
+              putCard(dto.card.id, dto)
+              history.record([{ kind: "card", id: dto.card.id, before: null, after: dto.card }])
+              setRefs((q) => q.slice(1))
             }}
           />
         )}
-        {state && cardList.length === 0 && markList.length === 0 && (
-          <div className="canvas-empty">
-            <p>An empty board. Pin passages from the Story map or shots from Frames, add an image or a note, and draw on it with the pen.</p>
-          </div>
+        {jumping && state && (
+          <QuickJump
+            items={[
+              ...cardList.map((dto): JumpItem => ({ id: dto.card.id, title: titleOf(dto), detail: [dto.card.label, dto.card.kind, dto.card.text, dto.card.source?.title].filter(Boolean).join(" · "), agent: dto.card.madeBy !== ME })),
+              ...markList.map((m): JumpItem => ({ id: m.id, title: m.thread[0]?.text ?? `${m.shape} mark`, detail: `${m.shape} mark · ${m.status}`, agent: m.madeBy !== ME })),
+            ]}
+            onPick={jumpTo}
+            onClose={() => setJumping(false)}
+          />
         )}
-        <ToolBar tool={tool} onTool={chooseTool} />
-        {refPick && (
-          <RefForm
-            fileName={refPick.fileName}
-            onCancel={() => setRefPick(null)}
-            onSubmit={async (s) => {
-              const el = wrap.current?.getBoundingClientRect()
-              const c = el ? flow.screenToFlowPosition({ x: el.left + el.width / 2, y: el.top + el.height / 2 }) : { x: 0, y: 0 }
-              const dto = await window.river.boardAddRef(board, refPick.token, s, { x: c.x - 120, y: c.y - 90 })
-              putCard(dto.card.id, dto)
-              setRefPick(null)
+        {lightbox && images.includes(lightbox) && (
+          <Lightbox items={images.map((id) => imageOf(state?.cards[id])!)} at={images.indexOf(lightbox)} onAt={(i) => setLightbox(images[i]!)} onClose={() => setLightbox(null)} />
+        )}
+        {logOf && <TextPanel title="Job log" sub={`.river/logs/${logOf}.log`} load={loadLog} onClose={() => setLogOf(null)} />}
+        {dismissing && (
+          <DismissDialog
+            onCancel={() => setDismissing(null)}
+            onDismiss={async (reason) => {
+              const jobId = dismissing
+              await window.river.jobDismiss(jobId, reason || undefined)
+              // The job removes its own cards and connectors; the watcher brings that in, this is only quicker.
+              for (const d of Object.values(stateRef.current?.cards ?? {})) if (d.card.pending?.jobId === jobId) putCard(d.card.id, null)
+              setDismissing(null)
             }}
           />
         )}
@@ -1065,10 +984,31 @@ function CanvasInner(props: { board: string; storyTick: { rel: string; n: number
   )
 }
 
-export function CanvasView(props: { board?: string; storyTick: { rel: string; n: number } | null }) {
+function minimapColor(n: BoardNode): string {
+  if (n.type === "mark") return "var(--mm-mark)"
+  const { card } = n.data.dto
+  if (card.kind === "note") return card.madeBy === ME ? "var(--mm-note-you)" : "var(--mm-note-agent)"
+  return card.kind === "passage" ? "var(--mm-passage)" : "var(--mm-image)"
+}
+
+/** The stroke being drawn, in board coordinates inside the viewport, so panning does not re-render it. */
+function DraftLayer({ draft }: { draft: Draft }) {
+  const a = draft.points[0]!
+  const b = draft.points[draft.points.length - 1]!
+  const path = draft.shape === "circle" ? flatten(ellipsePoints(a, b)) : draft.shape === "arrow" ? flatten([a, b]) : flatten(draft.points)
+  return (
+    <ViewportPortal>
+      <svg className="draft-layer">
+        <MarkShapeView m={{ shape: draft.shape, path, madeBy: ME }} link={Boolean(draft.from)} />
+      </svg>
+    </ViewportPortal>
+  )
+}
+
+export function CanvasView(props: CanvasProps) {
   return (
     <ReactFlowProvider>
-      <CanvasInner board={props.board ?? DEFAULT_BOARD} storyTick={props.storyTick} />
+      <CanvasInner key={props.board} {...props} />
     </ReactFlowProvider>
   )
 }

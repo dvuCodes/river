@@ -92,6 +92,32 @@ describe("git checkpoints", { timeout: 30_000 }, () => {
     expect(existsSync(path.join(root, "gone.txt"))).toBe(false)
   })
 
+  it("restores the game files and keeps River's own data in .river/ as it is now, at the repo top or in a subfolder", async () => {
+    for (const sub of ["", "game"]) {
+      const at = (rel: string) => (sub ? `${sub}/${rel}` : rel)
+      const dir = path.join(root, sub)
+      write(at("story.twee"), "then\n")
+      write(at(".river/review/t_old.json"), '{"text":"then"}\n')
+      write(at(".river/boards/main/cards/c_old.json"), "{}\n")
+      const cp = await checkpoint(dir, `with .river at ${sub || "the top"}`)
+
+      write(at("story.twee"), "now\n")
+      write(at("added.twee"), "added\n")
+      write(at(".river/review/t_old.json"), '{"text":"now"}\n')
+      write(at(".river/review/t_new.json"), "{}\n")
+      write(at(".river/plans/p_new.json"), "{}\n")
+      rmSync(path.join(dir, ".river/boards/main/cards/c_old.json"))
+      await restoreCheckpoint(dir, cp.ref)
+
+      expect(read(at("story.twee"))).toBe("then\n")
+      expect(existsSync(path.join(dir, "added.twee"))).toBe(false)
+      expect(read(at(".river/review/t_old.json"))).toBe('{"text":"now"}\n')
+      expect(existsSync(path.join(dir, ".river/review/t_new.json"))).toBe(true)
+      expect(existsSync(path.join(dir, ".river/plans/p_new.json"))).toBe(true)
+      expect(existsSync(path.join(dir, ".river/boards/main/cards/c_old.json"))).toBe(false)
+    }
+  })
+
   it("works in a repo with no commits, and rejects foreign refs", async () => {
     write("only.txt", "x\n")
     const cp = await checkpoint(root, "first")

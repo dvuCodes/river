@@ -1,15 +1,20 @@
-import { readFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { createGodotAdapter } from "@river/adapter-godot"
 import {
   captureShot,
+  choiceTarget,
   contentPassages,
   DEFAULT_BOARD,
   createPlaytest,
   exportStory,
+  formatClosed,
   formatCond,
+  formatPathList,
+  interruptPaths,
   lint,
   listCaptures,
   listStories,
@@ -17,17 +22,17 @@ import {
   loadSchema,
   loadStory,
   parseTwineHtml,
-  passageById,
   paths,
   proseText,
+  pruneCaptures,
+  runCheckData,
   safePath,
   saveStory,
   slug,
+  summarizePaths,
 } from "@river/core"
 import type { Diagnostic, EngineAdapter, Project, StateSchema, Story } from "@river/core"
-import { mkdir, writeFile } from "node:fs/promises"
-import { existsSync } from "node:fs"
-import { cmdJob, cmdMark } from "./jobs"
+import { cmdBoard, cmdCard, cmdJob, cmdMark } from "./jobs"
 
 export interface RunIo {
   /** Where normal output goes. Default: process.stdout. */
@@ -36,31 +41,56 @@ export interface RunIo {
   stderr?: NodeJS.WritableStream
   /** Input for `play`. Default: process.stdin. */
   stdin?: NodeJS.ReadableStream
-  /** Working directory used when no project dir is given. Default: process.cwd(). */
+  /** The folder relative paths are read from, and the project folder when none is given. Default: process.cwd(). */
   cwd?: string
 }
 
-const HELP = `river <command> [projectDir] [options]
+const HELP = `river <command> [dir] [options]
 
-Commands:
-  lint [dir] [--story rel]                 check stories for broken links, dead ends, never-true conditions
-  paths [dir] [--story rel]                list every route from the start
+[dir] is the game's root folder, the one that holds river.json. Give it as the argument after the command
+(after the subcommand for frames, captures, board, card, mark and job) or as --root <dir>; the default is the
+current folder. Relative paths are read from the folder you ran river in.
+
+Story:
+  lint [dir] [--story rel]                 broken links, dead ends, never-true conditions, rule lines read as prose;
+                                           then river.json's checkData command, when it has one
+  paths [dir] [--story rel] [--max N] [--summary]
+                                           every route from the start, with the choice taken at each passage
+                                           (--summary: route counts by ending; --max: stop after N routes, default 500)
   play [dir] [--story rel] [--from name]   play a story as text
-  export [dir]                             write <export>/<story>.json for each story
+  export [dir] [--story rel]               write <export>/<story>.json for each story
   import-twine <file.html> [dir] [--force] import a Twine 2 archive or published story
-  shots [dir]                              list the shots in river.json and their latest capture
-  capture <shotId> [dir] | --all [dir]     run the engine to capture a shot into .river/captures
+  check-data [dir]                         run river.json's checkData command against a fresh export
 
-Storyboard (--root defaults to the current folder, --board to main):
-  mark add --text "..." [--anchor <cardId>]   add a mark, circled around the card (or at 0,0); prints its id
+Frames:
+  shots [dir]                              the shots in river.json and their latest capture (also: frames list)
+  capture [dir] <shotId>... | capture [dir] --all
+                                           run the engine to capture shots into .river/captures (also: frames capture)
+  captures prune [dir] --keep N [--dry-run]
+                                           delete all but the newest N captures of each shot; a capture a board
+                                           card shows is kept
+
+Storyboard (--board defaults to main):
+  board show [dir]                         the board as agents read it: cards, marks with threads, arrows
+  card add [dir] --passage <file>#<passage id> | --note "..." | --image <file> --licence "..." [--caption "..."] [--anchor <cardId>]
+                                           add a card at a free spot (or right of the anchor); prints its id
+  mark add [dir] --text "..." [--anchor <cardId>]   add a mark, circled around the card (or at a free spot); prints its id
+  mark reply --mark <id> --text "..."      add your reply to a mark's thread
+  mark dismiss|accept --mark <id> [--text "..."]
+                                           close a mark an agent answered (dismiss: --text says why)
   job start --mark <id> [--backend claude-code|api-key] [--model claude-sonnet-5-5]
-                                           the concept artist answers the mark; waits until its script needs approval
-  job show --job <id>                      status, summary, error and script of a job
-  job approve --job <id>                   print the script and its sha256; runs nothing
-  job approve --job <id> --sha256 <hex> --yes
-                                           run the script in Godot, only if its bytes still hash to the sha256 you read
-  job accept --job <id>                    apply the job's concept folder to your checkout
-  job dismiss --job <id>                   throw the job away
+                                           the concept artist answers the mark; waits until its scripts need approval,
+                                           then prints the job and what its turn cost
+  job revise --job <id> [--backend ...] [--model ...]
+                                           answer your reply on the job's mark with a new job, under the old answer
+  job show --job <id>                      status, summary, error and scripts of a job
+  job approve --job <id>                   print every script and its sha256; runs nothing
+  job approve --job <id> --sha256 a=<hex> --sha256 b=<hex> ... --yes
+                                           run the scripts in Godot, only if every one still hashes to the sha256
+                                           you read (one draw.gd: --sha256 <hex>); then the agent looks at its
+                                           renders once and may rewrite its note (--skip-self-check: don't)
+  job accept --job <id> [--variants a,c]   apply the chosen options (default: all that rendered) to your checkout
+  job dismiss --job <id> [--reason "..."]  throw the job away; the reason goes into .river/brief.md
 `
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
@@ -71,20 +101,32 @@ class Out {
   write(s: string) { this.stream.write(s) }
 }
 
+/** A mistake in how the command was typed: exit code 2 and the usage line. */
+class UsageError extends Error {}
+
 async function openProject(dir: string): Promise<{ project: Project; schema: StateSchema }> {
   const project = await loadProject(dir)
   const schema = await loadSchema(project)
   return { project, schema }
 }
 
+/** The stories to work on: all of them, or the one --story names (by path from the root, file name or stem). */
 async function storyFiles(project: Project, story: string | undefined): Promise<string[]> {
-  if (story) return [story.replace(/\\/g, "/")]
-  return listStories(project)
+  const all = await listStories(project)
+  if (story === undefined) return all
+  const want = story.replace(/\\/g, "/")
+  const match = all.find((s) => s === want) ?? all.find((s) => basename(s) === want || basename(s).replace(/\.(twee|tw)$/i, "") === want)
+  if (match) return [match]
+  if (existsSync(safePath(project, want))) return [want]
+  throw new Error(`no story "${story}". --story takes a path from the project root, a file name or a name without .twee; stories here: ${all.join(", ") || `(none under ${project.manifest.stories}/)`}`)
 }
 
 function formatDiag(d: Diagnostic): string {
   return `${d.severity.padEnd(6)} ${d.message}`
 }
+
+/** A capture argument that names a folder, not a shot: it has a path separator, or it exists. */
+const isPathArg = (cwd: string, a: string) => /[\\/]/.test(a) || a === "." || a === ".." || existsSync(resolve(cwd, a))
 
 /** Run the CLI. Resolves to the process exit code. */
 export async function run(argv: string[], io: RunIo = {}): Promise<number> {
@@ -112,7 +154,20 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
         backend: { type: "string" },
         model: { type: "string" },
         yes: { type: "boolean" },
-        sha256: { type: "string" },
+        sha256: { type: "string", multiple: true },
+        variants: { type: "string" },
+        reason: { type: "string" },
+        by: { type: "string" },
+        "skip-self-check": { type: "boolean" },
+        passage: { type: "string" },
+        note: { type: "string" },
+        image: { type: "string" },
+        caption: { type: "string" },
+        licence: { type: "string" },
+        max: { type: "string" },
+        summary: { type: "boolean" },
+        keep: { type: "string" },
+        "dry-run": { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     })
@@ -127,23 +182,81 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
     return cmd || values.help ? 0 : 2
   }
 
+  /** The project folder from a positional dir or --root (both may be given when they agree). */
+  const root = (dir: string | undefined): string => {
+    const a = dir !== undefined ? resolve(cwd, dir) : undefined
+    const b = values.root !== undefined ? resolve(cwd, values.root) : undefined
+    if (a !== undefined && b !== undefined && a !== b) throw new UsageError(`the project folder is given twice: "${dir}" and --root "${values.root}"`)
+    return a ?? b ?? cwd
+  }
+  /** At most `n` positionals after the command; the rest is a mistake. */
+  const upTo = (args: string[], n: number, what: string): string[] => {
+    if (args.length > n) throw new UsageError(`unexpected "${args[n]}" (usage: river ${what})`)
+    return args
+  }
+  const board = values.board ?? DEFAULT_BOARD
+
+  const capture = (args: string[]) => {
+    // The folder can come before or after the shot ids. One that is not a project fails in loadProject, before anything runs.
+    const dirs = values.root === undefined ? args.filter((a) => isPathArg(cwd, a)) : []
+    if (dirs.length > 1) throw new UsageError(`more than one project folder: ${dirs.join(", ")}`)
+    const shots = args.filter((a) => a !== dirs[0])
+    if (values.all && shots.length > 0) throw new UsageError(`--all captures every shot; drop "${shots[0]}" or --all`)
+    if (!values.all && shots.length === 0) throw new UsageError("missing <shotId> (or --all) (usage: river capture [dir] <shotId>...)")
+    return cmdCapture(root(dirs[0]), values.all ? undefined : shots, out, err)
+  }
+  const prune = (args: string[]) => {
+    const [dir] = upTo(args, 1, "captures prune [dir] --keep N [--dry-run]")
+    // Number("") is 0, which would delete every unpinned capture; only digits count.
+    if (values.keep === undefined || !/^\d+$/.test(values.keep)) throw new UsageError("captures prune needs --keep N, a whole number of captures to keep per shot (0 or more)")
+    return cmdPrune(root(dir), Number(values.keep), values["dry-run"] ?? false, out)
+  }
+
   try {
     switch (cmd) {
-      case "lint": return await cmdLint(resolve(cwd, rest[0] ?? "."), values.story, out)
-      case "paths": return await cmdPaths(resolve(cwd, rest[0] ?? "."), values.story, out)
-      case "export": return await cmdExport(resolve(cwd, rest[0] ?? "."), values.story, out, err)
-      case "play": return await cmdPlay(resolve(cwd, rest[0] ?? "."), values.story, values.from, io, out)
-      case "import-twine": {
-        if (!rest[0]) { err.line("river import-twine: missing <file.html>"); return 2 }
-        return await cmdImport(resolve(cwd, rest[0]), resolve(cwd, rest[1] ?? "."), values.force ?? false, out, err)
+      case "lint": return await cmdLint(root(upTo(rest, 1, "lint [dir]")[0]), values.story, out)
+      case "paths": {
+        const max = values.max === undefined ? undefined : Number(values.max)
+        if (max !== undefined && (!Number.isInteger(max) || max < 1)) throw new UsageError("--max needs a whole number of routes, 1 or more")
+        return await cmdPaths(root(upTo(rest, 1, "paths [dir]")[0]), values.story, { max, summary: values.summary ?? false }, out)
       }
-      case "shots": return await cmdShots(resolve(cwd, rest[0] ?? "."), out)
-      case "mark": return await cmdMark(rest[0], { root: resolve(cwd, values.root ?? "."), board: values.board ?? DEFAULT_BOARD, text: values.text, anchor: values.anchor }, out, err)
-      case "job": return await cmdJob(rest[0], { ...values, root: resolve(cwd, values.root ?? ".") }, out, err)
-      case "capture": {
-        if (values.all) return await cmdCapture(resolve(cwd, rest[0] ?? "."), undefined, out, err)
-        if (!rest[0]) { err.line("river capture: missing <shotId> (or --all)"); return 2 }
-        return await cmdCapture(resolve(cwd, rest[1] ?? "."), rest[0], out, err)
+      case "export": return await cmdExport(root(upTo(rest, 1, "export [dir]")[0]), values.story, out, err)
+      case "play": return await cmdPlay(root(upTo(rest, 1, "play [dir]")[0]), values.story, values.from, io, out)
+      case "check-data": return await cmdCheckData(root(upTo(rest, 1, "check-data [dir]")[0]), out)
+      case "import-twine": {
+        const [file, dir] = upTo(rest, 2, "import-twine <file.html> [dir]")
+        if (!file) throw new UsageError("missing <file.html> (usage: river import-twine <file.html> [dir])")
+        return await cmdImport(resolve(cwd, file), root(dir), values.force ?? false, out, err)
+      }
+      case "shots": return await cmdShots(root(upTo(rest, 1, "shots [dir]")[0]), out)
+      case "capture": return await capture(rest)
+      case "frames": {
+        const [sub, ...args] = rest
+        if (sub === "capture") return await capture(args)
+        if (sub === "list") return await cmdShots(root(upTo(args, 1, "frames list [dir]")[0]), out)
+        if (sub === "prune") return await prune(args)
+        throw new UsageError(`frames has "list", "capture" and "prune", not ${sub === undefined ? "nothing" : `"${sub}"`}`)
+      }
+      case "captures": {
+        const [sub, ...args] = rest
+        if (sub === "prune") return await prune(args)
+        throw new UsageError(`captures has "prune", not ${sub === undefined ? "nothing" : `"${sub}"`} (river shots lists the captures)`)
+      }
+      case "mark": {
+        const [sub, dir] = upTo(rest, 2, "mark <add|reply|dismiss|accept> [dir]")
+        return await cmdMark(sub, { root: root(dir), board, text: values.text, anchor: values.anchor, mark: values.mark }, out, err)
+      }
+      case "board": {
+        const [sub, dir] = upTo(rest, 2, "board show [dir]")
+        return await cmdBoard(sub, { root: root(dir), board }, out, err)
+      }
+      case "card": {
+        const [sub, dir] = upTo(rest, 2, "card add [dir]")
+        return await cmdCard(sub, { ...values, root: root(dir), board }, out, err)
+      }
+      case "job": {
+        const [sub, dir] = upTo(rest, 2, "job <start|revise|show|approve|accept|dismiss> [dir]")
+        return await cmdJob(sub, { ...values, root: root(dir) }, out, err)
       }
       default:
         err.line(`river: unknown command "${cmd}"`)
@@ -152,7 +265,7 @@ export async function run(argv: string[], io: RunIo = {}): Promise<number> {
     }
   } catch (e) {
     err.line(`river ${cmd}: ${(e as Error).message}`)
-    return 1
+    return e instanceof UsageError ? 2 : 1
   }
 }
 
@@ -181,12 +294,18 @@ async function cmdShots(dir: string, out: Out): Promise<number> {
   return 0
 }
 
-async function cmdCapture(dir: string, shotId: string | undefined, out: Out, err: Out): Promise<number> {
+async function cmdCapture(dir: string, shotIds: string[] | undefined, out: Out, err: Out): Promise<number> {
   const project = await loadProject(dir)
   const adapter = adapterFor(project)
-  const ids = shotId !== undefined ? [shotId] : project.manifest.shots.map((s) => s.id)
+  const known = project.manifest.shots.map((s) => s.id)
+  const ids = shotIds ?? known
   if (ids.length === 0) {
     err.line("river capture: no shots in river.json")
+    return 1
+  }
+  const unknown = ids.filter((id) => !known.includes(id))
+  if (unknown.length > 0) {
+    err.line(`river capture: no shot ${unknown.map((id) => JSON.stringify(id)).join(", ")} in the manifest (shots: ${known.join(", ") || "none yet"}); nothing was captured`)
     return 1
   }
   let failed = 0
@@ -201,6 +320,34 @@ async function cmdCapture(dir: string, shotId: string | undefined, out: Out, err
     }
   }
   return failed > 0 ? 1 : 0
+}
+
+async function cmdPrune(dir: string, keep: number, dryRun: boolean, out: Out): Promise<number> {
+  const project = await loadProject(dir)
+  const { removed, pinned } = await pruneCaptures(project, keep, { dryRun })
+  for (const r of removed) out.line(`${dryRun ? "would delete" : "deleted"}  ${r.shotId}  ${r.at}  (rev ${r.rev})`)
+  for (const p of pinned) out.line(`kept  ${p.shotId}  ${p.at}  (a board card shows it)`)
+  out.line(`${dryRun ? "would delete" : "deleted"} ${plural(removed.length, "capture")}, keeping the newest ${keep} of each shot`)
+  return 0
+}
+
+async function cmdCheckData(dir: string, out: Out): Promise<number> {
+  const { project, schema } = await openProject(dir)
+  if (!project.manifest.checkData) {
+    out.line('no checkData in river.json (for example "checkData": "node tools/check_story.mjs")')
+    return 1
+  }
+  return (await printCheckData(project, schema, out)) ? 0 : 1
+}
+
+/** Run river.json's checkData command and print what it said. False when it failed or could not run. */
+async function printCheckData(project: Project, schema: StateSchema, out: Out): Promise<boolean> {
+  const r = await runCheckData(project, schema)
+  out.line(`check-data: ${r.command}`)
+  for (const l of r.output.trimEnd().split(/\r?\n/)) if (l.trim()) out.line(`  ${l}`)
+  if (r.ok) out.line("check-data: ok")
+  else out.line(`error  check-data: ${r.problem}`)
+  return r.ok
 }
 
 async function cmdLint(dir: string, storyOpt: string | undefined, out: Out): Promise<number> {
@@ -219,30 +366,26 @@ async function cmdLint(dir: string, storyOpt: string | undefined, out: Out): Pro
       else infos++
     }
   }
+  if (project.manifest.checkData && !(await printCheckData(project, schema, out))) errors++
   let summary = `${plural(errors, "error")}, ${plural(warnings, "warning")}`
   if (infos > 0) summary += `, ${infos} info`
   out.line(`${summary} in ${plural(passages, "passage")}`)
   return errors > 0 ? 1 : 0
 }
 
-async function cmdPaths(dir: string, storyOpt: string | undefined, out: Out): Promise<number> {
+async function cmdPaths(dir: string, storyOpt: string | undefined, o: { max: number | undefined; summary: boolean }, out: Out): Promise<number> {
   const { project, schema } = await openProject(dir)
   const files = await storyFiles(project, storyOpt)
+  const opts = o.max !== undefined ? { maxPaths: o.max } : {}
   for (const rel of files) {
     const { story } = await loadStory(project, rel)
     if (files.length > 1) out.line(rel)
-    const routes = paths(story, schema)
-    const width = String(routes.length).length + 2
-    routes.forEach((r, i) => {
-      const names = r.steps.map((s) => passageById(story, s.passageId)?.name ?? s.passageId)
-      let line = `${String(i + 1).padEnd(width)}${names.join(" → ")}`
-      if (r.end === "dead-end") line += " (dead end)"
-      if (r.end === "loop") line += " (loop)"
-      if (r.conditions.length > 0) line += `   [${r.conditions.map(formatCond).join(" and ")}]`
-      if (!r.satisfiable) line += "   never true"
-      out.line(line)
-    })
+    const routes = paths(story, schema, opts)
+    const detours = interruptPaths(story, schema, opts)
     if (routes.length === 0) out.line("no routes (the start passage is missing)")
+    else for (const l of o.summary ? summarizePaths(story, routes, detours) : formatPathList(story, routes, detours)) out.line(l)
+    const max = o.max ?? 500
+    if (routes.length >= max || detours.length >= max) out.line(`stopped at ${max} routes; --max N lists more`)
   }
   return 0
 }
@@ -307,7 +450,7 @@ async function cmdPlay(dir: string, storyOpt: string | undefined, from: string |
   const { project, schema } = await openProject(dir)
   const files = await storyFiles(project, storyOpt)
   const rel = files[0]
-  if (!rel) throw new Error("no stories found")
+  if (!rel) throw new Error(`no stories under ${project.manifest.stories}/`)
   if (files.length > 1 && !storyOpt) out.line(`playing ${rel} (use --story to pick another)`)
   const { story } = await loadStory(project, rel)
   const play = createPlaytest(story, schema, from !== undefined ? { from } : undefined)
@@ -322,12 +465,22 @@ async function cmdPlay(dir: string, storyOpt: string | undefined, from: string |
     const prose = proseText(p.text)
     if (prose) out.line(prose)
     out.line()
+    const inInterrupt = play.history().at(-1)?.returnTo !== undefined
     for (const c of play.choices()) {
-      const broken = !story.passages.some((q) => q.name === c.choice.target || q.id === c.choice.target)
-      const label = `${c.index + 1}. ${c.choice.label}`
-      if (broken) out.line(dim(`  ${label}  (broken link to "${c.choice.target}")`))
-      else if (!c.open) out.line(dim(`  ${label}  [${c.choice.when ? formatCond(c.choice.when) : ""}]`))
+      const to = choiceTarget(story, c.choice.target)
+      const label = `${c.index + 1}. ${c.choice.label}${c.choice.hint ? `  (${c.choice.hint})` : ""}`
+      if (to.kind === "missing") out.line(dim(`  ${label}  (broken link to "${c.choice.target}")`))
+      else if (c.closed) out.line(dim(`  ${label}  [${formatClosed(c.closed)}]`))
+      else if (to.kind === "return" && !inInterrupt) out.line(dim(`  ${label}  (returns, but no interrupt is running)`))
       else out.line(`  ${label}`)
+    }
+    const interrupts = play.interrupts()
+    if (interrupts.length > 0 && !inInterrupt && !p.isEnding) {
+      out.line(
+        `  interrupts: ${interrupts
+          .map((i, k) => (i.open ? `!${k + 1} ${i.passage.name}` : dim(`!${k + 1} ${i.passage.name} [${i.passage.when ? formatCond(i.passage.when) : ""}]`)))
+          .join("   ")}`,
+      )
     }
     if (play.isOver()) out.line(p.isEnding ? "-- the end --  (:undo to go back, :quit to stop)" : "-- no open choices --  (:undo, :quit)")
     out.write("> ")
@@ -341,7 +494,7 @@ async function cmdPlay(dir: string, storyOpt: string | undefined, from: string |
     try {
       if (line === ":quit" || line === ":q") break
       if (line === ":state") {
-        for (const [k, v] of Object.entries(play.state())) out.line(`  ${k} = ${String(v)}`)
+        for (const [k, v] of Object.entries(play.state())) out.line(`  ${k} = ${String(v)}${schema[k]?.engine ? "  (engine)" : ""}`)
         out.write("> ")
         continue
       }
@@ -354,7 +507,16 @@ async function cmdPlay(dir: string, storyOpt: string | undefined, from: string |
         continue
       }
       if (/^\d+$/.test(line)) { play.choose(Number(line) - 1); render(); continue }
-      out.line("  type a choice number, :state, :set var value, :undo or :quit")
+      if (line.startsWith("!")) {
+        const pick = line.slice(1).trim()
+        const interrupts = play.interrupts()
+        const target = /^\d+$/.test(pick) ? interrupts[Number(pick) - 1]?.passage.name : pick
+        if (target === undefined) throw new Error(`no interrupt ${line}`)
+        play.interrupt(target)
+        render()
+        continue
+      }
+      out.line("  type a choice number, !n to start an interrupt, :state, :set var value, :undo or :quit")
     } catch (e) {
       out.line(`  ${(e as Error).message}`)
     }

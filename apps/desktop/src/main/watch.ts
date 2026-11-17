@@ -40,6 +40,8 @@ async function isOwnWrite(abs: string): Promise<boolean> {
 export interface ProjectWatch {
   /** Start watching one more folder (e.g. a board folder River just created). */
   add(abs: string): void
+  /** Stop watching a folder `add` started (before River renames or deletes it: a watched folder can be locked on Windows). */
+  remove(abs: string): Promise<void>
   stop(): Promise<void>
 }
 
@@ -64,8 +66,8 @@ export function watchProject(project: Project, emit: (changes: FsChange[]) => vo
     if (rel === "river.json") return "manifest"
     if (rel.startsWith(".river/review/")) return "review"
     if (rel.startsWith(".river/plans/")) return "plans"
-    // One file per card or mark; temp files of atomic writes start with a dot.
-    if (/^\.river\/boards\/[a-z0-9_-]{1,64}\/(cards|marks)\/[^./][^/]*\.json$/.test(rel)) return "board"
+    // One file per card, mark or edge; temp files of atomic writes start with a dot.
+    if (/^\.river\/boards\/[a-z0-9_-]{1,64}\/(cards|marks|edges)\/[^./][^/]*\.json$/.test(rel)) return "board"
     if (/^\.river\/jobs\/[^./][^/]*\.json$/.test(rel)) return "job"
     if (rel === stateRel) return "state"
     if (/\.(twee|tw)$/i.test(rel)) return "story"
@@ -106,6 +108,10 @@ export function watchProject(project: Project, emit: (changes: FsChange[]) => vo
       if (added.has(key)) return
       added.add(key)
       watcher.add(abs)
+    },
+    async remove(abs) {
+      if (!added.delete(keyOf(abs))) return
+      watcher.unwatch(abs)
     },
     async stop() {
       clearTimeout(timer)

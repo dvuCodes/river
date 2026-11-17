@@ -12,9 +12,10 @@
     "typecheck": "tsc -p tsconfig.node.json && tsc -p tsconfig.web.json"
   },
   "dependencies": {
-    "@river/core": "workspace:*",
-    "@river/agent": "workspace:*",
+    "@fontsource/caveat": "^5.3.0",
     "@river/adapter-godot": "workspace:*",
+    "@river/agent": "workspace:*",
+    "@river/core": "workspace:*",
     "@xyflow/react": "^13.0.1",
     "chokidar": "^6.0.0",
     "react": "^19.3.1",

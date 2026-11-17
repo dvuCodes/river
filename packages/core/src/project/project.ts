@@ -15,6 +15,7 @@ const ShotSchema = z.object({
   count: z.number().int().min(1),
   ticks: z.number().int().min(0).optional(),
   note: z.string().optional(),
+  timeoutS: z.number().positive().optional(),
 })
 
 const ManifestSchema = z.object({
@@ -26,13 +27,15 @@ const ManifestSchema = z.object({
   adapter: z.record(z.string(), z.record(z.string(), z.string())).default({}),
   shots: z.array(ShotSchema).default([]),
   editable: z.array(z.string()).default(DEFAULT_EDITABLE),
+  checkData: z.string().min(1).optional(),
 })
 
+const engine = z.boolean().optional()
 const VarDeclSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("number"), min: z.number().optional(), max: z.number().optional(), initial: z.number().optional() }),
-  z.object({ type: z.literal("int"), min: z.number().int().optional(), max: z.number().int().optional(), initial: z.number().int().optional() }),
-  z.object({ type: z.literal("bool"), initial: z.boolean().optional() }),
-  z.object({ type: z.literal("enum"), values: z.array(z.string()).min(1), initial: z.string().optional() }),
+  z.object({ type: z.literal("number"), min: z.number().optional(), max: z.number().optional(), initial: z.number().optional(), engine }),
+  z.object({ type: z.literal("int"), min: z.number().int().optional(), max: z.number().int().optional(), initial: z.number().int().optional(), engine }),
+  z.object({ type: z.literal("bool"), initial: z.boolean().optional(), engine }),
+  z.object({ type: z.literal("enum"), values: z.array(z.string()).min(1), initial: z.string().optional(), engine }),
 ])
 
 const StateSchemaSchema = z.record(z.string(), VarDeclSchema)
@@ -51,10 +54,20 @@ async function readJson(path: string, what: string): Promise<unknown> {
   }
 }
 
+const WANT = "River wants the game's root folder, the one that holds river.json"
+
 /** Read and validate <root>/river.json. Applies defaults (editable globs). */
 export async function loadProject(root: string): Promise<Project> {
-  const abs = realpathSync(resolve(root))
+  const want = resolve(root)
+  if (!existsSync(want)) throw new Error(`no folder at ${want}. ${WANT}`)
+  const abs = realpathSync(want)
   const path = join(abs, "river.json")
+  if (!existsSync(path)) {
+    let up = dirname(abs)
+    while (up !== dirname(up) && !existsSync(join(up, "river.json"))) up = dirname(up)
+    const near = existsSync(join(up, "river.json")) ? ` (${up} has one)` : ""
+    throw new Error(`no river.json in ${abs}${near}. ${WANT}`)
+  }
   const parsed = ManifestSchema.safeParse(await readJson(path, "river.json"))
   if (!parsed.success) throw new Error(`river.json at ${path} is invalid:\n${z.prettifyError(parsed.error)}`)
   const manifest: RiverManifest = parsed.data
@@ -71,7 +84,7 @@ function isInside(root: string, p: string): boolean {
 }
 
 /** Resolve rel inside the root. Throws if the result is outside the root (after resolving .. and symlinks). */
-export function safePath(project: Project, rel: string): string {
+export function safePath(project: Pick<Project, "root">, rel: string): string {
   const root = realpathSync(project.root)
   const target = resolve(root, rel)
   // Resolve symlinks on the deepest part of the path that exists.

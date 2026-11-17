@@ -54,16 +54,26 @@ export default defineConfig({
       externalizeDeps: { exclude: ["@river/core", "@river/agent", "@river/adapter-godot"] },
     },
   },
+  // Two windows: the app, and the approval window main opens to show a job's scripts and take the user's Run.
   preload: {
     build: {
       // A sandboxed preload must be one CommonJS file with no external imports but electron.
       externalizeDeps: false,
+      isolatedEntries: true,
       rolldownOptions: {
+        input: { index: resolve(here, "src/preload/index.ts"), approval: resolve(here, "src/preload/approval.ts") },
         output: { format: "cjs", entryFileNames: "[name].cjs" },
       },
     },
   },
   renderer: {
     plugins: [react()],
+    build: {
+      // Each window gets its own bundle: the approval window loads none of the app's code.
+      isolatedEntries: true,
+      rolldownOptions: {
+        input: { index: resolve(here, "src/renderer/index.html"), approval: resolve(here, "src/renderer/approval.html") },
+      },
+    },
   },
 })

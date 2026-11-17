@@ -93,7 +93,13 @@ async function removeEmptyParents(root: string, file: string): Promise<void> {
   }
 }
 
-/** Restore the working tree files to the checkpoint. Files created after it are removed. */
+/** River's own data under the root: review threads, plans, boards and jobs. A restore leaves it as it is now. */
+const RIVER_DATA = ".river"
+
+/**
+ * Restore the working tree files to the checkpoint. Files created after it are removed. River's own data
+ * (.river/) is not game state, so a thread or board change made after the checkpoint survives the restore.
+ */
 export async function restoreCheckpoint(root: string, ref: string): Promise<void> {
   if (!ref.startsWith(REF_PREFIX) || !/^\d+$/.test(ref.slice(REF_PREFIX.length))) {
     throw new Error(`river: ${JSON.stringify(ref)} is not a river checkpoint ref`)
@@ -104,7 +110,7 @@ export async function restoreCheckpoint(root: string, ref: string): Promise<void
   // Work out what to delete before writing anything (the checkpoint may change .gitignore).
   const nowFiles = await treeFiles(root, await snapshotTree(root))
   const thenFiles = new Set(await treeFiles(root, `${sha}^{tree}`))
-  const added = nowFiles.filter((f) => !thenFiles.has(f))
+  const added = nowFiles.filter((f) => !thenFiles.has(f) && !f.startsWith(`${RIVER_DATA}/`))
 
   for (const rel of added) {
     const abs = path.join(root, rel)
@@ -114,6 +120,7 @@ export async function restoreCheckpoint(root: string, ref: string): Promise<void
 
   await withTempIndex(async (env) => {
     await git(root, ["read-tree", sha], { env })
+    await git(root, ["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", RIVER_DATA], { env })
     await git(root, [...RAW, "checkout-index", "-a", "-f"], { env })
   })
 }

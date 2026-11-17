@@ -57,14 +57,14 @@ describe("MessageMapper", () => {
   })
 
   it("emits plan-saved from a JSON result, structured result or bare text", () => {
-    const save = (id: string) => assistant([{ type: "tool_use", id, name: "mcp__river__plan_save", input: { title: "Tighter leash" } }])
+    const save = (id: string) => assistant([{ type: "tool_use", id, name: "mcp__river__plan_save", input: { title: "Bigger ducks" } }])
     const events = run([
       save("a"),
       toolResult("a", [{ type: "text", text: JSON.stringify({ id: "p_abc123", status: "draft" }) }]),
       save("b"),
       toolResult("b", [{ type: "text", text: "saved" }], { tool_use_result: { structuredContent: { planId: "p_struct" } } }),
       save("c"),
-      toolResult("c", "Saved draft plan p_text99: Tighter leash. It needs the user's approval before implement_edit can use it."),
+      toolResult("c", "Saved draft plan p_text99: Bigger ducks. It needs the user's approval before implement_edit can use it."),
       save("d"),
       toolResult("d", "plan_save failed", {}, true),
     ])
@@ -73,7 +73,7 @@ describe("MessageMapper", () => {
       { type: "plan-saved", planId: "p_struct" },
       { type: "plan-saved", planId: "p_text99" },
     ])
-    expect(events.find((e) => e.type === "tool")).toMatchObject({ summary: 'Save change plan "Tighter leash"' })
+    expect(events.find((e) => e.type === "tool")).toMatchObject({ summary: 'Save change plan "Bigger ducks"' })
   })
 
   it("emits capture with shot id and files", () => {

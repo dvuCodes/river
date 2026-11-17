@@ -1,4 +1,4 @@
-import type { CmpOp, Cond, Effect, GameState, StateSchema } from "./types"
+import type { CmpOp, Cond, Effect, GameState, StateSchema, VarDecl } from "./types"
 
 type Value = number | string | boolean
 
@@ -48,7 +48,7 @@ function tokenize(src: string): Token[] {
   return out
 }
 
-/** Parse "a >= 1 and (mood == SURGE or not b)". Bare words on the right are enum values. */
+/** Parse "a >= 1 and (mood == EXCITED or not b)". Bare words on the right are enum values. */
 export function parseCond(src: string): Cond {
   const toks = tokenize(src)
   let pos = 0
@@ -172,18 +172,21 @@ function parseEffectValue(raw: string, whole: string): Value {
   throw new Error(`bad value "${s}" in "${whole}"`)
 }
 
-/** Parse "bond += 10, energy -= 8, mood = CALM". "-=" becomes add with a negative amount. */
+/** Parse "bond += 10, energy -= 5, bond *= 0.5, bond /= 2, mood = CALM". "-=" adds the negative, "/=" multiplies by the inverse. */
 export function parseEffects(src: string): Effect[] {
   if (src.trim() === "") return []
   return splitTopLevel(src).map((part): Effect => {
     const whole = part.trim()
-    const m = /^([A-Za-z_][A-Za-z0-9_.]*)\s*(\+=|-=|=)\s*([\s\S]*)$/.exec(whole)
-    if (!m) throw new Error(`bad effect "${whole}" (expected "var += n", "var -= n" or "var = value")`)
+    const m = /^([A-Za-z_][A-Za-z0-9_.]*)\s*(\+=|-=|\*=|\/=|=)\s*([\s\S]*)$/.exec(whole)
+    if (!m) throw new Error(`bad effect "${whole}" (expected "var += n", "var -= n", "var *= n", "var /= n" or "var = value")`)
     const variable = m[1]!
     const op = m[2]!
     const value = parseEffectValue(m[3]!, whole)
     if (op === "=") return { variable, op: "set", amount: value }
     if (typeof value !== "number") throw new Error(`"${op}" needs a number in "${whole}"`)
+    if (op === "/=" && value === 0) throw new Error(`cannot divide by 0 in "${whole}"`)
+    if (op === "*=") return { variable, op: "mul", amount: value }
+    if (op === "/=") return { variable, op: "mul", amount: 1 / value }
     return { variable, op: "add", amount: op === "-=" ? -value : value }
   })
 }
@@ -191,31 +194,36 @@ export function parseEffects(src: string): Effect[] {
 export function formatEffects(effects: Effect[]): string {
   return effects
     .map((e) => {
-      if (e.op === "add" && typeof e.amount === "number") {
-        return e.amount < 0 ? `${e.variable} -= ${-e.amount}` : `${e.variable} += ${e.amount}`
-      }
+      if (typeof e.amount === "number" && e.op === "add") return e.amount < 0 ? `${e.variable} -= ${-e.amount}` : `${e.variable} += ${e.amount}`
+      if (typeof e.amount === "number" && e.op === "mul") return `${e.variable} *= ${e.amount}`
       return `${e.variable} = ${formatValue(e.amount)}`
     })
     .join(", ")
+}
+
+/** A number after an effect: clamped to the schema range, and whole for an int. */
+export function settleNumber(v: number, decl: VarDecl | undefined): number {
+  if (!decl || (decl.type !== "number" && decl.type !== "int")) return v
+  if (decl.type === "int") v = Math.trunc(v)
+  if (decl.min !== undefined && v < decl.min) v = decl.min
+  if (decl.max !== undefined && v > decl.max) v = decl.max
+  return v
 }
 
 /** Apply effects and clamp numbers to the schema range. Returns a new object. */
 export function applyEffects(state: GameState, effects: Effect[], schema: StateSchema): GameState {
   const next: GameState = { ...state }
   for (const e of effects) {
-    const decl = schema[e.variable]
+    const cur = next[e.variable]
+    const n = typeof cur === "number" ? cur : 0
+    const by = typeof e.amount === "number" ? e.amount : 0
     let v: Value
-    if (e.op === "add") {
-      const cur = next[e.variable]
-      v = (typeof cur === "number" ? cur : 0) + (typeof e.amount === "number" ? e.amount : 0)
-    } else {
-      v = e.amount
+    switch (e.op) {
+      case "add": v = n + by; break
+      case "mul": v = n * by; break
+      case "set": v = e.amount; break
     }
-    if (typeof v === "number" && decl && (decl.type === "number" || decl.type === "int")) {
-      if (decl.min !== undefined && v < decl.min) v = decl.min
-      if (decl.max !== undefined && v > decl.max) v = decl.max
-    }
-    next[e.variable] = v
+    next[e.variable] = typeof v === "number" ? settleNumber(v, schema[e.variable]) : v
   }
   return next
 }

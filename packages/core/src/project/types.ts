@@ -17,6 +17,8 @@ export interface ShotDef {
   ticks?: number
   /** Free text that the review board shows under the shot. */
   note?: string
+  /** Seconds the engine may take before River stops it. Default: 60 plus half a second per frame. */
+  timeoutS?: number
 }
 
 export interface RiverManifest {
@@ -37,6 +39,12 @@ export interface RiverManifest {
    * Default: ["data/**", "tools/shots/**"].
    */
   editable?: string[]
+  /**
+   * A command `river lint` and `river check-data` run from the root after a fresh export, to compare the
+   * story with the game's own data, e.g. "node tools/check_story.mjs". It gets RIVER_ROOT and RIVER_EXPORT_DIR
+   * (a temporary folder holding <story>.json for every story); a non-zero exit is a lint error.
+   */
+  checkData?: string
 }
 
 /** A project after load: the manifest plus the absolute root. */
@@ -52,7 +60,7 @@ export interface Capture {
   rev: string
   /** ISO time. */
   at: string
-  /** Absolute paths of the PNG files, in frame order. */
+  /** Absolute paths of the PNG files, in frame order. capture.json on disk stores them relative to the root. */
   files: string[]
 }
 
@@ -114,6 +122,4 @@ export interface EngineAdapter {
   id: string
   /** Run the engine to capture one shot into outDir. Resolves to the PNG paths in frame order. */
   capture(project: Project, shot: ShotDef, outDir: string): Promise<string[]>
-  /** Check the state schema against the game's own definitions. Optional. */
-  checkSchema?(project: Project): Promise<{ ok: boolean; messages: string[] }>
 }

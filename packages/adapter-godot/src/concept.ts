@@ -3,20 +3,26 @@
  * `func draw(img: Image) -> void`. River renders it headless in a throwaway sandbox project.
  *
  * Nothing here may run Godot on a script the user has not approved: even `--check-only` runs
- * static initialisers. `lintConceptScript` is plain text matching that tells the agent what to
- * rewrite; it is not a security boundary. The boundary is the user's approval of the exact bytes
- * that `renderConcept` is given, and `conceptScriptBytesProblem` keeps those bytes readable as shown.
+ * static initialisers. The boundary is the user reading and approving the exact bytes that
+ * `renderConcept` is given; every line of them is the agent's code. Text matching cannot prove
+ * what GDScript does, so the Kit rule and `lintConceptScript` only refuse the plain forms and tell
+ * the agent what to rewrite. The byte rule is the one hard rule: it makes what the user reads
+ * what runs.
  */
 import { execFile, spawn } from "node:child_process"
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { KIT_CLASS_CACHE, KIT_FUNCTIONS, KIT_GD } from "./kit"
 
 /** Tokens a drawing script has no use for, each with a regex that finds it. */
 const FORBIDDEN: readonly [token: string, find: RegExp][] = [
   ["static", /\bstatic\b/],
   ["preload", /\bpreload\b/],
-  ["load(", /\bload\s*\(/],
+  // load(), Image.load_from_file and the rest; River saves the image itself, so save_png and the rest have no use either.
+  ["load", /\bload(_\w+)?\b/],
+  ["save", /\bsave(_\w+)?\b/],
+  ["Callable", /\bCallable\b/],
   ['extends "', /\bextends\s+["']/],
   ["OS.", /\bOS\s*\./],
   ["FileAccess", /\bFileAccess\b/],
@@ -50,12 +56,19 @@ const FORBIDDEN: readonly [token: string, find: RegExp][] = [
 ]
 
 /**
- * The rule on draw.gd's bytes, checked before River writes, commits, shows or runs it: printable
- * ASCII, tabs and LF line ends only. Then the text a person reads is exactly what Godot runs; an
- * escape code, a lone CR or a bidi control cannot hide or reorder code. Returns where it breaks, or
- * undefined when the bytes pass.
+ * The rules on draw.gd, checked before River writes, commits, shows or runs it. Returns where a rule breaks, or
+ * undefined when the script passes.
+ * - Bytes: printable ASCII, tabs and LF line ends only, so an escape code, a lone CR or a bidi control cannot hide
+ *   or reorder code. This rule holds: what the review shows is what runs.
+ * - Kit: the word, in any case, appears only as Kit.<name>( for one of River's Kit functions. This refuses the
+ *   plain ways to give something else the name, but it is a text scan and cannot prove that a Kit line calls
+ *   River's Kit, so the review never says it does.
  */
-export function conceptScriptBytesProblem(bytes: Uint8Array): string | undefined {
+export function conceptScriptProblem(bytes: Uint8Array): string | undefined {
+  return bytesProblem(bytes) ?? kitNameProblem(Buffer.from(bytes).toString("latin1"))
+}
+
+function bytesProblem(bytes: Uint8Array): string | undefined {
   let line = 1
   let column = 1
   for (const b of bytes) {
@@ -73,10 +86,27 @@ export function conceptScriptBytesProblem(bytes: Uint8Array): string | undefined
   return undefined
 }
 
+const KIT_CALL = new RegExp(`Kit\\.(?:${KIT_FUNCTIONS.join("|")})\\(`, "y")
+
+function kitNameProblem(text: string): string | undefined {
+  for (const m of text.matchAll(/\bkit\b/gi)) {
+    KIT_CALL.lastIndex = m.index
+    // A dot, $ or % before it, even across spaces or a line continuation, makes it a member or node of something else.
+    let before = m.index - 1
+    while (before >= 0 && /[\s\\]/.test(text[before]!)) before--
+    if (KIT_CALL.test(text) && !".$%".includes(text[before] ?? " ")) continue
+    const line = text.slice(0, m.index).split("\n").length
+    return `Line ${line}: "${m[0]}" may appear only as a call to River's Kit, written Kit.name(...) with nothing between. Give nothing else the name kit (in any case), and leave the word out of comments and strings.`
+  }
+  return undefined
+}
+
 /** Problems that make the agent rewrite draw.gd, one sentence each. Empty means the text passes. */
 export function lintConceptScript(text: string): string[] {
   const lines = text.split(/\r?\n/)
   const problems: string[] = []
+  const kit = kitNameProblem(text)
+  if (kit) problems.push(kit)
   const firstCode = lines.find((l) => l.trim() !== "" && !l.trim().startsWith("#"))
   if (firstCode?.trim() !== "extends RefCounted") problems.push('The first line of code must be exactly "extends RefCounted".')
   if (!lines.some((l) => /^func\s+draw\s*\(\s*img\s*:\s*Image\s*\)/.test(l))) {
@@ -85,7 +115,7 @@ export function lintConceptScript(text: string): string[] {
   for (const [token, find] of FORBIDDEN) {
     const at = lines.findIndex((l) => find.test(l))
     if (at !== -1) {
-      problems.push(`Line ${at + 1}: remove "${token}". A concept script only draws on the Image it is given (fill, set_pixel, fill_rect, blend_rect); this check reads comments and strings too.`)
+      problems.push(`Line ${at + 1}: remove "${token}". A concept script only draws on the Image it is given, with Kit and the Image API; this check reads comments and strings too.`)
     }
   }
   return problems
@@ -199,8 +229,8 @@ const tail = (text: string, lines = 30) => text.trim().split(/\r?\n/).slice(-lin
  * failure, including a runtime script error (Godot reports those but still exits 0).
  */
 export async function renderConcept(req: RenderConceptRequest): Promise<void> {
-  const unreadable = conceptScriptBytesProblem(Buffer.from(req.script))
-  if (unreadable) throw new Error(`river: refused to render: ${unreadable}`)
+  const refused = conceptScriptProblem(Buffer.from(req.script))
+  if (refused) throw new Error(`river: refused to render: ${refused}`)
   const width = req.width ?? 256
   const height = req.height ?? 256
   const timeoutMs = req.timeoutMs ?? 30_000
@@ -208,6 +238,9 @@ export async function renderConcept(req: RenderConceptRequest): Promise<void> {
   try {
     await writeFile(path.join(sandbox, "project.godot"), PROJECT)
     await writeFile(path.join(sandbox, "runner.gd"), RUNNER)
+    await writeFile(path.join(sandbox, "kit.gd"), KIT_GD)
+    await mkdir(path.join(sandbox, ".godot"))
+    await writeFile(path.join(sandbox, ".godot", "global_script_class_cache.cfg"), KIT_CLASS_CACHE)
     await writeFile(path.join(sandbox, "concept.gd"), req.script)
     const png = path.join(sandbox, "render.png")
     const args = ["--headless", "--path", sandbox, "-s", "res://runner.gd", "--", `--out=${png.replace(/\\/g, "/")}`, `--w=${width}`, `--h=${height}`]
