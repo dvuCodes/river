@@ -52,7 +52,7 @@ describe("lint", () => {
     ].join("\n")
     const found = lint(parseTwee3(src, "t.twee").story, schema).filter((d) => d.code === "blocked-choice")
     expect(found.map((d) => d.message)).toEqual([
-      "Gate → Fetch: the choice can show while Fetch cannot be entered (its @when energy >= 20 is false after the choice's @cost and @set). Give the choice @when energy >= 10 and energy >= 30, or loosen Fetch's @when.",
+      "Gate → Fetch: the choice can show while Fetch cannot be entered (its @when energy >= 20 is false after the choice's @cost and @set). Give the choice @when energy >= 30, or loosen Fetch's @when.",
       "Gate → Fetch: Fetch has @when energy >= 20, which is never true after the choice's @cost and @set when this choice shows, so the move always fails. Loosen one of the two conditions.",
     ])
     expect(found.map((d) => d.span?.line)).toEqual([3, 6])

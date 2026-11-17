@@ -196,7 +196,7 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
   const spent = { usd: 0 }
   const onEvent = (e: AgentEvent) => progress(e, err, spent)
   const cost = () => {
-    if (spent.usd > 0) out.line(`cost: ${spent.usd.toFixed(4)} (agent turns, from Claude's own report)`)
+    if (spent.usd > 0) out.line(`cost: $${spent.usd.toFixed(4)} (as Claude reported it; a resumed session reports its earlier turns too)`)
   }
 
   const settings = () => {

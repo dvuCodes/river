@@ -130,9 +130,11 @@ function blockedChoice(p: Passage, choice: Choice, target: Passage, schema: Stat
   if (!satisfiable([...shows, needed], schema)) {
     return `${where}: ${target.name} has @when ${formatCond(target.when)}, which is never true${effects} when this choice shows, so the move always fails. Loosen one of the two conditions.`
   }
+  // When the needed condition already implies the choice's own, it alone is the fix.
+  const keepOwn = choice.when && satisfiable([needed, { kind: "not", term: choice.when }], schema)
   return (
     `${where}: the choice can show while ${target.name} cannot be entered (its @when ${formatCond(target.when)} is false${effects}). ` +
-    `Give the choice @when ${formatCond(choice.when ? join("and", [choice.when, needed]) : needed)}, or loosen ${target.name}'s @when.`
+    `Give the choice @when ${formatCond(keepOwn ? join("and", [choice.when!, needed]) : needed)}, or loosen ${target.name}'s @when.`
   )
 }
 
