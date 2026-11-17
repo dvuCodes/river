@@ -20,6 +20,15 @@ The in-app agent runs in one of two ways. Pick one in Settings; the model can ch
 
 Both use the same permission policy: reads stay inside the game repo, every write asks you first, and anything else is denied.
 
+## Storyboard, marks and agents
+
+The storyboard is a canvas of passage cards, notes and images. You leave requests on it as marks: circle a card and write what you want. Agents answer beside the mark, with an arrow from your request to their answer:
+
+- **River's concept artist** answers "draw it" requests with options drawn by small Godot scripts. You read and approve the scripts before anything runs, then keep the options you like or dismiss the answer with a reason that goes into `.river/brief.md`.
+- **Claude Code**, through `river-mcp`, takes the other requests: it claims a mark, reads the story and the brief, answers with notes and images, and hands drawing requests to the concept artist. See [packages/mcp/README.md](packages/mcp/README.md) to set it up, including on Windows and for headless `claude -p` runs.
+
+From the terminal: `river card add`, `river mark add`, `river mark reply`, `river board show` and `river job ...` (`pnpm river --help` lists them).
+
 ## Status
 
 Early development. See `examples/park-walk` for a small story.
