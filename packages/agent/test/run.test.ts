@@ -49,6 +49,26 @@ const okRun = [
 ]
 
 describe("startAgentTurn", () => {
+  it("refuses an unsafe or malformed model id before any checkpoint or backend call", async () => {
+    for (const model of ["--dangerously-skip-permissions", "-x", "claude opus", "claude-opus-5-5; rm -rf /", "", "a".repeat(101), 42, undefined]) {
+      const { query, calls } = fakeQuery(okRun)
+      const { events, h } = handlers()
+      await startAgentTurn(req({ mode: "story", model: model as string }), h, { query, mcpLaunch: launch })
+      expect(calls).toHaveLength(0)
+      expect(events).toEqual([{ type: "error", message: expect.stringContaining("Invalid model") }])
+    }
+    expect(execFileSync("git", ["for-each-ref", "refs/river/"], { cwd: root, encoding: "utf8" }).trim()).toBe("")
+  })
+
+  it("accepts a model that is not one of the known ones", async () => {
+    const { query, calls } = fakeQuery(okRun)
+    const { events, h } = handlers()
+    await startAgentTurn(req({ model: "claude-haiku-4-5" }), h, { query, mcpLaunch: launch })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.options.model).toBe("claude-haiku-4-5")
+    expect(events.find((e) => e.type === "error")).toBeUndefined()
+  })
+
   it("refuses a folder without river.json", async () => {
     const empty = mkdtempSync(path.join(tmpdir(), "river-empty-"))
     const { query, calls } = fakeQuery(okRun)
@@ -123,6 +143,24 @@ describe("startAgentTurn", () => {
     const { h } = handlers()
     await startAgentTurn(req({ mode: "concept", conceptId: "k_run00001" }), h, { query, mcpLaunch: launch })
     expect(String(calls[0]!.prompt)).toContain("Concept id: k_run00001 (write concepts/k_run00001/draw.gd, or options draw_a.gd..draw_e.gd)")
+    expect(execFileSync("git", ["for-each-ref", "refs/river/"], { cwd: root, encoding: "utf8" }).trim()).toBe("")
+  })
+
+  it("runs a writer turn without a checkpoint, and refuses one without a valid writingId", async () => {
+    for (const writingId of [undefined, "../x", "a b"]) {
+      const { query, calls } = fakeQuery(okRun)
+      const { events, h } = handlers()
+      await startAgentTurn(req({ mode: "writer", ...(writingId ? { writingId } : {}) }), h, { query, mcpLaunch: launch })
+      expect(calls).toHaveLength(0)
+      expect(events).toEqual([{ type: "error", message: expect.stringMatching(/writingId|Invalid writing id/) }])
+    }
+    const { query, calls } = fakeQuery(okRun)
+    const { h } = handlers()
+    await startAgentTurn(req({ mode: "writer", writingId: "j_write01", voice: "Short lines." }), h, { query, mcpLaunch: launch })
+    expect(String(calls[0]!.prompt)).toContain("Writing job: j_write01")
+    expect(calls[0]!.options.includePartialMessages).toBe(true)
+    const river = (calls[0]!.options.mcpServers as Record<string, { args: string[] }>).river!
+    expect(river.args).toContain("--writing")
     expect(execFileSync("git", ["for-each-ref", "refs/river/"], { cwd: root, encoding: "utf8" }).trim()).toBe("")
   })
 

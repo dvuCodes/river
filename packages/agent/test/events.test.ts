@@ -27,6 +27,38 @@ const toolResult = (id: string, content: unknown, extra: object = {}, isError = 
 const success = { type: "result", subtype: "success", is_error: false, num_turns: 3, total_cost_usd: 0.0123, result: "ok", session_id: "sess-1" }
 
 describe("MessageMapper", () => {
+  it("streams text deltas as text-delta events and keeps the whole text event", () => {
+    const delta = (text: string, extra: object = {}) => ({
+      type: "stream_event",
+      session_id: "sess-1",
+      parent_tool_use_id: null,
+      event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+      ...extra,
+    })
+    const events = run([
+      init,
+      { type: "stream_event", session_id: "sess-1", parent_tool_use_id: null, event: { type: "message_start", message: {} } },
+      delta("Rex "),
+      delta("pulls."),
+      { type: "stream_event", session_id: "sess-1", parent_tool_use_id: null, event: { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{" } } },
+      delta("subagent text", { parent_tool_use_id: "tu9" }),
+      delta(""),
+      assistant([{ type: "text", text: "Rex pulls." }]),
+      success,
+    ])
+    expect(events).toEqual([
+      { type: "session", sessionId: "sess-1" },
+      { type: "text-delta", text: "Rex " },
+      { type: "text-delta", text: "pulls." },
+      { type: "text", text: "Rex pulls." },
+      { type: "done", costUsd: 0.0123, turns: 3 },
+    ])
+  })
+
+  it("ignores stream events it cannot read", () => {
+    expect(run([{ type: "stream_event" }, { type: "stream_event", event: { type: "content_block_delta", delta: "x" } }, { type: "stream_event", event: null }])).toEqual([])
+  })
+
   it("maps init, text, tool use, tool result and result", () => {
     const events = run([
       init,

@@ -140,6 +140,8 @@ export function buildClaudeCodeArgs(req: AgentTurnRequest, o: ClaudeArgsOptions)
     "-p",
     "--output-format=stream-json",
     "--verbose",
+    // Stream text as it is written (stream_event lines become "text-delta" events).
+    "--include-partial-messages",
     "--input-format=text",
     `--model=${req.model}`,
     // Manual approvals: anything not pre-allowed goes to the permission prompt tool.

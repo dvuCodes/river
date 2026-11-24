@@ -1,4 +1,5 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -18,10 +19,12 @@ const EXPECTED_TOOLS = [
   "implement_edit", "plan_mark_implemented", "frames_capture",
   "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row",
   "board_update_note", "board_remove_card", "concept_request",
+  "story_outline", "story_read_passage", "story_search", "story_pacing", "story_sample_transcripts", "story_simulate", "voice_read",
+  "story_rename_passage", "story_delete_passage", "story_batch_edit", "voice_note", "writing_request",
 ]
 
 describe("river-mcp over stdio", () => {
-  it("lists the 32 tools with the loop in its instructions, and answers in text only", { timeout: 60_000 }, async () => {
+  it("lists the 44 tools with the loop in its instructions, and answers in text only", { timeout: 60_000 }, async () => {
     const root = mkdtempSync(join(tmpdir(), "river-mcp-e2e-"))
     cpSync(example, root, { recursive: true })
     // tsx lives in the repo root node_modules, so run from there.
@@ -40,11 +43,21 @@ describe("river-mcp over stdio", () => {
       const instructions = client.getInstructions() ?? ""
       expect(instructions).toMatch(/marks_open[\s\S]*mark_claim[\s\S]*answers: <markId>[\s\S]*mark_reply[\s\S]*concept_request/)
       expect(instructions.length).toBeLessThan(1500)
+      expect(tools).toHaveLength(44)
+      for (const name of ["writing_request", "voice_read", "story_outline", "story_batch_edit", "story_sample_transcripts"]) expect(instructions, name).toContain(name)
+      // The edit list of story_batch_edit reaches the client as a schema it can fill in: one object shape per op.
+      const batch = tools.find((t) => t.name === "story_batch_edit")!.inputSchema.properties?.["edits"] as { items?: unknown } | undefined
+      expect(JSON.stringify(batch?.items)).toMatch(/"write"[\s\S]*"add"[\s\S]*"rename"[\s\S]*"delete"/)
 
       const lint = await client.callTool({ name: "story_lint", arguments: { file: "stories/park_walk.twee" } })
       expect(lint.isError).toBeFalsy()
       const text = (lint.content as { type: string; text: string }[])[0]!.text
       expect(text).toContain("1 error, 3 warnings in 9 passages")
+      expect(text).toContain("Narrative notes (craft advice, never blocks an export): 0 warnings, 1 info")
+
+      const played = await client.callTool({ name: "playtest_run", arguments: { file: "stories/park_walk.twee", steps: [{ set: { noise: 90 }, interrupt: "Loud bang", choice: 0 }], proseOnly: true } })
+      expect(played.isError).toBeFalsy()
+      expect((played.content as { text: string }[])[0]!.text).toBe("The park gate creaks open. The dog pulls toward the pond.\n\nA car backfires. The dog freezes, then tugs toward home.")
 
       const bad = await client.callTool({ name: "story_read", arguments: { file: "../x" } })
       expect(bad.isError).toBe(true)
@@ -84,6 +97,64 @@ describe("river-mcp over stdio", () => {
     } finally {
       await client.close()
     }
+  })
+
+  it("serves writing_write with --writing, saving a take beside the story and never in it", { timeout: 60_000 }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "river-mcp-writing-"))
+    cpSync(example, root, { recursive: true })
+    const story = join(root, "stories", "park_walk.twee")
+    const before = readFileSync(story, "utf8")
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", "tsx", mainTs, "--root", root, "--tools", "story_outline,writing_write", "--writing", "w_stdio001"],
+      cwd: repoRoot,
+      stderr: "pipe",
+    })
+    const client = new Client({ name: "river-test", version: "0.0.0" })
+    const text = (r: unknown) => ((r as { content: { text: string }[] }).content[0]!.text)
+    try {
+      await client.connect(transport)
+      expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["story_outline", "writing_write"])
+      const rawText = "@id pond\n@set excitement += 20\n--\nOne duck. It ignores the dog.\n\n[[Hold the leash tight->Calm down]] @set excitement -= 30, bond -= 5\n[[Throw a treat->Treat]] @cost treats 1 @when treats >= 1"
+      const args = { variant: "a", storyFile: "stories/park_walk.twee", caption: "One duck", summary: "A calmer pond, and the link to nowhere is gone.", edits: [{ op: "write", passageId: "pond", rawText }] }
+      const ok = await client.callTool({ name: "writing_write", arguments: args })
+      expect(ok.isError).toBeFalsy()
+      expect(text(ok)).toContain("Wrote take A of stories/park_walk.twee to .river/writing/w_stdio001/take_a.json")
+      expect(text(ok)).toContain("-Ducks. Many ducks.\n+One duck. It ignores the dog.")
+      expect(text(ok)).toContain("Lint: 0 errors, 2 warnings")
+      const take = JSON.parse(readFileSync(join(root, ".river", "writing", "w_stdio001", "take_a.json"), "utf8")) as { variant: string; storyFile: string; caption: string; lintErrors: number; text: string }
+      expect(take).toMatchObject({ variant: "a", storyFile: "stories/park_walk.twee", caption: "One duck", lintErrors: 0, edits: [{ op: "write", passageId: "pond", rawText }] })
+      expect(take.text).toContain("One duck. It ignores the dog.")
+      expect(readFileSync(story, "utf8")).toBe(before)
+
+      const bad = await client.callTool({ name: "writing_write", arguments: { ...args, variant: "z" } })
+      expect(bad.isError).toBe(true)
+      const failed = await client.callTool({ name: "writing_write", arguments: { ...args, variant: "b", edits: [{ op: "delete", passageId: "nope" }] } })
+      expect(failed.isError).toBe(true)
+      expect(text(failed)).toContain("edit 1 of 1 (delete nope) failed")
+      expect(existsSync(join(root, ".river", "writing", "w_stdio001", "take_b.json"))).toBe(false)
+    } finally {
+      await client.close()
+    }
+  })
+
+  it("refuses --concept with --writing, and a tool the server was not started for", { timeout: 60_000 }, () => {
+    const root = mkdtempSync(join(tmpdir(), "river-mcp-flags-"))
+    cpSync(example, root, { recursive: true })
+    const run = (...flags: string[]) => spawnSync(process.execPath, ["--import", "tsx", mainTs, "--root", root, ...flags], { cwd: repoRoot, encoding: "utf8", timeout: 50_000 })
+    const both = run("--concept", "k_stdio001", "--writing", "w_stdio001")
+    expect(both.status).toBe(2)
+    expect(both.stderr).toContain("pass --concept or --writing, not both")
+    expect(both.stdout).toBe("")
+    const noJob = run("--tools", "writing_write")
+    expect(noJob.status).toBe(1)
+    expect(noJob.stderr).toContain("writing_write needs --writing <id>")
+    const starts = run("--writing", "w_stdio001", "--tools", "writing_request")
+    expect(starts.status).toBe(1)
+    expect(starts.stderr).toContain("a --writing server has no concept_request, concept_write or writing_request")
+    const badId = run("--writing", "../x")
+    expect(badId.status).toBe(1)
+    expect(badId.stderr).toContain("invalid writing id")
   })
 
   it("works a board as claude-code: finds the open mark, claims it, answers beside it", { timeout: 60_000 }, async () => {

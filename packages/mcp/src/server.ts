@@ -21,6 +21,10 @@ The loop for each request:
 
 When the request asks to draw, show or picture something, call concept_request: River's concept artist draws options and the user approves them in River. Do not answer it with words or images of your own.
 
+When it asks to rewrite or re-voice story prose, call writing_request: River's story writer drafts takes and the user keeps one in River.
+
+For your own story work: voice_read first (how the story should sound), story_outline to map a story without its prose, story_batch_edit to change several passages as one edit, story_sample_transcripts to read routes as the player does.
+
 card_view shows an image card; card_read and mark_read show text that board_read clips.`
 
 export interface ServerOptions extends RiverToolsOptions {
@@ -56,13 +60,13 @@ function registerApprovalTool(server: McpServer, pipe: string): void {
   )
 }
 
-/** Pick tools by name. Throws on a name River does not have, or one this server was not started for (concept_write without --concept). */
+/** Pick tools by name. Throws on a name River does not have, or one this server was not started for (concept_write without --concept, writing_write without --writing). */
 export function selectTools(all: RiverTool[], names?: readonly string[]): RiverTool[] {
   if (!names) return all
   const unknown = names.filter((n) => !(RIVER_TOOL_NAMES as readonly string[]).includes(n))
   if (unknown.length > 0) throw new Error(`unknown tools: ${unknown.join(", ")}. Known: ${RIVER_TOOL_NAMES.join(", ")}`)
   const unavailable = names.filter((n) => !all.some((t) => t.name === n))
-  if (unavailable.length > 0) throw new Error(`tools not available on this server: ${unavailable.join(", ")} (concept_write needs --concept <id>; a --concept server has no concept_request)`)
+  if (unavailable.length > 0) throw new Error(`tools not available on this server: ${unavailable.join(", ")} (concept_write needs --concept <id>; writing_write needs --writing <id>; a --concept server has no concept_request or writing_request; a --writing server has no concept_request, concept_write or writing_request)`)
   return all.filter((t) => names.includes(t.name))
 }
 

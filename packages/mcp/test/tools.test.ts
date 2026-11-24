@@ -17,6 +17,8 @@ export const EXPECTED_TOOLS = [
   "implement_edit", "plan_mark_implemented", "frames_capture",
   "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row",
   "board_update_note", "board_remove_card", "concept_request",
+  "story_outline", "story_read_passage", "story_search", "story_pacing", "story_sample_transcripts", "story_simulate", "voice_read",
+  "story_rename_passage", "story_delete_passage", "story_batch_edit", "voice_note", "writing_request",
 ]
 
 let dir: string
@@ -35,11 +37,12 @@ beforeEach(async () => {
 })
 
 describe("tool list", () => {
-  it("has the 32 contract names, with the write tools marked mutating", () => {
+  it("has the 44 contract names, with the write tools marked mutating", () => {
     expect([...tools.map((t) => t.name)].sort()).toEqual([...EXPECTED_TOOLS].sort())
-    expect([...RIVER_TOOL_NAMES].sort()).toEqual([...EXPECTED_TOOLS, "concept_write"].sort())
+    expect(tools).toHaveLength(44)
+    expect([...RIVER_TOOL_NAMES].sort()).toEqual([...EXPECTED_TOOLS, "concept_write", "writing_write"].sort())
     expect(tools.filter((t) => t.mutating).map((t) => t.name).sort()).toEqual(
-      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture", "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row", "board_update_note", "board_remove_card", "concept_request"].sort(),
+      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture", "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row", "board_update_note", "board_remove_card", "concept_request", "story_rename_passage", "story_delete_passage", "story_batch_edit", "voice_note", "writing_request"].sort(),
     )
   })
 

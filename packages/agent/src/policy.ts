@@ -6,7 +6,6 @@ import {
   assertConceptFile,
   assertEditAllowed,
   loadStory,
-  parseTwee3,
   passageById,
   safePath,
   updatePassageText,
@@ -15,6 +14,7 @@ import {
   type Project,
 } from "@river/core"
 import { unifiedDiff } from "./diff"
+import { applyStoryEdits, newPassage, StoryEditsSchema, type StoryEdit } from "./story-edits"
 import {
   AUTO_ALLOWED_WRITES,
   MODE_TOOLS,
@@ -37,6 +37,8 @@ export interface PolicyContext {
   plan?: ChangePlan
   /** The job's concept folder (mode "concept"). */
   conceptId?: string
+  /** The writing job the turn writes takes for (mode "writer"). */
+  writingId?: string
   onPermission(request: PermissionRequest): Promise<PermissionDecision>
 }
 
@@ -95,6 +97,18 @@ export function summarizeToolCall(tool: string, input: Record<string, unknown>):
       return `Capture shot ${str(input, "shotId", "shot", "id") ?? "?"}`
     case "concept_write":
       return `Write ${file ?? "?"}`
+    case "story_rename_passage":
+      return `Rename passage ${str(input, "passageId", "id", "passage") ?? "?"} to "${str(input, "newName") ?? "?"}"${file ? ` in ${file}` : ""}`
+    case "story_delete_passage":
+      return `Delete passage ${str(input, "passageId", "id", "passage") ?? "?"}${file ? ` from ${file}` : ""}`
+    case "story_batch_edit": {
+      const n = Array.isArray(input.edits) ? input.edits.length : 0
+      return `Edit ${n} passage${n === 1 ? "" : "s"}${file ? ` in ${file}` : ""}${str(input, "title", "summary") ? `: ${str(input, "title", "summary")}` : ""}`
+    }
+    case "voice_note":
+      return `Add to the voice bible (.river/voice.md): ${(str(input, "text", "note") ?? "?").replace(/\s+/g, " ").slice(0, 80)}`
+    case "writing_write":
+      return `Write take ${(str(input, "variant") ?? "?").toUpperCase()}${str(input, "caption") ? `: ${str(input, "caption")}` : ""}`
     default:
       return `${tool}${file ? ` ${file}` : ""}`
   }
@@ -137,12 +151,27 @@ export async function proposedDiff(project: Project, tool: string, input: Record
       const tags = Array.isArray(input.tags) ? input.tags.filter((t): t is string => typeof t === "string") : []
       const before = await readRel(project, file)
       const { story } = await loadStory(project, file)
-      const esc = (s: string) => s.replace(/[\\[\]{}]/g, (c) => `\\${c}`)
-      const header = `:: ${esc(name)}${tags.length ? ` [${tags.map(esc).join(" ")}]` : ""}`
-      const body = text.replace(/\r\n?/g, "\n").split("\n").map((l) => (l.startsWith("::") ? `\\${l}` : l)).join("\n")
-      const passage = parseTwee3(`${header}\n${body}\n`, file).story.passages[0]
-      if (!passage) return undefined
+      const passage = newPassage(name, tags, text, file)
       return unifiedDiff(before, writeTwee3({ ...story, passages: [...story.passages, passage] }), file) || undefined
+    }
+    if (tool === "story_rename_passage" || tool === "story_delete_passage" || tool === "story_batch_edit") {
+      // Mirrors river-mcp: { file, passageId, newName } / { file, passageId } / { file, edits: StoryEdit[] }.
+      const file = str(input, "file", "storyFile", "path")
+      if (!file) return undefined
+      let edits: StoryEdit[]
+      if (tool === "story_batch_edit") {
+        const parsed = StoryEditsSchema.safeParse(input.edits)
+        if (!parsed.success) return undefined
+        edits = parsed.data
+      } else {
+        const id = str(input, "passageId", "id", "passage")
+        const newName = str(input, "newName")
+        if (!id || (tool === "story_rename_passage" && !newName)) return undefined
+        edits = [tool === "story_rename_passage" ? { op: "rename", passageId: id, newName: newName! } : { op: "delete", passageId: id }]
+      }
+      const { story } = await loadStory(project, file)
+      // Both sides through writeTwee3, so the diff shows the edits and nothing the writer normalises.
+      return unifiedDiff(writeTwee3(story), writeTwee3(applyStoryEdits(story, edits)), file) || undefined
     }
     if (tool === "implement_edit") {
       // Mirrors river-mcp: { planId, file, oldText, newText }, oldText must occur exactly once.
@@ -219,6 +248,11 @@ export async function decideToolCall(ctx: PolicyContext, toolName: string, input
     } catch (err) {
       return deny((err as Error).message)
     }
+  }
+  if (tool === "writing_write") {
+    if (!ctx.writingId) return deny("writing_write needs a writing job")
+    const variant = str(input, "variant")
+    if (variant !== undefined && !/^[a-e]$/i.test(variant)) return deny(`writing_write: variant must be one of a..e, not ${JSON.stringify(variant)}`)
   }
   if ((READ_TOOLS as readonly string[]).includes(tool) || AUTO_ALLOWED_WRITES.includes(tool)) {
     return { behavior: "allow", updatedInput: input }

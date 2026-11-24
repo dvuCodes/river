@@ -271,6 +271,10 @@ describe("board tools", () => {
     expect(r.text).toContain(`Started River concept job ${jobId}`)
     expect(r.text).toContain("approves the scripts in River")
     await expect(call("concept_request", { markId: "m_missing" }, list)).rejects.toThrow(/no mark/)
+    await call("concept_request", { markId: mark.id, model: "claude-haiku-4-5" }, list)
+    expect(launches[1]).toMatchObject({ model: "claude-haiku-4-5" })
+    await expect(call("concept_request", { markId: mark.id, model: "--bad" }, list)).rejects.toThrow(/invalid input for concept_request/)
+    expect(launches).toHaveLength(2)
   })
 
   it("board_read shows cards with labels and captions, marks with threads, and edges", async () => {

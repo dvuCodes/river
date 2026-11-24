@@ -123,6 +123,53 @@ describe("canUseTool policy", () => {
     expect(seen[0]!.diff!.trimEnd().endsWith("+A quiet bench.")).toBe(true)
   })
 
+  it("asks for rename, delete and batch edits with one unified diff each", async () => {
+    const { seen, onPermission } = recorder()
+    const can = createCanUseTool({ mode: "story", project, onPermission })
+    const file = "stories/park_walk.twee"
+    await can("mcp__river__story_rename_passage", { file, passageId: "long_path", newName: "Shady path" }, opts("r1"))
+    expect(seen[0]!.summary).toBe('Rename passage long_path to "Shady path" in stories/park_walk.twee')
+    expect(seen[0]!.diff).toContain("+:: Shady path")
+    expect(seen[0]!.diff).toContain("+[[Take the long path->Shady path]] @set energy -= 10")
+
+    await can("mcp__river__story_delete_passage", { file, passageId: "fetch" }, opts("r2"))
+    expect(seen[1]!.summary).toBe("Delete passage fetch from stories/park_walk.twee")
+    expect(seen[1]!.diff).toContain("-:: Fetch")
+
+    const edits = [
+      { op: "write", passageId: "long_path", rawText: "@id long_path\n--\nTrees and shade.\n\n[[Head home->Home happy]]" },
+      { op: "add", name: "Bench", rawText: "@id bench\n--\nA quiet bench.", tags: ["rest"] },
+      { op: "delete", passageId: "fetch" },
+    ]
+    await can("mcp__river__story_batch_edit", { file, edits }, opts("r3"))
+    expect(seen[2]!.summary).toBe("Edit 3 passages in stories/park_walk.twee")
+    expect(seen[2]!.diff).toContain("+Trees and shade.")
+    expect(seen[2]!.diff).toContain("+:: Bench [rest]")
+    expect(seen[2]!.diff).toContain("-:: Fetch")
+    expect(seen[2]!.diff!.match(/^--- /gm)).toHaveLength(1)
+    // A batch that does not apply still asks, without a diff.
+    await can("mcp__river__story_batch_edit", { file, edits: [{ op: "delete", passageId: "nope" }] }, opts("r4"))
+    expect(seen[3]!.diff).toBeUndefined()
+    expect(readFileSync(path.join(root, file), "utf8")).toContain(":: Fetch")
+
+    await can("mcp__river__voice_note", { text: "Rex never  speaks in words." }, opts("r5"))
+    expect(seen[4]!.summary).toBe("Add to the voice bible (.river/voice.md): Rex never speaks in words.")
+  })
+
+  it("lets writing_write through only in a writing job's writer turn, without asking", async () => {
+    const { seen, onPermission } = recorder()
+    const take = { variant: "a", storyFile: "stories/park_walk.twee", caption: "Calm", summary: "s", edits: [] }
+    const writer = createCanUseTool({ mode: "writer", project, writingId: "j_w1", onPermission })
+    expect((await writer("mcp__river__writing_write", take, opts())).behavior).toBe("allow")
+    expect((await writer("mcp__river__writing_write", { ...take, variant: "z" }, opts())).behavior).toBe("deny")
+    const noJob = createCanUseTool({ mode: "writer", project, onPermission })
+    expect((await noJob("mcp__river__writing_write", take, opts())).behavior).toBe("deny")
+    const story = createCanUseTool({ mode: "story", project, writingId: "j_w1", onPermission })
+    expect((await story("mcp__river__writing_write", take, opts())).behavior).toBe("deny")
+    expect((await writer("mcp__river__story_write_passage", { file: "stories/park_walk.twee" }, opts())).behavior).toBe("deny")
+    expect(seen).toHaveLength(0)
+  })
+
   it("denies implement_edit for a plan other than the turn's", async () => {
     const onPermission = vi.fn()
     const can = createCanUseTool({ mode: "implement", project, plan: plan(), onPermission })
