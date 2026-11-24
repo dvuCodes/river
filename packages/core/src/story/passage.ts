@@ -3,7 +3,7 @@
  * Twine HTML readers and by model edits (updatePassageText, renamePassage).
  */
 import { parseCond, parseEffects } from "./cond"
-import type { Choice, Cond, Diagnostic, Effect, Passage } from "./types"
+import type { Choice, Cond, Cue, Diagnostic, Effect, MetaValue, Passage } from "./types"
 
 /** Lowercase, [a-z0-9_] only. */
 export function slugify(name: string): string {
@@ -14,6 +14,16 @@ export function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
   return s === "" ? "passage" : s
+}
+
+/** Yarn-Spinner-style stable localization line ID suffix (`#line:<id>`). */
+export const LINE_ID_RE = /\s*#line:([a-z0-9_-]{4,32})\s*$/i
+
+/** Strip a trailing `#line:<id>` suffix from a line or string, returning the clean text and optional id. */
+export function stripLineId(text: string): { text: string; lineId?: string } {
+  const m = LINE_ID_RE.exec(text)
+  if (!m) return { text }
+  return { text: text.slice(0, m.index), lineId: m[1]! }
 }
 
 export interface LinkParts {
@@ -125,6 +135,65 @@ function insideQuotes(text: string, at: number): boolean {
   return inside
 }
 
+/** Split on commas outside double quotes (backslash escapes the next character). */
+function splitCommas(src: string): string[] {
+  const parts: string[] = []
+  let cur = ""
+  let inStr = false
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!
+    if (c === "\\" && i + 1 < src.length) { cur += c + src[i + 1]; i++; continue }
+    if (c === '"') inStr = !inStr
+    if (c === "," && !inStr) { parts.push(cur); cur = "" } else cur += c
+  }
+  parts.push(cur)
+  return parts
+}
+
+/**
+ * Parse `key=value, key2="text", flag=true` into a record. Values: numbers, true/false, quoted strings
+ * (backslash escapes), or bare words taken as strings.
+ */
+export function parseMeta(src: string): Record<string, MetaValue> {
+  const out: Record<string, MetaValue> = {}
+  if (src.trim() === "") throw new Error(`@meta needs key=value pairs`)
+  for (const part of splitCommas(src)) {
+    const whole = part.trim()
+    if (whole === "") continue
+    const m = /^([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*([\s\S]*)$/.exec(whole)
+    if (!m) throw new Error(`bad @meta "${whole}" (expected key=value)`)
+    const raw = m[2]!.trim()
+    let value: MetaValue
+    if (raw === "") throw new Error(`missing value in @meta "${whole}"`)
+    else if (raw === "true" || raw === "false") value = raw === "true"
+    else if (/^-?\d+(\.\d+)?$/.test(raw)) value = Number(raw)
+    else if (raw.startsWith('"')) {
+      if (raw.length < 2 || !raw.endsWith('"')) throw new Error(`unterminated string in @meta "${whole}"`)
+      value = raw.slice(1, -1).replace(/\\(.)/g, "$1")
+    } else value = raw
+    out[m[1]!] = value
+  }
+  return out
+}
+
+/** `@meta` values written back the way parseMeta reads them. */
+export function formatMeta(meta: Record<string, MetaValue>): string {
+  return Object.entries(meta)
+    .map(([k, v]) => {
+      const bare = typeof v !== "string" || (/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(v) && v !== "true" && v !== "false")
+      return `${k}=${bare ? String(v) : JSON.stringify(v)}`
+    })
+    .join(", ")
+}
+
+/** Parse the body of `@cue name [args]`. */
+export function parseCue(body: string): Cue {
+  const m = /^(\S+)(?:\s+([\s\S]*))?$/.exec(body.trim())
+  if (!m) throw new Error(`@cue needs a name`)
+  const args = m[2]?.trim()
+  return args ? { name: m[1]!, args } : { name: m[1]! }
+}
+
 /** `"Costs one treat"` -> Costs one treat. Unquoted text is taken as written. */
 function parseHint(body: string): string {
   if (!body.startsWith('"')) return body
@@ -148,6 +217,9 @@ function andCond(a: Cond | undefined, b: Cond): Cond {
   return { kind: "and", terms: [a, b] }
 }
 
+/** A plain decimal number: `2`, `0.5`, `+1.25`. Not `1e3`, `0x10` or empty. */
+const DECIMAL = /^[-+]?(\d+(\.\d*)?|\.\d+)$/
+
 export interface PassageInput {
   name: string
   tags: string[]
@@ -169,6 +241,13 @@ export function parsePassage(input: PassageInput): { passage: Passage; diagnosti
   let when: Cond | undefined
   const onEnter: Effect[] = []
   let isEnding = false
+  let meta: Record<string, MetaValue> | undefined
+  let shot: string | undefined
+  const cues: Cue[] = []
+  let weight: number | undefined
+  let priority: number | undefined
+  let cooldown: number | undefined
+  let auto = false
   let textStart = 0
 
   const diag = (severity: Diagnostic["severity"], message: string, lineNo: number, column = 1) =>
@@ -198,6 +277,32 @@ export function parsePassage(input: PassageInput): { passage: Passage; diagnosti
           case "end":
             isEnding = true
             break
+          case "meta":
+            meta = { ...meta, ...parseMeta(body) }
+            break
+          case "shot":
+            if (!body || /\s/.test(body)) diag("error", "@shot needs one shot id", lineNo)
+            else shot = body
+            break
+          case "cue":
+            cues.push(parseCue(body))
+            break
+          case "weight":
+            if (!DECIMAL.test(body) || !(Number(body) > 0)) diag("error", `@weight needs a positive number (found "${body}")`, lineNo)
+            else weight = Number(body)
+            break
+          case "priority":
+            if (!/^[-+]?\d+$/.test(body)) diag("error", `@priority needs a whole number (found "${body}")`, lineNo)
+            else priority = Number(body)
+            break
+          case "cooldown":
+            if (!/^\+?\d+$/.test(body)) diag("error", `@cooldown needs a whole number of turns, 0 or more (found "${body}")`, lineNo)
+            else cooldown = Number(body)
+            break
+          case "auto":
+            if (body) diag("warn", `@auto takes no value (found "${body}")`, lineNo)
+            auto = true
+            break
           default:
             diag("warn", `unknown rule "@${word}"`, lineNo)
         }
@@ -217,9 +322,10 @@ export function parsePassage(input: PassageInput): { passage: Passage; diagnosti
       const links = findLinks(ln)
       links.forEach((l, k) => {
         const segEnd = k + 1 < links.length ? links[k + 1]!.start : ln.length
-        const segment = ln.slice(l.end, segEnd)
+        const rawSegment = ln.slice(l.end, segEnd)
+        const segment = k === links.length - 1 ? stripLineId(rawSegment).text : rawSegment
         const choice: Choice = {
-          label: l.label,
+          label: stripLineId(l.label).text,
           target: l.target,
           cost: [],
           set: [],
@@ -232,7 +338,13 @@ export function parsePassage(input: PassageInput): { passage: Passage; diagnosti
                 case "cost": choice.cost.push(...parseCost(r.body)); break
                 case "set": choice.set.push(...parseEffects(r.body)); break
                 case "when": choice.when = andCond(choice.when, parseCond(r.body)); break
-                case "hint": choice.hint = parseHint(r.body); break
+                case "hint": choice.hint = stripLineId(parseHint(r.body)).text; break
+                case "once":
+                  if (r.body) diag("warn", `@once takes no value (found "${r.body}")`, lineNo, l.end + 1)
+                  choice.once = true
+                  break
+                case "meta": choice.meta = { ...choice.meta, ...parseMeta(r.body) }; break
+                case "cue": (choice.cues ??= []).push(parseCue(r.body)); break
                 default: diag("warn", `unknown choice rule "@${r.word}"`, lineNo, l.end + 1)
               }
             } catch (e) {
@@ -258,6 +370,13 @@ export function parsePassage(input: PassageInput): { passage: Passage; diagnosti
     span: { file, line, column: 1 },
   }
   if (when) passage.when = when
+  if (meta) passage.meta = meta
+  if (shot !== undefined) passage.shot = shot
+  if (cues.length > 0) passage.cues = cues
+  if (weight !== undefined) passage.weight = weight
+  if (priority !== undefined) passage.priority = priority
+  if (cooldown !== undefined) passage.cooldown = cooldown
+  if (auto) passage.auto = true
   return { passage, diagnostics }
 }
 

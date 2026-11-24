@@ -2,6 +2,7 @@ import { mkdir, readdir, readFile, rename, rm, unlink, writeFile } from "node:fs
 import { randomBytes } from "node:crypto"
 import path from "node:path"
 import { newId } from "../review/store"
+import { IO_CONCURRENCY, mapLimit } from "../util/map-limit"
 import { conceptRenderName, jobRenderName } from "../concepts/concepts"
 import { cardHeight, markRect } from "./layout"
 import { markLockFile, withLock } from "./lock"
@@ -144,19 +145,25 @@ function checkEdge(v: unknown): Edge {
   return e
 }
 
+/** Every entity file in a folder, read IO_CONCURRENCY at a time, in file-name order. Bad files go to onError. */
 async function readEntities<T>(dir: string, check: (v: unknown) => T, onError?: (file: string, err: unknown) => void): Promise<T[]> {
-  const out: T[] = []
-  for (const name of await jsonFiles(dir)) {
+  const read = await mapLimit(await jsonFiles(dir), IO_CONCURRENCY, async (name): Promise<{ ok: T } | undefined> => {
     const file = path.join(dir, name)
     try {
-      out.push(check(JSON.parse(await readFile(file, "utf8"))))
+      return { ok: check(JSON.parse(await readFile(file, "utf8"))) }
     } catch (err) {
       // A file deleted between readdir and read is not an error.
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue
-      onError?.(file, err)
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") onError?.(file, err)
+      return undefined
     }
-  }
-  return out
+  })
+  return read.filter((r): r is { ok: T } => r !== undefined).map((r) => r.ok)
+}
+
+/** How many marks of a board are open, reading only its marks/ folder (not cards or edges). */
+export async function countOpenMarks(workspaceRoot: string, board: string): Promise<number> {
+  const marks = await readEntities(path.join(boardDir(workspaceRoot, board), "marks"), checkMark)
+  return marks.filter((m) => m.status === "open").length
 }
 
 /** Read one card file, or undefined when it does not exist. Throws when it does not parse. */

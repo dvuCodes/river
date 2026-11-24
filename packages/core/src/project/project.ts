@@ -18,6 +18,15 @@ const ShotSchema = z.object({
   timeoutS: z.number().positive().optional(),
 })
 
+const budget = z.number().int().positive().optional()
+const CopyBudgetSchema = z.object({
+  titleChars: budget,
+  bodyChars: budget,
+  bodyLines: budget,
+  choiceLabelChars: budget,
+  hintChars: budget,
+})
+
 const ManifestSchema = z.object({
   name: z.string(),
   engine: z.string(),
@@ -28,6 +37,7 @@ const ManifestSchema = z.object({
   shots: z.array(ShotSchema).default([]),
   editable: z.array(z.string()).default(DEFAULT_EDITABLE),
   checkData: z.string().min(1).optional(),
+  copyBudgets: z.record(z.string(), CopyBudgetSchema).optional(),
 })
 
 const engine = z.boolean().optional()

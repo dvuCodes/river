@@ -1,7 +1,9 @@
 import { choiceGuard, costCond } from "../story/choice"
 import { applyEffects, evalCond, formatCond } from "../story/cond"
-import { choiceTarget, contentPassages, isInterrupt, resolveTarget } from "../story/model"
+import { proseText } from "../story/prose"
+import { choiceTarget, contentPassages, createStoryIndex, isInterrupt, isStorylet, resolveTarget, type StoryIndex } from "../story/model"
 import { findLinks, ruleBlockEnd } from "../story/passage"
+import { templateRefs } from "../story/template"
 import type { Choice, Cond, Diagnostic, Effect, Passage, SourceSpan, StateSchema, Story } from "../story/types"
 import { satisfiable } from "./sat"
 
@@ -11,6 +13,8 @@ function checkCond(cond: Cond, schema: StateSchema): { code: string; message: st
   const walk = (c: Cond) => {
     if (c.kind === "and" || c.kind === "or") return c.terms.forEach(walk)
     if (c.kind === "not") return walk(c.term)
+    // Visit counts are not state variables; lint checks their passage ids apart (unknown-passage).
+    if (c.kind === "visit") return
     const decl = schema[c.variable]
     if (!decl) {
       out.push({ code: "unknown-var", message: `unknown variable "${c.variable}"` })
@@ -97,7 +101,8 @@ function beforeEffect(cond: Cond, effect: Effect, schema: StateSchema): Cond | u
     const term = beforeEffect(cond.term, effect, schema)
     return term && (isConst(term, true) ? FALSE : isConst(term, false) ? TRUE : { kind: "not", term })
   }
-  if (cond.variable !== effect.variable) return cond
+  // Effects never change a visit count.
+  if (cond.kind === "visit" || cond.variable !== effect.variable) return cond
   const decl = schema[effect.variable]
   // A set, or a multiply by 0, leaves one value whatever came before.
   if (effect.op === "set" || (effect.op === "mul" && effect.amount === 0)) return evalCond(cond, applyEffects({}, [effect], schema)) ? TRUE : FALSE
@@ -148,7 +153,8 @@ function blockedChoice(p: Passage, choice: Choice, target: Passage, schema: Stat
   )
 }
 
-const RULE_WORD = /^\s*@(id|when|set|end|cost|hint)\b/
+/** Rule words that mean nothing in prose. `@cue` is not one: a cue line in prose is a block of its own. */
+const RULE_WORD = /^\s*@(id|when|set|end|cost|hint|meta|shot|once|weight|priority|cooldown|auto)\b/
 const DASHES = /^[-‐-―−]+$/
 
 /**
@@ -189,17 +195,26 @@ function strayRules(p: Passage): { severity: "error" | "warn"; code: string; mes
 }
 
 /** Passages a breadth-first walk over choice links reaches from the roots, ignoring conditions. */
-function reachable(story: Story, roots: Passage[]): Set<Passage> {
+export function reachable(story: Story, roots: Passage[], index: StoryIndex = createStoryIndex(story)): Set<Passage> {
   const seen = new Set<Passage>(roots)
   const queue = [...roots]
-  while (queue.length > 0) {
-    const p = queue.shift()!
+  for (let head = 0; head < queue.length; head++) {
+    const p = queue[head]!
     for (const c of p.choices) {
-      const to = choiceTarget(story, c.target)
+      const to = choiceTarget(story, c.target, index)
       if (to.kind === "passage" && !seen.has(to.passage)) { seen.add(to.passage); queue.push(to.passage) }
     }
   }
   return seen
+}
+
+/** Every `visit` atom in a condition. */
+export function visitRefs(cond: Cond | undefined, out: string[] = []): string[] {
+  if (!cond) return out
+  if (cond.kind === "visit") out.push(cond.passageId)
+  else if (cond.kind === "and" || cond.kind === "or") cond.terms.forEach((t) => visitRefs(t, out))
+  else if (cond.kind === "not") visitRefs(cond.term, out)
+  return out
 }
 
 /**
@@ -208,7 +223,8 @@ function reachable(story: Story, roots: Passage[]): Set<Passage> {
  * never-true (warn: a condition, or a @cost, no value in the schema ranges satisfies),
  * blocked-choice (warn: a choice can be open while its target's @when is false),
  * rule-in-prose (warn: a rule line River reads as prose), dead-end (warn: no choices and no @end),
- * unreachable (warn: no route from the start or from an interrupt).
+ * unreachable (warn: no route from the start, an interrupt or a storylet),
+ * auto-not-interrupt (warn: `@auto` on a passage not tagged [interrupt]).
  */
 export function lint(story: Story, schema: StateSchema): Diagnostic[] {
   const out: Diagnostic[] = []
@@ -228,7 +244,8 @@ export function lint(story: Story, schema: StateSchema): Diagnostic[] {
     else byId.set(p.id, p)
   }
 
-  const start = resolveTarget(story, story.start)
+  const index = createStoryIndex(story)
+  const start = resolveTarget(story, story.start, index)
   if (!start) out.push({ severity: "error", code: "broken-link", message: `start passage "${story.start}" does not exist`, span: { file: story.file, line: 1, column: 1 } })
 
   const condRule = (p: Passage, cond: Cond, where: string, span: SourceSpan) => {
@@ -246,17 +263,45 @@ export function lint(story: Story, schema: StateSchema): Diagnostic[] {
   }
 
   const interrupts = passages.filter(isInterrupt)
-  const fromInterrupts = reachable(story, interrupts)
+  const storylets = passages.filter(isStorylet)
+  // Interrupts and storylets are detours: a `@return` inside one goes back to where it started.
+  const fromDetours = reachable(story, [...interrupts, ...storylets], index)
+  const visitRule = (p: Passage, cond: Cond | undefined, where: string, span: SourceSpan) => {
+    for (const id of new Set(visitRefs(cond))) {
+      if (index.byId.has(id)) continue
+      const named = index.byName.get(id)
+      add("error", "unknown-passage", `${where}: no passage has id "${id}"${named ? ` (passage ${named.name} has id "${named.id}")` : ""}`, p, span)
+    }
+  }
+  const templateRule = (p: Passage) => {
+    const prose = proseText(p.text, { keepCues: true })
+    if (!prose.includes("{")) return
+    const refs = templateRefs(prose)
+    for (const e of refs.errors) add("warn", "template", `${p.name}: ${e.message}`, p)
+    for (const cond of refs.conds) {
+      const where = `${p.name} {when ${formatCond(cond)}}`
+      const problems = checkCond(cond, schema)
+      for (const pr of problems) add("error", pr.code, `${where}: ${pr.message}`, p)
+      if (problems.length === 0 && !satisfiable([cond], schema)) add("warn", "never-true", `${where}: ${formatCond(cond)} is never true`, p)
+      visitRule(p, cond, where, p.span)
+    }
+    for (const v of refs.variables) {
+      if (!schema[v]) add("warn", "template-var", `${p.name}: {${v}} names no variable in the state schema, so it shows as written`, p)
+    }
+  }
 
   for (const p of passages) {
     for (const s of strayRules(p)) add(s.severity, s.code, s.message, p, { file: p.span.file, line: p.span.line + 1 + s.line, column: 1 })
     if (p.when) condRule(p, p.when, p.name, p.span)
+    visitRule(p, p.when, p.name, p.span)
     effectRule(p, p.onEnter, p.name, p.span)
+    templateRule(p)
     for (const c of p.choices) {
       const where = `${p.name} → ${c.target}`
-      const to = choiceTarget(story, c.target)
+      visitRule(p, c.when, where, c.span)
+      const to = choiceTarget(story, c.target, index)
       if (to.kind === "missing") add("error", "broken-link", `${where}: no passage has this name`, p, c.span)
-      if (to.kind === "return" && !fromInterrupts.has(p)) {
+      if (to.kind === "return" && !fromDetours.has(p)) {
         add("error", "broken-link", `${where}: no interrupt passage leads here, so there is nothing to return to (tag the passage that starts the detour [interrupt])`, p, c.span)
       }
       const whenOk = !c.when || condRule(p, c.when, where, c.span)
@@ -270,10 +315,11 @@ export function lint(story: Story, schema: StateSchema): Diagnostic[] {
       effectRule(p, c.set, where, c.span)
     }
     if (p.choices.length === 0 && !p.isEnding) add("warn", "dead-end", `${p.name}: dead end, no link and no @end`, p)
+    if (p.auto && !isInterrupt(p)) add("warn", "auto-not-interrupt", `${p.name}: @auto only starts passages tagged [interrupt]; tag it [interrupt] or drop @auto`, p)
   }
 
   if (start) {
-    const seen = reachable(story, [start, ...interrupts])
+    const seen = reachable(story, [start, ...interrupts, ...storylets], index)
     for (const p of passages) if (!seen.has(p)) add("warn", "unreachable", `${p.name}: no route from the start reaches it`, p)
   }
 

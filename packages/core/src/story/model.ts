@@ -7,17 +7,56 @@ export function slug(name: string): string {
   return slugify(name)
 }
 
-/** Find the passage a choice target names: by name first, then by id. */
-export function resolveTarget(story: Story, target: string): Passage | undefined {
+/**
+ * Lookups over one story, built once in O(passages + choices) so analyses do not scan the passage list per link.
+ * Name and id lookups are first-wins, like `resolveTarget`. `incoming` and `outgoing` are keyed by passage id and
+ * cover content passages; a broken link has `to: null`, a `@return` choice `to: "@return"`.
+ * An index describes the story it was built from: build a new one after an edit.
+ */
+export interface StoryIndex {
+  byName: Map<string, Passage>
+  byId: Map<string, Passage>
+  incoming: Map<string, { from: Passage; choiceIndex: number }[]>
+  outgoing: Map<string, { to: Passage | typeof RETURN_TARGET | null; choiceIndex: number }[]>
+}
+
+export function createStoryIndex(story: Story): StoryIndex {
+  const byName = new Map<string, Passage>()
+  const byId = new Map<string, Passage>()
+  for (const p of story.passages) {
+    if (!byName.has(p.name)) byName.set(p.name, p)
+    if (!byId.has(p.id)) byId.set(p.id, p)
+  }
+  const index: StoryIndex = { byName, byId, incoming: new Map(), outgoing: new Map() }
+  for (const p of story.passages) {
+    if (isCodePassage(p)) continue
+    const out: { to: Passage | typeof RETURN_TARGET | null; choiceIndex: number }[] = []
+    p.choices.forEach((c, choiceIndex) => {
+      const to = c.target === RETURN_TARGET ? RETURN_TARGET : (byName.get(c.target) ?? byId.get(c.target) ?? null)
+      out.push({ to, choiceIndex })
+      if (to && to !== RETURN_TARGET) {
+        const list = index.incoming.get(to.id)
+        if (list) list.push({ from: p, choiceIndex })
+        else index.incoming.set(to.id, [{ from: p, choiceIndex }])
+      }
+    })
+    if (!index.outgoing.has(p.id)) index.outgoing.set(p.id, out)
+  }
+  return index
+}
+
+/** Find the passage a choice target names: by name first, then by id. Pass an index to look up in O(1). */
+export function resolveTarget(story: Story, target: string, index?: StoryIndex): Passage | undefined {
+  if (index) return index.byName.get(target) ?? index.byId.get(target)
   return story.passages.find((p) => p.name === target) ?? story.passages.find((p) => p.id === target)
 }
 
 /** Where a choice leads: a passage, back to the passage an interrupt interrupted, or nowhere (a broken link). */
 export type ChoiceTarget = { kind: "passage"; passage: Passage } | { kind: "return" } | { kind: "missing" }
 
-export function choiceTarget(story: Story, target: string): ChoiceTarget {
+export function choiceTarget(story: Story, target: string, index?: StoryIndex): ChoiceTarget {
   if (target === RETURN_TARGET) return { kind: "return" }
-  const passage = resolveTarget(story, target)
+  const passage = resolveTarget(story, target, index)
   return passage ? { kind: "passage", passage } : { kind: "missing" }
 }
 
@@ -26,12 +65,18 @@ export function isInterrupt(p: Passage): boolean {
   return p.tags.includes("interrupt")
 }
 
-export function passageById(story: Story, id: string): Passage | undefined {
+/** A passage tagged `storylet`: the game can draw it from the deck while its @when holds and it is off cooldown. */
+export function isStorylet(p: Passage): boolean {
+  return p.tags.includes("storylet")
+}
+
+export function passageById(story: Story, id: string, index?: StoryIndex): Passage | undefined {
+  if (index) return index.byId.get(id)
   return story.passages.find((p) => p.id === id)
 }
 
-export function startPassage(story: Story): Passage | undefined {
-  return resolveTarget(story, story.start)
+export function startPassage(story: Story, index?: StoryIndex): Passage | undefined {
+  return resolveTarget(story, story.start, index)
 }
 
 function isCodePassage(p: Passage): boolean {
@@ -43,8 +88,8 @@ export function contentPassages(story: Story): Passage[] {
   return story.passages.filter((p) => !isCodePassage(p))
 }
 
-function reparse(p: Passage, rawText: string, name = p.name): Passage {
-  const next = parsePassage({ name, tags: p.tags, metadata: p.metadata, rawText, file: p.span.file, line: p.span.line }).passage
+function reparse(p: Passage, rawText: string, name = p.name, tags = p.tags): Passage {
+  const next = parsePassage({ name, tags, metadata: p.metadata, rawText, file: p.span.file, line: p.span.line }).passage
   // Keep the source so the writer can still reuse the header and spacing that did not change.
   return p.source ? { ...next, source: p.source } : next
 }
@@ -140,4 +185,44 @@ export function renamePassage(story: Story, passageId: string, newName: string):
     return raw === p.rawText ? p : reparse(p, raw)
   })
   return { ...story, start: story.start === oldName ? newName : story.start, passages }
+}
+
+/** Shift StoryTitle/StoryData blocks so they stay between the same passages after the passage at `at` is removed. */
+function withoutPassageAt(story: Story, at: number): Story {
+  const passages = story.passages.filter((_, i) => i !== at)
+  if (!story.source) return { ...story, passages }
+  const blocks = story.source.blocks.map((b) => (b.index > at ? { ...b, index: b.index - 1 } : b))
+  return { ...story, passages, source: { ...story.source, blocks } }
+}
+
+/**
+ * Add a passage at the end of the story. Returns a new Story; the input is not changed. Throws when another
+ * passage already has the passage's name or id.
+ */
+export function addPassage(story: Story, passage: Passage): Story {
+  if (story.passages.some((p) => p.name === passage.name)) throw new Error(`a passage named "${passage.name}" already exists`)
+  if (story.passages.some((p) => p.id === passage.id)) throw new Error(`a passage with id "${passage.id}" already exists`)
+  return { ...story, passages: [...story.passages, passage] }
+}
+
+/**
+ * Remove a passage by id. Links to it are left as written (lint reports them as broken). Returns a new Story;
+ * StoryTitle and StoryData keep their place in the file.
+ */
+export function deletePassage(story: Story, passageId: string): Story {
+  const at = story.passages.findIndex((p) => p.id === passageId)
+  if (at < 0) throw noPassageError(story, passageId)
+  return withoutPassageAt(story, at)
+}
+
+/**
+ * Replace a passage's tags and re-parse it (a [script] or [stylesheet] tag changes how its text is read).
+ * Returns the same Story when the tags are unchanged, else a new Story.
+ */
+export function updatePassageTags(story: Story, passageId: string, tags: string[]): Story {
+  const target = passageById(story, passageId)
+  if (!target) throw noPassageError(story, passageId)
+  if (target.tags.length === tags.length && target.tags.every((t, i) => t === tags[i])) return story
+  const next = reparse(target, target.rawText, target.name, [...tags])
+  return { ...story, passages: story.passages.map((p) => (p === target ? next : p)) }
 }

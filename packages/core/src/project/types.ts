@@ -45,6 +45,25 @@ export interface RiverManifest {
    * (a temporary folder holding <story>.json for every story); a non-zero exit is a lint error.
    */
   checkData?: string
+  /**
+   * Copy budgets by passage tag ("*" applies to every passage): how long a title, body, choice label or hint
+   * may be before `lintNarrative` warns (copy-budget-exceeded). Body lengths count the longest text the prose's templates can render.
+   */
+  copyBudgets?: Record<string, CopyBudget>
+}
+
+/** Limits on the copy a passage shows, so it fits the game's text box. */
+export interface CopyBudget {
+  /** Characters in the passage name. */
+  titleChars?: number
+  /** Characters in the prose (rule, link and cue lines removed), at its longest template variant. */
+  bodyChars?: number
+  /** Non-blank lines in the prose. */
+  bodyLines?: number
+  /** Characters in each choice label. */
+  choiceLabelChars?: number
+  /** Characters in each choice @hint. */
+  hintChars?: number
 }
 
 /** A project after load: the manifest plus the absolute root. */
@@ -122,4 +141,9 @@ export interface EngineAdapter {
   id: string
   /** Run the engine to capture one shot into outDir. Resolves to the PNG paths in frame order. */
   capture(project: Project, shot: ShotDef, outDir: string): Promise<string[]>
+  /**
+   * Optional: capture several shots in one engine run (one start-up instead of one per shot). Each item's outDir
+   * already exists. Resolves to shot id -> PNG paths in frame order, with an entry for every item.
+   */
+  captureBatch?(project: Project, items: { shot: ShotDef; outDir: string }[]): Promise<Record<string, string[]>>
 }

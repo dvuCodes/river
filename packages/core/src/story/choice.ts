@@ -6,7 +6,7 @@
  * 4. the target's own @set runs.
  */
 import { applyEffects, evalCond, formatCond } from "./cond"
-import { choiceTarget } from "./model"
+import { choiceTarget, type StoryIndex } from "./model"
 import type { Choice, Cond, GameState, Passage, StateSchema, Story } from "./types"
 
 /** What a choice's @cost needs: `@cost treats 1` needs `treats >= 1`. Undefined when it costs nothing. */
@@ -33,7 +33,12 @@ export function afterChoice(state: GameState, choice: Choice, schema: StateSchem
 }
 
 /** Why a choice is closed: its own @when, a @cost the player cannot pay, or the target's @when on arrival. */
-export type ClosedBy = { by: "when"; cond: Cond } | { by: "cost"; cond: Cond } | { by: "target"; cond: Cond; target: Passage }
+export type ClosedBy =
+  | { by: "when"; cond: Cond }
+  | { by: "cost"; cond: Cond }
+  | { by: "target"; cond: Cond; target: Passage }
+  /** A `@once` choice the player already took. */
+  | { by: "once" }
 
 /** "coins >= 5", "@cost needs coins >= 5", "Vault needs coins >= 5 on arrival". */
 export function formatClosed(c: ClosedBy): string {
@@ -41,6 +46,7 @@ export function formatClosed(c: ClosedBy): string {
     case "when": return formatCond(c.cond)
     case "cost": return `@cost needs ${formatCond(c.cond)}`
     case "target": return `${c.target.name} needs ${formatCond(c.cond)} on arrival`
+    case "once": return "already chosen"
   }
 }
 
@@ -52,23 +58,41 @@ export interface ChoiceState {
   closed?: ClosedBy
 }
 
+/** The key a taken `@once` choice is remembered by: "<passage id>#<choice index>". */
+export const onceKey = (passageId: string, choiceIndex: number) => `${passageId}#${choiceIndex}`
+
+export interface ChoiceContext {
+  story: Story
+  schema: StateSchema
+  /** Passage id -> times entered, for `visited(id)` / `visits(id)`. Default: none. */
+  visits?: Readonly<Record<string, number>>
+  /** `onceKey`s of the `@once` choices already taken. */
+  usedOnce?: readonly string[]
+  /** Lookups for the story, when the caller has built them. */
+  index?: StoryIndex
+}
+
 /**
  * Which choices of a passage are open in a state. Without `ctx` only the choice's own @when and @cost count;
- * with the story and schema, a choice whose target's @when fails after its @cost and @set is closed too.
+ * with the story and schema, a choice whose target's @when fails after its @cost and @set is closed too, and a
+ * `@once` choice listed in `ctx.usedOnce` is closed.
  */
-export function openChoices(passage: Passage, state: GameState, ctx?: { story: Story; schema: StateSchema }): ChoiceState[] {
+export function openChoices(passage: Passage, state: GameState, ctx?: ChoiceContext): ChoiceState[] {
   return passage.choices.map((choice, index) => {
-    const closed = closedBy(choice, state, ctx)
+    const closed = closedBy(passage, choice, index, state, ctx)
     return closed ? { choice, index, open: false, closed } : { choice, index, open: true }
   })
 }
 
-function closedBy(choice: Choice, state: GameState, ctx?: { story: Story; schema: StateSchema }): ClosedBy | undefined {
-  if (choice.when && !evalCond(choice.when, state)) return { by: "when", cond: choice.when }
+function closedBy(passage: Passage, choice: Choice, index: number, state: GameState, ctx?: ChoiceContext): ClosedBy | undefined {
+  const visits = ctx?.visits ?? {}
+  if (choice.once && ctx?.usedOnce?.includes(onceKey(passage.id, index))) return { by: "once" }
+  if (choice.when && !evalCond(choice.when, state, visits)) return { by: "when", cond: choice.when }
   const cost = costCond(choice)
   if (cost && !evalCond(cost, state)) return { by: "cost", cond: cost }
   if (!ctx) return undefined
-  const to = choiceTarget(ctx.story, choice.target)
+  const to = choiceTarget(ctx.story, choice.target, ctx.index)
   if (to.kind !== "passage" || !to.passage.when) return undefined
-  return evalCond(to.passage.when, afterChoice(state, choice, ctx.schema)) ? undefined : { by: "target", cond: to.passage.when, target: to.passage }
+  // Like the rest of the target's rules, its @when runs before it is entered: visit counts do not include this entry yet.
+  return evalCond(to.passage.when, afterChoice(state, choice, ctx.schema), visits) ? undefined : { by: "target", cond: to.passage.when, target: to.passage }
 }

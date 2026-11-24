@@ -30,7 +30,7 @@ export interface Card {
    * - passage: "<story file>#<passage id>"
    * - ref:     image path relative to the workspace root (.river/refs/...)
    * - concept: concept id (concepts/<id>/)
-   * - note:    unused (text is in `text`)
+   * - note:    unused (text is in `text`). A writing job's take is a note card with `label`, `caption` and `pending`.
    */
   ref: string
   rev?: string
@@ -100,8 +100,11 @@ export type MarkStatusChange = "answered" | "open" | "dismissed" | "accepted"
 /** The role River's concept jobs write as. */
 export const CONCEPT_ROLE = "concept-artist"
 
-/** Names an agent may not write as: the user, and River's own job role. */
-export const RESERVED_AUTHORS: readonly string[] = ["you", CONCEPT_ROLE]
+/** The role River's writing jobs write as. */
+export const WRITER_ROLE = "story-writer"
+
+/** Names an agent may not write as: the user, and River's own job roles. */
+export const RESERVED_AUTHORS: readonly string[] = ["you", CONCEPT_ROLE, WRITER_ROLE]
 
 /**
  * A connector drawn as a curved arrow from one card or mark to another. Users draw them with the arrow tool;
@@ -140,7 +143,7 @@ export type JobStatus = "queued" | "running" | "approval" | "rendering" | "answe
 /** Legal moves. Dismiss is allowed from every non-terminal state, so a stuck job never leaves an undismissable card. */
 export const JOB_NEXT: Record<JobStatus, readonly JobStatus[]> = {
   queued: ["running", "failed", "dismissed"],
-  running: ["approval", "failed", "dismissed"],
+  running: ["approval", "answered", "failed", "dismissed"],
   approval: ["rendering", "failed", "dismissed"],
   rendering: ["answered", "failed", "dismissed"],
   answered: ["accepted", "dismissed", "failed"],
@@ -168,6 +171,32 @@ export interface JobScriptRecord {
   accepted?: boolean
 }
 
+/**
+ * One take of a writing job: a version of the passages the job rewrites. On the board a take is a "note" card
+ * with `label` (the variant letter), `caption`, and `pending` until the user accepts it.
+ */
+export interface WritingTakeRecord {
+  /** "a".."e". */
+  variant: string
+  /** The agent's one-line caption for this take. */
+  caption?: string
+  /** The take's story file, relative to the project root (in the job's worktree until accepted). */
+  file: string
+  /** What the take changes, in a sentence or two. */
+  summary?: string
+  /** The user kept this take at accept. */
+  accepted?: boolean
+  /** `lint` errors and warnings in the take's story, counted when the take was written. */
+  lintErrors?: number
+  lintWarnings?: number
+}
+
+/** What a job makes: concept art scripts (the default) or story text. */
+export type JobKind = "concept" | "writing"
+
+/** A job's kind, with the default for jobs that have none. */
+export const jobKind = (job: Pick<Job, "kind">): JobKind => job.kind ?? "concept"
+
 /** The mark's status while its job is in each state. */
 export const MARK_STATUS_FOR_JOB: Record<JobStatus, MarkStatus> = {
   queued: "working",
@@ -191,13 +220,15 @@ export const MARK_STATUS_FOR_JOB: Record<JobStatus, MarkStatus> = {
  */
 export interface Job {
   id: string
+  /** Absent means "concept" (jobs written before writing jobs existed have none). */
+  kind?: JobKind
   markId: string
   board: string
   role: string
   model: string
   backend: "api-key" | "claude-code"
   status: JobStatus
-  /** Folder name under concepts/ that this job owns. */
+  /** Folder name under concepts/ that this job owns. Writing jobs keep an id here too, for the job's own files. */
   conceptId: string
   /** Commit the worktree started from (a checkpoint of the user's tree). */
   baseSha: string
@@ -219,6 +250,12 @@ export interface Job {
    * One approval covers all of them.
    */
   scripts?: JobScriptRecord[]
+  /** Writing jobs: the story file the job rewrites, relative to the project root. */
+  storyFile?: string
+  /** Writing jobs: ids of the passages the job may change. */
+  passageIds?: string[]
+  /** Writing jobs: the takes the agent wrote, one card each. */
+  takes?: WritingTakeRecord[]
   /** The job this one revises (the user replied on the mark after that job answered, or it failed). */
   parentJobId?: string
   error?: string
