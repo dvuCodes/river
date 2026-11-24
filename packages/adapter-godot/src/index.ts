@@ -1,11 +1,36 @@
 import { execFile, type ExecFileException } from "node:child_process"
-import { mkdir, readdir } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import type { EngineAdapter, Project, ShotDef } from "@river/core"
 
 export { conceptScriptProblem, lintConceptScript, renderConcept, type RenderConceptRequest } from "./concept"
 export { KIT_API, KIT_FILE, kitFileAction, kitFileText } from "./kit"
 export { linesToRead, type LineToRead } from "./reading"
+
+/** Absolute path to the bundled Godot 4 runtime addon (`addons/river/`). */
+export const GODOT_RUNTIME_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "runtime", "addons", "river")
+
+/** Absolute path to the bundled single-process batch shot runner (`runtime/tools/batch_capture.gd`). */
+export const GODOT_BATCH_SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "runtime", "tools", "batch_capture.gd")
+
+/** Copy River's official Godot 4 runtime addon into `<projectRoot>/addons/river/`. Returns the written file paths. */
+export async function installGodotRuntime(projectRoot: string): Promise<string[]> {
+  const destDir = path.join(path.resolve(projectRoot), "addons", "river")
+  await mkdir(destDir, { recursive: true })
+  const entries = (await readdir(GODOT_RUNTIME_DIR, { withFileTypes: true }))
+    .filter((entry) => entry.isFile())
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const written: string[] = []
+  for (const entry of entries) {
+    const src = path.join(GODOT_RUNTIME_DIR, entry.name)
+    const dst = path.join(destDir, entry.name)
+    await copyFile(src, dst)
+    written.push(dst)
+  }
+  return written
+}
 
 /** Godot settings read from manifest.adapter.godot. */
 export interface GodotSettings {
@@ -17,6 +42,8 @@ export interface GodotSettings {
   screenshotScript: string
   /** Consecutive-frames script. Default "res://tools/capture_frames.gd". */
   framesScript: string
+  /** Script that captures many shots in one Godot run. Default: River's bundled GODOT_BATCH_SCRIPT, so a project needs no extra script. */
+  batchScript: string
 }
 
 const FRAME_FILE = /^frame_(\d+)\.png$/i
@@ -43,6 +70,7 @@ export function godotSettings(project: Project, env: NodeJS.ProcessEnv = process
     project: expandEnv(raw.project ?? ".", env, "adapter.godot.project"),
     screenshotScript: expandEnv(raw.screenshotScript ?? "res://tools/capture.gd", env, "adapter.godot.screenshotScript"),
     framesScript: expandEnv(raw.framesScript ?? "res://tools/capture_frames.gd", env, "adapter.godot.framesScript"),
+    batchScript: raw.batchScript ? expandEnv(raw.batchScript, env, "adapter.godot.batchScript") : godotPath(GODOT_BATCH_SCRIPT),
   }
 }
 
@@ -80,6 +108,40 @@ export function buildCaptureCommand(project: Project, shot: ShotDef, outDir: str
   }
 }
 
+/** The Godot command line that captures every shot listed in the batch manifest JSON at `manifestPath`, in one run. */
+export function buildBatchCaptureCommand(project: Project, manifestPath: string): { bin: string; args: string[] } {
+  const s = godotSettings(project)
+  const projectDir = path.resolve(project.root, s.project)
+  return { bin: s.bin, args: ["--path", projectDir, "--disable-vsync", "-s", s.batchScript, "--", `--manifest=${godotPath(path.resolve(manifestPath))}`] }
+}
+
+/** One entry of the batch manifest that batch_capture.gd reads. */
+export interface BatchShot {
+  id: string
+  scene: string
+  /** "" when the shot has no setup script. */
+  setup: string
+  /** Absolute, with "/" separators. */
+  outDir: string
+  count: number
+  ticks: number
+}
+
+/** The batch manifest for these shots. Throws on a count that is not a whole number of at least 1. */
+export function batchManifest(items: readonly { shot: ShotDef; outDir: string }[]): BatchShot[] {
+  return items.map(({ shot, outDir }) => {
+    if (!Number.isInteger(shot.count) || shot.count < 1) {
+      throw new Error(`river: shot ${shot.id} has count ${shot.count}; it must be a whole number of at least 1`)
+    }
+    return { id: shot.id, scene: shot.scene, setup: shot.setup ?? "", outDir: godotPath(path.resolve(outDir)), count: shot.count, ticks: shot.ticks ?? 3 }
+  })
+}
+
+/** How long a batch may run: the sum of every shot's captureTimeoutMs, and at least 60 s. */
+export function batchTimeoutMs(shots: readonly ShotDef[]): number {
+  return Math.max(60_000, shots.reduce((sum, shot) => sum + captureTimeoutMs(shot), 0))
+}
+
 function run(bin: string, args: string[], timeout: number): Promise<{ ok: boolean; stdout: string; stderr: string; error?: ExecFileException }> {
   return new Promise((resolve) => {
     execFile(bin, args, { timeout, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (err, stdout, stderr) => {
@@ -114,6 +176,37 @@ export function createGodotAdapter(): EngineAdapter {
       if (!result.ok) throw new Error(`river: Godot capture of shot ${shot.id} failed\n${report()}`)
       if (files.length === 0) throw new Error(`river: Godot capture of shot ${shot.id} wrote no frame_NN.png into ${outDir}\n${report()}`)
       return files
+    },
+    async captureBatch(project, items) {
+      if (items.length === 0) return {}
+      const list = batchManifest(items)
+      for (const { outDir } of items) await mkdir(outDir, { recursive: true })
+      const dir = await mkdtemp(path.join(tmpdir(), "river-godot-batch-"))
+      try {
+        const manifestPath = path.join(dir, "batch.json")
+        await writeFile(manifestPath, `${JSON.stringify(list, null, 2)}\n`, "utf8")
+        const { bin, args } = buildBatchCaptureCommand(project, manifestPath)
+        // One Godot window for every shot.
+        const timeout = batchTimeoutMs(items.map((i) => i.shot))
+        const result = await run(bin, args, timeout)
+        const report = () =>
+          [`command: ${bin} ${args.join(" ")}`, result.error ? `error: ${result.error.message}${result.error.killed ? ` (stopped after ${timeout / 1000} s; set "timeoutS" on the shots for more)` : ""}` : "", `stderr:\n${tail(result.stderr)}`, `stdout:\n${tail(result.stdout)}`]
+            .filter(Boolean)
+            .join("\n")
+        const ids = items.map((i) => i.shot.id).join(", ")
+        if (!result.ok) throw new Error(`river: Godot batch capture of ${items.length} shot${items.length === 1 ? "" : "s"} (${ids}) failed\n${report()}`)
+        const out: Record<string, string[]> = {}
+        const empty: string[] = []
+        for (const { shot, outDir } of items) {
+          const files = await framesIn(outDir)
+          if (files.length === 0) empty.push(`${shot.id} (${outDir})`)
+          out[shot.id] = files
+        }
+        if (empty.length > 0) throw new Error(`river: Godot batch capture wrote no frame_NN.png for shot${empty.length === 1 ? "" : "s"} ${empty.join(", ")}\n${report()}`)
+        return out
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
     },
   }
 }
