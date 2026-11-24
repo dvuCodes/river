@@ -1420,3 +1420,50 @@
   word-break: break-word;
   user-select: text;
 }
+
+/* ---- stage 3B: the story writer ---- */
+.mark-asks {
+  display: flex;
+  flex-direction: column;
+}
+.note-caption {
+  margin-bottom: 4px;
+  font-family: var(--font);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--star);
+}
+.take-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+  font-family: var(--font);
+}
+.keep-chip.keep-take {
+  position: static;
+  background: var(--chrome);
+  color: var(--ink);
+  border: 1px solid var(--chrome-line);
+  box-shadow: none;
+}
+.keep-chip.keep-take:hover:not(:disabled) {
+  border-color: var(--sel);
+  color: var(--sel);
+}
+.keep-chip.keep-take:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.take-lint {
+  margin-right: auto;
+  color: var(--cap);
+  font-size: 11px;
+}
+.take-lint.has-errors {
+  color: var(--danger);
+}
+.cnode-note.is-pending:has(.take-actions) {
+  opacity: 0.85;
+}

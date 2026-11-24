@@ -8,6 +8,9 @@ type OpenClaudeSignIn = (claudePath?: string) => Promise<void>
 
 const JOB_FNS = ["startConceptJob", "readJobScripts", "approveJobScripts", "acceptJob", "dismissJob", "reviseJob", "repliesAfter", "recoverJobs"] as const
 export type JobApi = Pick<typeof Agent, (typeof JOB_FNS)[number]>
+/** Writing jobs are optional: an @river/agent without them still runs concept jobs. */
+const WRITING_FNS = ["startWritingJob", "acceptWritingJob", "reviseWritingJob", "dismissWritingJob", "readWritingTakes"] as const
+export type WritingApi = Pick<typeof Agent, (typeof WRITING_FNS)[number]>
 
 export interface LoadedAgent {
   start?: StartAgentTurn
@@ -16,6 +19,8 @@ export interface LoadedAgent {
   reason?: string
   jobs?: JobApi
   jobsReason?: string
+  writing?: WritingApi
+  writingReason?: string
 }
 
 let loaded: Promise<LoadedAgent> | undefined
@@ -34,8 +39,10 @@ export function loadAgent(): Promise<LoadedAgent> {
       const claudeStatus = fn("getClaudeCodeStatus") as GetClaudeCodeStatus | undefined
       const claudeSignIn = fn("openClaudeSignIn") as OpenClaudeSignIn | undefined
       const missingJobFn = JOB_FNS.find((n) => !fn(n))
+      const missingWritingFn = WRITING_FNS.find((n) => !fn(n))
       return {
         ...(missingJobFn ? { jobsReason: `@river/agent does not export ${missingJobFn} yet.` } : { jobs: mod as unknown as JobApi }),
+        ...(missingWritingFn ? { writingReason: `@river/agent does not export ${missingWritingFn} yet.` } : { writing: mod as unknown as WritingApi }),
         ...(start ? { start } : { reason: "@river/agent does not export startAgentTurn yet." }),
         ...(claudeStatus ? { claudeStatus } : {}),
         ...(claudeSignIn ? { claudeSignIn } : {}),
@@ -43,7 +50,7 @@ export function loadAgent(): Promise<LoadedAgent> {
     },
     (err: unknown) => {
       const reason = `Could not load @river/agent: ${err instanceof Error ? err.message : String(err)}`
-      return { reason, jobsReason: reason }
+      return { reason, jobsReason: reason, writingReason: reason }
     },
   )
   return loaded

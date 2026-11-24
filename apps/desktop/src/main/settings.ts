@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { app, safeStorage } from "electron"
 import type { AgentBackend, AgentModel } from "@river/agent"
+import { parseModel, parseSelfCheckModel, storedModel, storedSelfCheckModel } from "./modelPrefs"
 import { CANVAS_THEMES, type CanvasTheme } from "../shared/api"
 
 /**
@@ -13,6 +14,8 @@ interface Settings {
   apiKeyEnc?: string
   backend?: AgentBackend
   model?: AgentModel
+  /** A faster model for the short self-check turns (the look at renders, the table read). Unset: the job's own model. */
+  selfCheckModel?: AgentModel
   /** The `claude` executable, when it is not on PATH. */
   claudePath?: string
   canvasTheme?: CanvasTheme
@@ -25,35 +28,41 @@ interface Settings {
 const file = () => join(app.getPath("userData"), "river-settings.json")
 
 const BACKENDS: readonly AgentBackend[] = ["api-key", "claude-code"]
-const MODELS: readonly AgentModel[] = ["claude-opus-5-5", "claude-sonnet-5-5"]
 
 export interface AgentPrefs {
   /** Undefined until the user picks one; main then picks a default from what is available. */
   backend?: AgentBackend
   model: AgentModel
+  /** Undefined: self-check turns use the job's own model. */
+  selfCheckModel?: AgentModel
   claudePath?: string
   selfCheck: boolean
 }
 
 export function getAgentPrefs(): AgentPrefs {
   const s = read()
+  const selfCheckModel = storedSelfCheckModel(s.selfCheckModel)
   return {
     ...(s.backend && BACKENDS.includes(s.backend) ? { backend: s.backend } : {}),
-    model: s.model && MODELS.includes(s.model) ? s.model : "claude-opus-5-5",
+    model: storedModel(s.model),
+    ...(selfCheckModel ? { selfCheckModel } : {}),
     ...(s.claudePath ? { claudePath: s.claudePath } : {}),
     selfCheck: s.selfCheck !== false,
   }
 }
 
-export function setAgentPrefs(p: { backend?: AgentBackend; model?: AgentModel; claudePath?: string; selfCheck?: boolean }): void {
+/** `selfCheckModel: ""` clears it back to the job's own model. */
+export function setAgentPrefs(p: { backend?: AgentBackend; model?: AgentModel; selfCheckModel?: AgentModel; claudePath?: string; selfCheck?: boolean }): void {
   const s = read()
   if (p.backend !== undefined) {
     if (!BACKENDS.includes(p.backend)) throw new Error(`Unknown backend ${String(p.backend)}`)
     s.backend = p.backend
   }
-  if (p.model !== undefined) {
-    if (!MODELS.includes(p.model)) throw new Error(`Unknown model ${String(p.model)}`)
-    s.model = p.model
+  if (p.model !== undefined) s.model = parseModel(p.model)
+  if (p.selfCheckModel !== undefined) {
+    const m = parseSelfCheckModel(p.selfCheckModel)
+    if (m) s.selfCheckModel = m
+    else delete s.selfCheckModel
   }
   if (p.claudePath !== undefined) {
     const t = p.claudePath.trim()

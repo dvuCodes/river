@@ -23,6 +23,8 @@ export interface CanvasActions {
   review(jobId: string): void
   /** Ask why not, then dismiss a job's whole answer. */
   dismissJob(jobId: string): void
+  /** A new answer to the user's replies on the mark: reviseJob for a concept job, reviseWritingJob for a writing job. */
+  reviseJob(jobId: string, kind: "concept" | "writing"): Promise<void>
   /** Show the runner's log of a job started outside the app. */
   viewLog(jobId: string): void
 }
@@ -133,7 +135,10 @@ function NoteBody({ id, text, fresh }: { id: string; text: string; fresh: boolea
 
 type ConceptView = Extract<CardDTO["view"], { kind: "concept" }>
 
-/** Jobs whose answer has a note card on the board: that note carries the job's actions, so its option cards do not. */
+/**
+ * Jobs whose answer has a summary note card on the board (a pending note with no label): that note carries the job's
+ * actions, so its option cards (concept renders, or a writing job's labelled take notes) do not.
+ */
 export const AnswerNotes = createContext<ReadonlySet<string>>(new Set())
 
 function useJobAction(cardId: string) {
@@ -155,23 +160,36 @@ function useJobAction(cardId: string) {
 function JobBar({ job, cardId }: { job: ConceptJob; cardId: string }) {
   const actions = useContext(Actions)!
   const { busy, act } = useJobAction(cardId)
+  const writing = job.kind === "writing"
   const scripts = job.scripts ?? []
   const rendered = scripts.filter((s) => s.render?.ok).length
   const failed = scripts.filter((s) => s.render && !s.render.ok).length
+  const takes = job.takes ?? []
   let line: ReactNode
   switch (job.status) {
     case "queued":
     case "running":
-      line = <p className="job-line is-working">✦ The concept artist is drawing…</p>
+      // A writing job's table read also runs inside "running", after the takes are written.
+      line = <p className="job-line is-working">{writing ? "✦ The story writer is drafting…" : "✦ The concept artist is drawing…"}</p>
       break
     case "approval":
       line = <p className="job-line">✦ {scripts.length > 1 ? `${scripts.length} scripts are` : "A script is"} waiting for you to review</p>
       break
     case "rendering":
-      line = job.looking ? <p className="job-line is-working is-looking">✦ looking at the renders…</p> : <p className="job-line is-working">Running the approved scripts in Godot…</p>
+      line = writing ? (
+        <p className="job-line is-working is-looking">✦ Running table read…</p>
+      ) : job.looking ? (
+        <p className="job-line is-working is-looking">✦ looking at the renders…</p>
+      ) : (
+        <p className="job-line is-working">Running the approved scripts in Godot…</p>
+      )
       break
     case "answered":
-      line = failed > 0 ? <p className="job-line">{rendered} rendered, {failed} failed to render</p> : null
+      line = writing ? (
+        takes.length > 0 ? <p className="job-line">{takes.length > 1 ? `${takes.length} takes: keep the one you want` : "One take: keep it, or reply on the mark"}</p> : null
+      ) : failed > 0 ? (
+        <p className="job-line">{rendered} rendered, {failed} failed to render</p>
+      ) : null
       break
     case "failed":
       line = <p className="cnode-missing concept-error nodrag nowheel">{job.error ?? "The job failed."}</p>
@@ -185,7 +203,7 @@ function JobBar({ job, cardId }: { job: ConceptJob; cardId: string }) {
     <div className="job-bar" data-job-status={job.status}>
       {line}
       <div className="concept-actions">
-        {job.status === "approval" && (
+        {!writing && job.status === "approval" && (
           <button className="btn btn-primary nodrag" data-action="review" onClick={() => actions.review(job.id)}>
             Review {scripts.length > 1 ? `${scripts.length} scripts` : "script"}
           </button>
@@ -200,13 +218,19 @@ function JobBar({ job, cardId }: { job: ConceptJob; cardId: string }) {
             View log
           </button>
         )}
-        {job.status === "answered" && rendered > 0 && (
+        {!writing && job.status === "answered" && rendered > 0 && (
           <button className="btn btn-primary nodrag" data-action="accept" disabled={busy} onClick={() => act(() => window.river.jobAccept(job.id))}>
             {rendered > 1 ? "Accept all" : "Accept"}
           </button>
         )}
         {job.revisable && (
-          <button className="btn nodrag" data-action="revise" disabled={busy} title="Answer your replies on the mark with a new set of options" onClick={() => act(() => window.river.jobRevise(job.id))}>
+          <button
+            className="btn nodrag"
+            data-action="revise"
+            disabled={busy}
+            title={writing ? "Answer your replies on the mark with new takes" : "Answer your replies on the mark with a new set of options"}
+            onClick={() => act(() => actions.reviseJob(job.id, writing ? "writing" : "concept"))}
+          >
             Revise
           </button>
         )}
@@ -275,6 +299,37 @@ function ConceptBody({ card, view, frame }: { card: BoardCard; view: ConceptView
       {body}
       {!notes.has(job.id) && <JobBar job={job} cardId={card.id} />}
     </div>
+  )
+}
+
+type NoteView = Extract<CardDTO["view"], { kind: "note" }>
+
+/**
+ * A pending note of a job. The unlabelled one is the answer's summary and carries the job's bar; a labelled one is a
+ * writing job's take (A, B, C…), with its own Keep button. A take note shows the bar only when there is no summary.
+ */
+function JobNote({ card, view }: { card: BoardCard; view: NoteView }) {
+  const notes = useContext(AnswerNotes)
+  const { busy, act } = useJobAction(card.id)
+  const job = view.job
+  if (!job) return null
+  const isTake = Boolean(card.label) && job.kind === "writing"
+  if (!isTake) return <JobBar job={job} cardId={card.id} />
+  const variant = (card.variant ?? card.label!).toLowerCase()
+  const take = job.takes?.find((t) => t.variant === variant)
+  const lint = take && (take.lintErrors ?? 0) + (take.lintWarnings ?? 0) > 0 ? `${take.lintErrors ?? 0} lint errors, ${take.lintWarnings ?? 0} warnings` : null
+  return (
+    <>
+      {job.status === "answered" && (
+        <div className="take-actions">
+          {lint && <span className={cx("take-lint", (take?.lintErrors ?? 0) > 0 && "has-errors")}>{lint}</span>}
+          <button className="keep-chip keep-take nodrag" data-action="keep-take" data-variant={variant} disabled={busy} title="Write this take into the story file" onClick={() => act(() => window.river.writeJobAccept(job.id, variant))}>
+            Keep {card.label}
+          </button>
+        </div>
+      )}
+      {!notes.has(job.id) && <JobBar job={job} cardId={card.id} />}
+    </>
   )
 }
 
@@ -399,8 +454,9 @@ export const CardView = memo(function CardView({ id, data, selected }: NodeProps
       body = (
         <>
           {agent && <Star by={card.madeBy} />}
+          {card.caption && card.label && <div className="note-caption">{card.caption}</div>}
           <NoteBody id={id} text={card.text ?? ""} fresh={!card.text && !agent && !pending} />
-          {view.job && <JobBar job={view.job} cardId={id} />}
+          {view.job && <JobNote card={card} view={view} />}
           {pending && <span className="cnode-pending-tag">pending</span>}
         </>
       )

@@ -1,20 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { AgentBackend, AgentEvent, AgentMode, AgentModel, PermissionRequest } from "@river/agent"
+import { modelLabel, modelOptions } from "../models"
 import type { AgentStatus } from "../../../shared/api"
 import { cx, errorText, useSmokeReady } from "../util"
+import { type ChatItem, endStreaming, withDelta, withText } from "./agentChat"
 
-type CheckpointState = "idle" | "confirm" | "restoring" | "restored"
-export type ChatItem =
-  | { kind: "user"; text: string; mode: AgentMode }
-  | { kind: "assistant"; text: string }
-  | { kind: "tool"; tool: string; summary: string; ok?: boolean }
-  | { kind: "permission"; request: PermissionRequest; decided?: "allow" | "deny" }
-  | { kind: "checkpoint"; ref: string; state: CheckpointState; error?: string }
-  | { kind: "note"; text: string }
-  | { kind: "error"; text: string }
+export type { ChatItem }
 
-/** Concept turns run as jobs from the canvas, never in this chat. */
-type ChatMode = Exclude<AgentMode, "concept">
+/** Concept and writer turns run as jobs from the canvas, never in this chat. */
+type ChatMode = Exclude<AgentMode, "concept" | "writer">
 
 export interface AgentContext {
   mode: ChatMode
@@ -26,9 +20,15 @@ export interface AgentContext {
 export function useAgentSession() {
   const [items, setItems] = useState<ChatItem[]>([])
   const [turnId, setTurnId] = useState<string | null>(null)
-  const [sessionId, setSessionId] = useState<string | undefined>()
+  /**
+   * One agent session per mode: a story chat, a plan and an implementation are unrelated work, so switching the mode
+   * starts (or goes back to) that mode's own conversation instead of carrying another mode's context into it.
+   */
+  const [sessionByMode, setSessionByMode] = useState<Partial<Record<ChatMode, string>>>({})
   const turnRef = useRef<string | null>(null)
   turnRef.current = turnId
+  /** The mode of the turn running now: its session id is kept under that mode, whatever tab is showing when it arrives. */
+  const turnModeRef = useRef<ChatMode>("story")
 
   useEffect(() => {
     const push = (item: ChatItem) => setItems((xs) => [...xs, item])
@@ -36,16 +36,17 @@ export function useAgentSession() {
       if (t !== turnRef.current) return
       const e = event as AgentEvent
       switch (e.type) {
-        case "session":
-          setSessionId(e.sessionId)
+        case "session": {
+          const mode = turnModeRef.current
+          setSessionByMode((m) => ({ ...m, [mode]: e.sessionId }))
           if (e.checkpointRef) push({ kind: "checkpoint", ref: e.checkpointRef, state: "idle" })
           break
+        }
+        case "text-delta":
+          setItems((xs) => withDelta(xs, e.text))
+          break
         case "text":
-          setItems((xs) => {
-            const last = xs[xs.length - 1]
-            if (last?.kind === "assistant") return [...xs.slice(0, -1), { kind: "assistant", text: last.text + e.text }]
-            return [...xs, { kind: "assistant", text: e.text }]
-          })
+          setItems((xs) => withText(xs, e.text))
           break
         case "tool":
           push({ kind: "tool", tool: e.tool, summary: e.summary })
@@ -60,10 +61,12 @@ export function useAgentSession() {
           push({ kind: "note", text: `Captured ${e.shotId}: ${e.files.length} frame(s).` })
           break
         case "done":
+          setItems(endStreaming)
           push({ kind: "note", text: `Turn finished${e.turns !== undefined ? ` · ${e.turns} turns` : ""}${e.costUsd !== undefined ? ` · $${e.costUsd.toFixed(4)}` : ""}.` })
           setTurnId(null)
           break
         case "error":
+          setItems(endStreaming)
           push({ kind: "error", text: e.message })
           setTurnId(null)
           break
@@ -83,7 +86,9 @@ export function useAgentSession() {
       setItems((xs) => [...xs, { kind: "user", text: prompt, mode: ctx.mode }])
       const id = crypto.randomUUID()
       turnRef.current = id
+      turnModeRef.current = ctx.mode
       setTurnId(id)
+      const sessionId = sessionByMode[ctx.mode]
       try {
         await window.river.agentStart({
           turnId: id,
@@ -101,7 +106,7 @@ export function useAgentSession() {
         setItems((xs) => [...xs, { kind: "error", text: errorText(err) }])
       }
     },
-    [sessionId],
+    [sessionByMode],
   )
 
   const decide = useCallback(async (index: number, request: PermissionRequest, allow: boolean) => {
@@ -128,15 +133,17 @@ export function useAgentSession() {
 
   const stop = useCallback(() => {
     if (turnId) void window.river.agentAbort(turnId)
+    // The turn's own done/error is ignored once it is no longer the running turn, so stop the streaming here.
+    setItems(endStreaming)
     setTurnId(null)
   }, [turnId])
 
   const reset = useCallback(() => {
     setItems([])
-    setSessionId(undefined)
+    setSessionByMode({})
   }, [])
 
-  return { items, running: turnId !== null, sessionId, start, decide, setCheckpoint, restore, stop, reset }
+  return { items, running: turnId !== null, sessionByMode, start, decide, setCheckpoint, restore, stop, reset }
 }
 
 export type AgentSession = ReturnType<typeof useAgentSession>
@@ -235,8 +242,11 @@ export function AgentView(props: {
         <label className="tb-field">
           <span className="tb-label">Model</span>
           <select value={model} onChange={(e) => pickModel(e.target.value as AgentModel)}>
-            <option value="claude-opus-5-5">Opus 5.5</option>
-            <option value="claude-sonnet-5-5">Sonnet 5.5</option>
+            {modelOptions(status?.knownModels, model).map((m) => (
+              <option key={m} value={m}>
+                {modelLabel(m)}
+              </option>
+            ))}
           </select>
         </label>
         <div className="tb-spacer" />
@@ -299,7 +309,7 @@ export function AgentView(props: {
                   )
                 case "assistant":
                   return (
-                    <div key={i} className="msg msg-agent">
+                    <div key={i} className={cx("msg msg-agent", it.streaming && "is-streaming")} aria-busy={it.streaming || undefined}>
                       {it.text}
                     </div>
                   )
@@ -376,7 +386,7 @@ export function AgentView(props: {
                   )
               }
             })}
-            {session.running && <div className="typing">working…</div>}
+            {session.running && !(session.items.at(-1)?.kind === "assistant" && (session.items.at(-1) as { streaming?: boolean }).streaming) && <div className="typing">working…</div>}
           </div>
           <form
             className="composer"
@@ -391,7 +401,7 @@ export function AgentView(props: {
               {ctx.threadId && <span className="ctx-pill mono">thread {ctx.threadId}</span>}
               {ctx.planId && <span className="ctx-pill mono">plan {ctx.planId}</span>}
               {blocked === "noplan" && <span className="sec-hint">Pick an approved plan in Frames → “Run approved plan”.</span>}
-              {session.sessionId && <span className="sec-hint">continuing session</span>}
+              {session.sessionByMode[ctx.mode] && <span className="sec-hint">continuing session</span>}
             </div>
             <textarea
               value={prompt}

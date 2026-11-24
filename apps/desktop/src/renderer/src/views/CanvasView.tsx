@@ -262,17 +262,41 @@ function CanvasInner(props: CanvasProps) {
     })
   }, [])
   const refresh = useCallback((id: string) => void window.river.boardCard(board, id).then((d) => putCard(id, d), fail), [board, putCard, fail])
+  /** Read several cards again in one call: main resolves them together, so a story file or capture folder is read once. */
+  const refreshMany = useCallback(
+    (ids: Iterable<string>) => {
+      const list = [...new Set(ids)]
+      if (list.length === 0) return
+      if (list.length === 1) return refresh(list[0]!)
+      void window.river.boardCards(board, list).then((got) => {
+        setState((s) => {
+          if (!s) return s
+          const cards = { ...s.cards }
+          for (const id of list) {
+            // Left out: that card could not be read this time; keep what the canvas has.
+            if (!(id in got)) continue
+            const dto = got[id]
+            if (dto) cards[id] = dto
+            else delete cards[id]
+          }
+          return { ...s, cards }
+        })
+      }, fail)
+    },
+    [board, refresh, fail],
+  )
 
   // Live reload: only the cards, marks and edges whose files changed are read again.
   useEffect(
     () =>
       window.river.onFsChange((changes) => {
         let marksChanged = false
+        const cardIds = new Set<string>()
         for (const c of changes) {
           if (c.kind === "job") {
             const jobId = /^\.river\/jobs\/([^/]+)\.json$/.exec(c.rel)?.[1]
             for (const dto of Object.values(stateRef.current?.cards ?? {})) {
-              if (jobId && dto.card.pending?.jobId === jobId) refresh(dto.card.id)
+              if (jobId && dto.card.pending?.jobId === jobId) cardIds.add(dto.card.id)
             }
             continue
           }
@@ -280,16 +304,17 @@ function CanvasInner(props: CanvasProps) {
           const m = /^\.river\/boards\/([^/]+)\/(cards|marks|edges)\/([^/]+)\.json$/.exec(c.rel)
           if (!m || m[1] !== board) continue
           const id = m[3]!
-          if (m[2] === "cards") refresh(id)
+          if (m[2] === "cards") cardIds.add(id)
           else if (m[2] === "edges") void window.river.boardEdge(board, id).then((e) => putEdge(id, e), fail)
           else {
             marksChanged = true
             void window.river.boardMark(board, id).then((mk) => putMark(id, mk), fail)
           }
         }
+        refreshMany(cardIds)
         if (marksChanged) void window.river.boardOpenCount(board).then((n) => setState((s) => (s ? { ...s, openMarks: n } : s)))
       }),
-    [board, putMark, putEdge, refresh, fail],
+    [board, putMark, putEdge, refreshMany, fail],
   )
 
   // Passage cards follow their story file.
@@ -297,8 +322,8 @@ function CanvasInner(props: CanvasProps) {
     const t = props.storyTick
     const s = stateRef.current
     if (!t || !s) return
-    for (const dto of Object.values(s.cards)) if (dto.view.kind === "passage" && dto.view.story === t.rel) refresh(dto.card.id)
-  }, [props.storyTick, refresh])
+    refreshMany(Object.values(s.cards).flatMap((dto) => (dto.view.kind === "passage" && dto.view.story === t.rel ? [dto.card.id] : [])))
+  }, [props.storyTick, refreshMany])
 
   /**
    * Writes one side of a step: a null side deletes the entity, an edit patches the entity as it is now, a whole entity
@@ -443,11 +468,13 @@ function CanvasInner(props: CanvasProps) {
       fail,
       review: (jobId) => void window.river.jobReview(jobId).catch(fail),
       dismissJob: setDismissing,
+      reviseJob: (jobId, kind) => (kind === "writing" ? window.river.writeJobRevise(jobId) : window.river.jobRevise(jobId)),
       viewLog: setLogOf,
     }),
     [commit, refresh, fail],
   )
-  const answerNotes = useMemo(() => new Set(cardList.flatMap((d) => (d.card.kind === "note" && d.card.pending ? [d.card.pending.jobId] : []))), [cardList])
+  // Only a job's unlabelled summary note carries its bar; a writing job's labelled take notes are its options.
+  const answerNotes = useMemo(() => new Set(cardList.flatMap((d) => (d.card.kind === "note" && d.card.pending && !d.card.label ? [d.card.pending.jobId] : []))), [cardList])
 
   const reply = async (markId: string, text: string) => {
     const { mark, openMarks } = await window.river.boardReply(board, markId, text)
@@ -776,6 +803,10 @@ function CanvasInner(props: CanvasProps) {
     const dto = state?.cards[id]
     return dto ? titleOf(dto) : id
   }
+  /** The kind of the job being dismissed, from any of its cards on the board. */
+  const dismissingKind = dismissing
+    ? Object.values(state?.cards ?? {}).reduce<"concept" | "writing" | undefined>((k, d) => k ?? (d.card.pending?.jobId === dismissing && "job" in d.view ? d.view.job?.kind : undefined), undefined)
+    : undefined
   const images = lightbox ? readingOrder(cardList.filter((d) => imageOf(d)).map((d) => ({ id: d.card.id, rect: boardRect(d) }))) : []
   const ref = refs[0]
 
@@ -928,9 +959,11 @@ function CanvasInner(props: CanvasProps) {
             answers={answersTo(soleMark.id).length}
             onShowAnswer={() => showAnswer(soleMark.id)}
             cardTitle={cardTitle}
+            onPassage={soleMark.anchors.some((a) => state?.cards[a]?.card.kind === "passage")}
             onAsk={() => window.river.jobStart(board, soleMark.id).catch(fail)}
+            onAskWriter={() => window.river.writeJobStart(board, soleMark.id).catch(fail)}
             onReply={(text) => reply(soleMark.id, text).catch(fail)}
-            onRevise={(jobId) => window.river.jobRevise(jobId).catch(fail)}
+            onRevise={(jobId, kind) => (kind === "writing" ? window.river.writeJobRevise(jobId) : window.river.jobRevise(jobId)).catch(fail)}
             onSettle={(status, text) => settleMark(soleMark.id, status, text).catch(fail)}
             onClose={() => setSelected(() => false)}
             onDelete={() => deleteItems([soleMark.id])}
@@ -969,10 +1002,13 @@ function CanvasInner(props: CanvasProps) {
         {logOf && <TextPanel title="Job log" sub={`.river/logs/${logOf}.log`} load={loadLog} onClose={() => setLogOf(null)} />}
         {dismissing && (
           <DismissDialog
+            writing={dismissingKind === "writing"}
             onCancel={() => setDismissing(null)}
             onDismiss={async (reason) => {
               const jobId = dismissing
-              await window.river.jobDismiss(jobId, reason || undefined)
+              // Core's dismissJob takes either kind; a writing job's reason goes into .river/voice.md.
+              if (dismissingKind === "writing") await window.river.writeJobDismiss(jobId, reason || undefined)
+              else await window.river.jobDismiss(jobId, reason || undefined)
               // The job removes its own cards and connectors; the watcher brings that in, this is only quicker.
               for (const d of Object.values(stateRef.current?.cards ?? {})) if (d.card.pending?.jobId === jobId) putCard(d.card.id, null)
               setDismissing(null)

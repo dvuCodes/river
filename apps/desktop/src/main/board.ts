@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { basename, extname, join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, shell } from "electron"
 import {
+  type Capture,
   type Card,
   type Edge,
   type Job,
@@ -15,11 +16,13 @@ import {
   boardJsonText,
   cardFile,
   cardHeight,
+  countOpenMarks,
   deleteCard,
   deleteEdge,
   deleteMark,
   edgeFile,
   ensureBoard,
+  jobKind,
   listBoards,
   listCaptures,
   listJobs,
@@ -110,7 +113,20 @@ async function jobView(p: Project, jobId: string): Promise<{ job: ConceptJob } |
     const { id, status, summary, error, scripts } = job
     const looking = status === "rendering" && lookingJobs.has(id)
     const log = JOB_ID.test(id) && (await exists(jobLogFile(p.root, id)))
-    return { job: { id, status, summary, error, scripts, revisable: await jobRevisable(p.root, job), ...(looking ? { looking } : {}), ...(log ? { log } : {}) } }
+    return {
+      job: {
+        id,
+        kind: jobKind(job),
+        status,
+        summary,
+        error,
+        scripts,
+        ...(job.takes ? { takes: job.takes } : {}),
+        revisable: await jobRevisable(p.root, job),
+        ...(looking ? { looking } : {}),
+        ...(log ? { log } : {}),
+      },
+    }
   } catch (e) {
     return { missing: e instanceof Error ? e.message : String(e) }
   }
@@ -154,9 +170,21 @@ function proseLines(text: string, max: number): string[] {
     .slice(0, max)
 }
 
-/** Resolves what cards show. Stories are read once per resolver. */
+/** Resolves what cards show. Stories, and each shot's captures, are read once per resolver. */
 export function cardResolver(p: Project) {
   const stories = new Map<string, Promise<Story | Error>>()
+  const captures = new Map<string, Promise<Capture[] | Error>>()
+  const capturesOf = (shotId: string) => {
+    let c = captures.get(shotId)
+    if (!c) {
+      c = listCaptures(p, shotId).then(
+        (r) => r,
+        (e: unknown) => (e instanceof Error ? e : new Error(String(e))),
+      )
+      captures.set(shotId, c)
+    }
+    return c
+  }
   const story = (rel: string) => {
     let s = stories.get(rel)
     if (!s) {
@@ -183,13 +211,9 @@ export function cardResolver(p: Project) {
         break
       }
       case "frame": {
-        let caps: Awaited<ReturnType<typeof listCaptures>> = []
-        let err: string | undefined
-        try {
-          caps = await listCaptures(p, card.ref)
-        } catch (e) {
-          err = e instanceof Error ? e.message : String(e)
-        }
+        const listed = await capturesOf(card.ref)
+        const caps: Capture[] = listed instanceof Error ? [] : listed
+        const err = listed instanceof Error ? listed.message : undefined
         const cap = card.capture ? caps.find((c) => c.at === card.capture) : card.rev ? caps.find((c) => c.rev === card.rev) : caps[0]
         const frame = card.frame ?? 0
         const file = cap?.files[frame]
@@ -286,8 +310,9 @@ async function writeMark(p: Project, board: string, mark: NewMark): Promise<Mark
   })
 }
 
-async function countOpen(p: Project, board: string): Promise<number> {
-  return openMarks(await loadBoard(p.root, board)).length
+/** Reads only the board's marks/ folder. */
+function countOpen(p: Project, board: string): Promise<number> {
+  return countOpenMarks(p.root, board)
 }
 
 /** Free spot for a pinned card: below everything, left-aligned, in a 4-wide grid of 320 x 300 slots. */
@@ -330,6 +355,29 @@ export function boardHandlers(need: () => Project, watch: { add(dir: string): vo
     "board:card": async (name: string, id: string): Promise<CardDTO | null> => {
       const card = await loadCard(need().root, name, id)
       return card ? cardResolver(need())(card) : null
+    },
+    /**
+     * Several cards with one resolver: a story file or a capture folder is read once, however many cards show it. A
+     * card that is gone is null; one whose file does not parse (an agent may be writing it) is left out, so the rest
+     * still arrive and the canvas keeps what it had for that one.
+     */
+    "board:cards": async (name: string, ids: string[]): Promise<Record<string, CardDTO | null>> => {
+      const p = need()
+      if (!Array.isArray(ids)) throw new Error("board:cards takes a list of card ids.")
+      const resolve = cardResolver(p)
+      const unique = [...new Set(ids.filter((id): id is string => typeof id === "string"))]
+      const entries = await Promise.all(
+        unique.map(async (id): Promise<[string, CardDTO | null] | undefined> => {
+          try {
+            const card = await loadCard(p.root, name, id)
+            return [id, card ? await resolve(card) : null]
+          } catch (err) {
+            console.warn(`river: could not read card ${id} on ${name}:`, err instanceof Error ? err.message : String(err))
+            return undefined
+          }
+        }),
+      )
+      return Object.fromEntries(entries.filter((e): e is [string, CardDTO | null] => e !== undefined))
     },
     "board:mark": async (name: string, id: string): Promise<Mark | null> => (await loadMark(need().root, name, id)) ?? null,
     "board:edge": (name: string, id: string) => loadEdge(need(), name, id),

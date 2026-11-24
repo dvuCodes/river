@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile } from "node:fs/promises"
-import { join, relative, resolve, sep } from "node:path"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { basename, dirname, join, relative, resolve, sep } from "node:path"
 import { type BrowserWindow, dialog, ipcMain } from "electron"
-import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobAgentSettings, JobDeps, PermissionDecision, RunTurn } from "@river/agent"
+import type { AgentEvent, AgentTurnRequest, ClaudeCodeStatus, JobAgentSettings, JobDeps, PermissionDecision, RunTurn, WritingJobDeps } from "@river/agent"
+import { KNOWN_MODELS, isValidModel } from "@river/agent"
 import { createGodotAdapter, kitFileText, linesToRead } from "@river/adapter-godot"
 import {
   type Capture,
   type ChangePlan,
+  type CheckDataResult,
+  type Diagnostic,
+  type EngineAdapter,
   type GameState,
   type Playtest,
   type Project,
@@ -15,13 +19,20 @@ import {
   type StateSchema,
   type Story,
   DEFAULT_BOARD,
+  addPassage,
   addThread,
   captureShot,
+  captureShots,
+  choiceTarget,
   contentPassages,
   createPlaytest,
+  deletePassage,
   evalCond,
+  exportStory,
+  formatClosed,
   formatCond,
   lint,
+  lintNarrative,
   listBoards,
   listCaptures,
   listPlans,
@@ -34,16 +45,22 @@ import {
   loadSchema,
   loadStory,
   openChoices,
-  paths,
+  parseTwee3,
+  pathsAnalysis,
+  readBrief,
+  readVoice,
   renamePassage,
   reply,
-  resolveTarget,
+  resolveAdapter,
   restoreCheckpoint,
+  runCheckData,
   safePath,
   saveStory,
   setPassagePositions,
   setPlanStatus,
   setStatus,
+  startPassage,
+  updatePassageTags,
   updatePassageText,
   writeTwee3,
 } from "@river/core"
@@ -56,19 +73,20 @@ import type {
   FramesDTO,
   JobDTO,
   OpenStateDTO,
-  PathDTO,
+  PathsResultDTO,
   PlaySnapshot,
   ProjectInfo,
   StoryDTO,
 } from "../shared/api"
 import { asciiLine } from "../shared/approval"
-import { type JobApi, loadAgent } from "./agent"
+import { type JobApi, type WritingApi, loadAgent } from "./agent"
 import { type Approvals, registerApproval } from "./approval"
 import { passageDTO, storyDTO } from "./dto"
 import * as settings from "./settings"
 import { boardHandlers, closeRowGap, jobLogFile, jobRevisable, lookingJobs } from "./board"
 import { type ProjectWatch, noteOwnWrite, watchProject } from "./watch"
 import { PermissionWaits } from "./permissions"
+import { StoryCache, staleStories } from "./storyCache"
 import { AgentWork } from "./work"
 
 let project: Project | null = null
@@ -97,11 +115,17 @@ export async function openProject(root: string, remember = true): Promise<void> 
   approvals?.closeAll()
   await projectWatch?.stop()
   projectWatch = null
+  storyCache.invalidate()
   try {
     project = await loadProject(abs)
+    // Again now the new project is current: a read during loadProject may have cached the old project's story.
+    storyCache.invalidate()
     projectError = null
     if (remember) settings.setLastProject(project.root)
     projectWatch = watchProject(project, (changes) => {
+      const stale = staleStories(changes)
+      if (stale === "all") storyCache.invalidate()
+      else for (const rel of stale) storyCache.invalidate(rel)
       approvals?.changed(changes)
       send("fs:change", changes)
     })
@@ -112,6 +136,7 @@ export async function openProject(root: string, remember = true): Promise<void> 
       .catch((err: unknown) => console.warn("river: could not recover jobs", err))
   } catch (err) {
     project = null
+    storyCache.invalidate()
     projectError = { root: abs, message: err instanceof Error ? err.message : String(err) }
   }
 }
@@ -129,17 +154,52 @@ async function projectInfo(): Promise<ProjectInfo | null> {
     engine: project.manifest.engine,
     stories: await listStories(project),
     shots: project.manifest.shots,
+    ...(project.manifest.checkData ? { hasCheckData: true } : {}),
   }
 }
 
-async function readStory(rel: string): Promise<{ story: Story; schema: StateSchema; dto: () => Promise<StoryDTO> }> {
-  const p = need()
+interface ParsedStory {
+  story: Story
+  schema: StateSchema
+  /** The StoryDTO with parse, lint and narrative diagnostics, built on first use and kept with the entry. */
+  dto(): StoryDTO
+}
+
+/**
+ * Parsed stories by file, for the read-only handlers (load, paths, open state, playtest start). Cleared when a project
+ * opens, when River writes a story, and when the watcher reports a story, state or manifest change. Handlers that
+ * write read the file fresh, so an outside edit the watcher has not reported yet is never written over.
+ */
+const storyCache = new StoryCache<ParsedStory>()
+
+async function parseStory(p: Project, rel: string): Promise<ParsedStory> {
   const [{ story, diagnostics }, schema] = await Promise.all([loadStory(p, rel), loadSchema(p)])
+  let dto: StoryDTO | undefined
   return {
     story,
     schema,
-    dto: async () => storyDTO(story, [...diagnostics, ...lint(story, schema)], schema),
+    dto: () => {
+      if (!dto) {
+        const narrative: Diagnostic[] = lintNarrative(story, schema, {
+          ...(p.manifest.copyBudgets ? { copyBudgets: p.manifest.copyBudgets } : {}),
+          shotIds: p.manifest.shots.map((s) => s.id),
+        })
+        dto = storyDTO(story, [...diagnostics, ...lint(story, schema), ...narrative], schema)
+      }
+      return dto
+    },
   }
+}
+
+/** The story as parsed now, from the cache when it is there. */
+function readStory(rel: string): Promise<ParsedStory> {
+  const p = need()
+  return storyCache.get(rel, () => parseStory(p, rel))
+}
+
+/** The story read from disk now, for a handler that writes it. */
+async function freshStory(rel: string): Promise<Story> {
+  return (await loadStory(need(), rel)).story
 }
 
 const storyWritten = new Set<(rel: string) => void>()
@@ -154,7 +214,13 @@ export function onStoryWritten(cb: (rel: string) => void): () => void {
 async function writeStory(rel: string, story: Story): Promise<void> {
   const p = need()
   noteOwnWrite(safePath(p, rel), writeTwee3(story))
-  await saveStory(p, rel, story)
+  storyCache.invalidate(rel)
+  try {
+    await saveStory(p, rel, story)
+  } finally {
+    // Again after the write: a read that started during it may have cached the old text.
+    storyCache.invalidate(rel)
+  }
   for (const cb of storyWritten) cb(rel)
 }
 
@@ -175,13 +241,24 @@ function snapshot(sessionId: string): PlaySnapshot {
   return {
     sessionId,
     passage: passageDTO(story, pt.current()),
-    choices: pt.choices().map(({ choice, open }) => ({
+    renderedText: pt.renderedText(),
+    choices: pt.choices().map(({ choice, open, closed }) => ({
       label: choice.label,
       target: choice.target,
       open,
-      broken: !resolveTarget(story, choice.target),
+      // A `@return` choice has no passage target but is not broken.
+      broken: choiceTarget(story, choice.target).kind === "missing",
       ...(choice.when ? { when: formatCond(choice.when) } : {}),
+      ...(choice.hint ? { hint: choice.hint } : {}),
+      ...(closed ? { closedReason: formatClosed(closed) } : {}),
     })),
+    interrupts: pt.interrupts().map(({ passage, open }) => ({
+      id: passage.id,
+      name: passage.name,
+      open,
+      ...(passage.when ? { when: formatCond(passage.when) } : {}),
+    })),
+    inInterrupt: history.at(-1)?.returnTo !== undefined,
     state: pt.state(),
     history: history.map((h) => byId.get(h.passageId)?.name ?? h.passageId),
     isOver: pt.isOver(),
@@ -197,6 +274,21 @@ function fileUrl(p: Project, abs: string): string {
 
 function captureDTO(p: Project, c: Capture): CaptureDTO {
   return { shotId: c.shotId, rev: c.rev, at: c.at, urls: c.files.map((f) => fileUrl(p, f)) }
+}
+
+/** Adapters River ships. A project on another engine captures through river.json's `adapter.<engine>.command`. */
+const ADAPTERS: readonly EngineAdapter[] = [createGodotAdapter()]
+
+/** The project's capture adapter. Throws (saying what to set in river.json) when its engine has none. */
+const adapterFor = (p: Project): EngineAdapter => resolveAdapter(p, ADAPTERS)
+
+function canCapture(p: Project): boolean {
+  try {
+    adapterFor(p)
+    return true
+  } catch {
+    return false
+  }
 }
 
 // ---- agent turns
@@ -251,6 +343,8 @@ async function agentStatus(refreshClaude = false): Promise<AgentStatus> {
     backend: prefs.backend ?? fallback,
     backendChosen: prefs.backend !== undefined,
     model: prefs.model,
+    knownModels: [...KNOWN_MODELS],
+    ...(prefs.selfCheckModel ? { selfCheckModel: prefs.selfCheckModel } : {}),
     ...(prefs.claudePath ? { claudePath: prefs.claudePath } : {}),
     selfCheck: prefs.selfCheck,
     claudeCode,
@@ -274,12 +368,32 @@ async function jobApi(): Promise<JobApi> {
   return agent.jobs
 }
 
-/** The look at a job's renders runs as the job's own turns do: the user's model, backend, key or claude path. */
+async function writingApi(): Promise<WritingApi> {
+  const agent = await loadAgent()
+  if (!agent.writing) throw new Error(agent.writingReason ?? "Writing jobs are unavailable.")
+  return agent.writing
+}
+
+/** A passage named `name` with `rawText` as its body, parsed as the story file parses it (river-mcp's story_add_passage does the same). */
+function newPassage(name: string, tags: readonly string[], rawText: string, file: string) {
+  const escape = (x: string) => x.replace(/[\\[\]{}]/g, (c) => `\\${c}`)
+  const header = `:: ${escape(name)}${tags.length > 0 ? ` [${tags.map(escape).join(" ")}]` : ""}`
+  // A body line starting with "::" would start another passage.
+  const body = rawText.replace(/\r\n?/g, "\n").split("\n").map((l) => (l.startsWith("::") ? `\\${l}` : l)).join("\n")
+  const passage = parseTwee3(`${header}\n${body}\n`, file).story.passages[0]
+  if (!passage) throw new Error(`Could not read the new passage ${JSON.stringify(name)}.`)
+  return passage
+}
+
+/**
+ * The look at a job's renders (and a writing job's table read) runs as the job's own turns do: the user's backend, key
+ * or claude path, and model — the self-check model from Settings when one is set.
+ */
 async function lookSettings(): Promise<false | JobAgentSettings> {
   if (!settings.getAgentPrefs().selfCheck) return false
   try {
     const status = await agentStatus()
-    return { model: status.model, ...(await turnAuth(status)) }
+    return { model: status.selfCheckModel ?? status.model, ...(await turnAuth(status)) }
   } catch (err) {
     // Without a way to run the look, the renders are still worth showing: answer with the note as written.
     console.warn("river: skipping the look at the renders:", err instanceof Error ? err.message : String(err))
@@ -323,29 +437,58 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
   })
 
   handle("story:load", async (rel: string) => (await readStory(rel)).dto())
-  handle("story:savePassage", async (rel: string, id: string, raw: string) => {
-    const { story } = await readStory(rel)
-    return storyAfterWrite(rel, updatePassageText(story, id, raw))
-  })
+  handle("story:savePassage", async (rel: string, id: string, raw: string) => storyAfterWrite(rel, updatePassageText(await freshStory(rel), id, raw)))
   handle("story:rename", async (rel: string, id: string, name: string) => {
     const trimmed = name.trim()
     if (!trimmed) throw new Error("A passage name cannot be empty.")
-    const { story } = await readStory(rel)
-    return storyAfterWrite(rel, renamePassage(story, id, trimmed))
+    return storyAfterWrite(rel, renamePassage(await freshStory(rel), id, trimmed))
+  })
+  handle("story:addPassage", async (rel: string, name: string, rawText: string, tags?: string[]) => {
+    const trimmed = typeof name === "string" ? name.trim() : ""
+    if (!trimmed) throw new Error("A passage name cannot be empty.")
+    if (/[\r\n]/.test(trimmed)) throw new Error("A passage name is one line.")
+    const tagList = Array.isArray(tags) ? tags.map((t) => String(t).trim()).filter(Boolean) : []
+    const story = await freshStory(rel)
+    return storyAfterWrite(rel, addPassage(story, newPassage(trimmed, tagList, typeof rawText === "string" ? rawText : "", story.file)))
+  })
+  handle("story:setTags", async (rel: string, id: string, tags: string[]) => {
+    if (!Array.isArray(tags)) throw new Error("Tags are a list of words.")
+    const list = [...new Set(tags.map((t) => String(t).trim()).filter(Boolean))]
+    if (list.some((t) => /[\s\[\]]/.test(t))) throw new Error("A tag is one word, with no spaces or brackets.")
+    return storyAfterWrite(rel, updatePassageTags(await freshStory(rel), id, list))
+  })
+  handle("story:deletePassage", async (rel: string, id: string) => {
+    const story = await freshStory(rel)
+    const start = startPassage(story)
+    if (start && start.id === id) throw new Error(`"${start.name}" is the story's start passage, so it cannot be deleted. Make another passage the start first.`)
+    return storyAfterWrite(rel, deletePassage(story, id))
+  })
+  handle("story:export", async (rel: string): Promise<{ outFile: string; passageCount: number }> => {
+    const p = need()
+    const { story, schema } = await readStory(rel)
+    const stem = basename(rel).replace(/\.(twee|tw)$/i, "")
+    const data = exportStory(story, schema, stem)
+    const outFile = `${p.manifest.export}/${stem}.json`.replace(/\\/g, "/")
+    const target = safePath(p, outFile)
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, JSON.stringify(data, null, 2) + "\n", "utf8")
+    return { outFile, passageCount: Object.keys(data.passages).length }
+  })
+  handle("project:checkData", async (): Promise<CheckDataResult> => {
+    const p = need()
+    if (!p.manifest.checkData) throw new Error("river.json has no checkData command.")
+    return runCheckData(p, await loadSchema(p))
   })
   handle("story:savePositions", async (rel: string, positions: Record<string, [number, number]>) => {
     const { story } = await loadStory(need(), rel)
     const next = setPassagePositions(story, positions)
     if (next !== story) await writeStory(rel, next)
   })
-  handle("story:paths", async (rel: string): Promise<PathDTO[]> => {
+  handle("story:paths", async (rel: string): Promise<PathsResultDTO> => {
     const { story, schema } = await readStory(rel)
-    return paths(story, schema).map((r) => ({
-      steps: r.steps,
-      end: r.end,
-      satisfiable: r.satisfiable,
-      conditions: r.conditions.map(formatCond),
-    }))
+    const a = pathsAnalysis(story, schema)
+    const dto = (r: (typeof a.interrupts)[number]) => ({ steps: r.steps, end: r.end, satisfiable: r.satisfiable, conditions: r.conditions.map(formatCond) })
+    return { routes: a.routes.map(dto), interrupts: a.interrupts.map(dto), truncated: a.truncated }
   })
   handle("story:openState", async (rel: string, state: GameState): Promise<OpenStateDTO> => {
     const { story, schema } = await readStory(rel)
@@ -377,6 +520,10 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     sessions.get(id)?.pt.setVar(name, value)
     return snapshot(id)
   })
+  handle("play:interrupt", (id: string, name: string) => {
+    sessions.get(id)?.pt.interrupt(name)
+    return snapshot(id)
+  })
 
   handle("frames:get", async (): Promise<FramesDTO> => {
     const p = need()
@@ -384,12 +531,19 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
       p.manifest.shots.map(async (s) => ({ ...s, captures: (await listCaptures(p, s.id)).map((c) => captureDTO(p, c)) })),
     )
     const [threads, plans] = await Promise.all([listThreads(p), listPlans(p)])
-    return { engine: p.manifest.engine, canCapture: p.manifest.engine === "godot", shots, threads, plans }
+    return { engine: p.manifest.engine, canCapture: canCapture(p), shots, threads, plans }
   })
   handle("frames:capture", async (shotId: string) => {
     const p = need()
-    if (p.manifest.engine !== "godot") throw new Error(`Engine "${p.manifest.engine}" has no capture adapter.`)
-    return captureDTO(p, await captureShot(p, shotId, createGodotAdapter()))
+    return captureDTO(p, await captureShot(p, shotId, adapterFor(p)))
+  })
+  // Captures are listed from disk on every frames:get, so there is no capture cache to clear afterwards.
+  handle("frames:captureAll", async (): Promise<CaptureDTO[]> => {
+    const p = need()
+    const adapter = adapterFor(p)
+    const ids = p.manifest.shots.map((s) => s.id)
+    if (ids.length === 0) throw new Error("river.json has no shots to capture.")
+    return (await captureShots(p, ids, adapter)).map((c) => captureDTO(p, c))
   })
   handle("review:add", (target: ReviewThread["target"], text: string) => addThread(need(), target, YOU, text))
   handle("review:reply", (threadId: string, text: string) => reply(need(), threadId, YOU, text))
@@ -428,7 +582,10 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     if (!agent.start) throw new Error(agent.reason ?? "The agent is unavailable.")
     const status = await agentStatus()
     const { turnId, ...turn } = req
+    if (!isValidModel(turn.model)) throw new Error(`Not a model id: ${JSON.stringify(String(turn.model).slice(0, 80))}`)
     const auth = await turnAuth(status)
+    // The project brief and the voice bible go into the system prompt; a file that cannot be read is left out.
+    const [brief, voice] = await Promise.all([readBrief(p.root).catch(() => undefined), readVoice(p.root).catch(() => undefined)])
     // The model picker is per turn; remember the last one.
     if (turn.model !== status.model) settings.setAgentPrefs({ model: turn.model })
     const ac = new AbortController()
@@ -442,7 +599,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     const run = Promise.resolve()
       .then(() =>
         agent.start!(
-          { ...turn, root: p.root, ...auth },
+          { ...turn, root: p.root, ...auth, ...(brief ? { brief } : {}), ...(voice ? { voice } : {}) },
           {
             onEvent: emit,
             onPermission: (request) => permissions.wait(request.id, signal, () => send("agent:permission", { turnId, request })),
@@ -468,24 +625,63 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
   handle("agent:restore", (ref: string) => restoreCheckpoint(need().root, ref))
 
   /** Jobs run in the background; one that fails before its job file exists (bad mark, no git) is thrown here. */
-  const runJob = async (start: (jobs: JobApi, settings: JobAgentSettings, deps: JobDeps) => Promise<unknown>) => {
+  /** The settings and agent turn a job runs with, once the jobs folder is watched. */
+  const jobSetup = async (): Promise<{ settings: JobAgentSettings; runTurn: RunTurn | undefined }> => {
     const p = need()
-    const jobs = await jobApi()
     const agent = await loadAgent()
     const base: RunTurn | undefined = opts.jobDeps?.runTurn ?? agent.start
-    const deps: JobDeps = { ...opts.jobDeps, ...(base ? { runTurn: tracked(base) } : {}) }
     const status = await agentStatus()
     const auth = await turnAuth(status)
     // Watch the jobs folder before the first job file appears in it.
     const jobsDir = join(p.root, ".river", "jobs")
     await mkdir(jobsDir, { recursive: true })
     projectWatch?.add(jobsDir)
-    const run = start(jobs, { model: status.model, ...auth }, deps)
-    run.catch((err: unknown) => console.warn("river: concept job failed", err))
+    return { settings: { model: status.model, ...auth }, runTurn: base ? tracked(base) : undefined }
+  }
+  /** Let a job run on; a failure in its first moments (before its job file exists) is thrown to the caller. */
+  const background = async (run: Promise<unknown>, what: string) => {
+    run.catch((err: unknown) => console.warn(`river: ${what} failed`, err))
     await Promise.race([run, new Promise((r) => setTimeout(r, 1_500))])
+  }
+  const runJob = async (start: (jobs: JobApi, settings: JobAgentSettings, deps: JobDeps) => Promise<unknown>) => {
+    const jobs = await jobApi()
+    const selfCheckModel = settings.getAgentPrefs().selfCheckModel
+    const { settings: jobSettings, runTurn } = await jobSetup()
+    const deps: JobDeps = { ...opts.jobDeps, ...(selfCheckModel ? { selfCheckModel } : {}), ...(runTurn ? { runTurn } : {}) }
+    await background(start(jobs, jobSettings, deps), "concept job")
+  }
+  /** Writing jobs run their table read inside the job, with the same self-check setting as the look at renders. */
+  const runWritingJob = async (start: (writing: WritingApi, settings: JobAgentSettings, deps: WritingJobDeps) => Promise<unknown>) => {
+    const writing = await writingApi()
+    const selfCheckModel = settings.getAgentPrefs().selfCheckModel
+    const { settings: jobSettings, runTurn } = await jobSetup()
+    // Quitting the app aborts the table read; the job is still answered, with the note as the writer wrote it.
+    const deps: WritingJobDeps = { selfCheck: await lookSettings(), signal: work.signal(), ...(selfCheckModel ? { selfCheckModel } : {}), ...(runTurn ? { runTurn } : {}) }
+    await background(start(writing, jobSettings, deps), "writing job")
   }
   handle("job:start", (board: string, markId: string) => runJob((jobs, settings, deps) => jobs.startConceptJob({ workspaceRoot: need().root, board, markId, ...settings }, deps)))
   handle("job:revise", (jobId: string) => runJob((jobs, settings, deps) => jobs.reviseJob(need().root, jobId, settings, deps)))
+  handle("writeJob:start", (board: string, markId: string) =>
+    runWritingJob((writing, settings, deps) => writing.startWritingJob({ workspaceRoot: need().root, board, markId, ...settings }, deps)),
+  )
+  handle("writeJob:revise", (jobId: string) => runWritingJob((writing, settings, deps) => writing.reviseWritingJob(need().root, jobId, settings, deps)))
+  handle("writeJob:accept", async (jobId: string, variant: string, saveExemplar?: boolean) => {
+    const p = need()
+    if (typeof variant !== "string" || !/^[a-e]$/i.test(variant.trim())) throw new Error(`Not a take: ${JSON.stringify(variant)} (a to e).`)
+    const { board } = await loadJob(p.root, jobId)
+    // The take cards as they are before the accept removes the takes not kept.
+    const takes = (await loadBoard(p.root, board)).cards.filter((c) => c.pending?.jobId === jobId && c.kind === "note" && c.label)
+    try {
+      await (await writingApi()).acceptWritingJob(p.root, jobId, { variant: variant.trim().toLowerCase(), ...(saveExemplar === false ? { saveExemplar: false } : {}) })
+    } finally {
+      // The accept writes the story file itself, not through writeStory.
+      storyCache.invalidate()
+    }
+    if (takes.length > 1) await closeRowGap(p.root, board, takes).catch((err: unknown) => console.warn("river: could not close the row after keeping a take", err))
+  })
+  handle("writeJob:dismiss", async (jobId: string, reason?: string) => {
+    await (await writingApi()).dismissWritingJob(need().root, jobId, typeof reason === "string" && reason ? reason : undefined)
+  })
   handle("job:get", async (jobId: string): Promise<JobDTO> => {
     const p = need()
     const job = await loadJob(p.root, jobId)
@@ -514,7 +710,8 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
           jobTouched(jobId)
         }
       })
-    const run = jobs.approveJobScripts(root, jobId, shas, { ...opts.jobDeps, selfCheck, ...(runTurn ? { runTurn } : {}) })
+    const selfCheckModel = settings.getAgentPrefs().selfCheckModel
+    const run = jobs.approveJobScripts(root, jobId, shas, { ...opts.jobDeps, selfCheck, ...(selfCheckModel ? { selfCheckModel } : {}), ...(runTurn ? { runTurn } : {}) })
     const settled = run.then(
       () => undefined,
       (err: unknown) => console.warn("river: approving the scripts failed", err),
