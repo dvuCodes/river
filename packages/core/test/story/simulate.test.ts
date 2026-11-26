@@ -127,6 +127,13 @@ describe("simulateStory", () => {
     expect(r.finalState.gold).toEqual({ type: "int", min: 0, max: 0, avg: 0 })
   })
 
+  it("handles large run counts without blowing the call stack", () => {
+    const r = simulateStory(story(":: A", "@end", "--", "Done."), schema, { runs: 150_000 })
+    expect(r.runs).toBe(150_000)
+    expect(r.steps).toEqual({ min: 0, max: 0, avg: 0 })
+    expect(r.finalState.gold).toEqual({ type: "int", min: 0, max: 0, avg: 0 })
+  })
+
   it("plays the park-walk example to its endings", () => {
     const { story: s, schema: sch } = loadExample()
     const r = simulateStory(s, sch, { runs: 100 })

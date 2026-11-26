@@ -92,7 +92,7 @@ const cmp = (a: number, op: "<" | "<=" | ">" | ">=", b: number) => (op === "<" ?
  * `cond` as a condition on the state before `effect` runs, with the effect's clamping to the schema range;
  * undefined when that cannot be written as a condition River checks.
  */
-function beforeEffect(cond: Cond, effect: Effect, schema: StateSchema): Cond | undefined {
+export function beforeEffect(cond: Cond, effect: Effect, schema: StateSchema): Cond | undefined {
   if (cond.kind === "and" || cond.kind === "or") {
     const terms = cond.terms.map((t) => beforeEffect(t, effect, schema))
     return terms.every((t): t is Cond => t !== undefined) ? join(cond.kind, terms) : undefined

@@ -169,6 +169,35 @@ export function PlaytestView(props: {
               </ul>
             </section>
           )}
+          {snap && (snap.storylets?.length ?? 0) > 0 && (
+            <section className="panel-sec">
+              <header className="sec-head">
+                <h3>Storylets</h3>
+                <span className="sec-hint">
+                  {snap.storylets!.filter((s) => s.open).length} of {snap.storylets!.length} open
+                </span>
+              </header>
+              <button
+                className="btn btn-primary storylet-draw"
+                data-action="draw-storylet"
+                disabled={!snap.storylets!.some((s) => s.open)}
+                onClick={() => void call(() => window.river.playDrawStorylet(snap.sessionId))}
+              >
+                Draw storylet
+              </button>
+              <ul className="storylet-list">
+                {snap.storylets!.map((s) => (
+                  <li key={s.id} className={cx("storylet-row", !s.open && "is-closed")}>
+                    <span className="storylet-name">{s.name}</span>
+                    <span className="storylet-meta mono">
+                      {s.priority !== 0 && `p${s.priority} · `}
+                      {s.cooldownLeft > 0 ? `cd ${s.cooldownLeft}` : s.open ? "open" : "closed"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           <section className="panel-sec grow">
             <header className="sec-head">
               <h3>Steps</h3>

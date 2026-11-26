@@ -525,45 +525,58 @@ async function printCheckData(project: Project, schema: StateSchema, out: Out): 
   return r.ok
 }
 
-const storyIdFor = (rel: string): string => basename(rel).replace(/\.(twee|tw)$/i, "")
+function storyIdFor(rel: string, storiesDir: string, allStories: readonly string[]): string {
+  const stemOf = (p: string) => basename(p).replace(/\.(twee|tw)$/i, "")
+  const stem = stemOf(rel)
+  const lower = stem.toLowerCase()
+  const collides = allStories.filter((s) => stemOf(s).toLowerCase() === lower).length > 1
+  if (!collides) return stem
+  const norm = rel.replace(/\\/g, "/").replace(/^\.\//, "")
+  const prefix = storiesDir.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "")
+  const under = prefix && prefix !== "." && norm.startsWith(`${prefix}/`) ? norm.slice(prefix.length + 1) : norm
+  return under.replace(/\.(twee|tw)$/i, "")
+}
 
 async function loadWorkspaceStories(
   project: Project,
   selected: string[],
 ): Promise<{
   loaded: Map<string, { story: Story; diagnostics: Diagnostic[] }>
+  storyIds: Map<string, string>
   workspace?: StoryWorkspace
 }> {
   const all = await listStories(project)
   const pathsToLoad = all.length >= 2 ? Array.from(new Set([...all, ...selected])) : selected
   const loaded = new Map<string, { story: Story; diagnostics: Diagnostic[] }>()
+  const storyIds = new Map<string, string>()
   for (const rel of pathsToLoad) {
     loaded.set(rel, await loadStory(project, rel))
+    storyIds.set(rel, storyIdFor(rel, project.manifest.stories, pathsToLoad))
   }
   const workspace =
     pathsToLoad.length >= 2
       ? loadStoryWorkspace(
           pathsToLoad.map((rel) => ({
             file: rel,
-            id: storyIdFor(rel),
+            id: storyIds.get(rel)!,
             story: loaded.get(rel)!.story,
           })),
         )
       : undefined
-  return { loaded, workspace }
+  return { loaded, storyIds, workspace }
 }
 
 async function cmdLint(dir: string, storyOpt: string | undefined, noNarrative: boolean, out: Out): Promise<number> {
   const { project, schema } = await openProject(dir)
   const files = await storyFiles(project, storyOpt)
-  const { loaded, workspace } = await loadWorkspaceStories(project, files)
+  const { loaded, storyIds, workspace } = await loadWorkspaceStories(project, files)
   let errors = 0, warnings = 0, infos = 0, passages = 0
   const allNotes: Diagnostic[] = []
   const noteLines: string[] = []
   const shotIds = project.manifest.shots.map((s) => s.id)
   for (const rel of files) {
     const { story, diagnostics } = loaded.get(rel)!
-    const lintDiags = workspace ? lintStoryInWorkspace(workspace, storyIdFor(rel), story, schema) : lint(story, schema)
+    const lintDiags = workspace ? lintStoryInWorkspace(workspace, storyIds.get(rel)!, story, schema) : lint(story, schema)
     const all = [...diagnostics, ...lintDiags]
     passages += contentPassages(story).length
     if (files.length > 1) out.line(rel)
@@ -712,11 +725,11 @@ async function cmdPaths(dir: string, storyOpt: string | undefined, o: { max: num
 async function cmdExport(dir: string, storyOpt: string | undefined, out: Out, err: Out): Promise<number> {
   const { project, schema } = await openProject(dir)
   const files = await storyFiles(project, storyOpt)
-  const { loaded, workspace } = await loadWorkspaceStories(project, files)
+  const { loaded, storyIds, workspace } = await loadWorkspaceStories(project, files)
   let failed = 0
   for (const rel of files) {
     const { story } = loaded.get(rel)!
-    const stem = storyIdFor(rel)
+    const stem = storyIds.get(rel)!
     try {
       const data = workspace ? exportStory(story, schema, stem, { workspace }) : exportStory(story, schema, stem)
       const target = safePath(project, `${project.manifest.export}/${stem}.json`)
@@ -764,10 +777,11 @@ async function cmdI18nExtract(
     out.line(`no stories under ${project.manifest.stories}/`)
     return 0
   }
+  const allStories = await listStories(project)
   const entries: StringEntry[] = []
   for (const rel of files) {
     const { story } = await loadStory(project, rel)
-    entries.push(...extractStrings(story, { storyId: storyIdFor(rel) }))
+    entries.push(...extractStrings(story, { storyId: storyIdFor(rel, project.manifest.stories, allStories) }))
   }
   const rendered =
     format === "csv"

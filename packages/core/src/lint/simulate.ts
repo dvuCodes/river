@@ -140,14 +140,26 @@ export function simulateStory(story: Story, schema: StateSchema, opts?: Simulati
     })
   }
 
+  const minMaxAvg = (values: readonly number[]) => {
+    if (values.length === 0) return { min: 0, max: 0, avg: 0 }
+    let min = values[0]!
+    let max = values[0]!
+    let sum = 0
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i]!
+      if (v < min) min = v
+      if (v > max) max = v
+      sum += v
+    }
+    return { min, max, avg: sum / values.length }
+  }
+
   const finalState: SimulationReport["finalState"] = {}
   for (const [v, decl] of Object.entries(schema)) {
     const values = finals[v]!
     if (decl.type === "number" || decl.type === "int") {
       const nums = values.filter((x): x is number => typeof x === "number")
-      finalState[v] = nums.length === 0
-        ? { type: decl.type, min: 0, max: 0, avg: 0 }
-        : { type: decl.type, min: Math.min(...nums), max: Math.max(...nums), avg: nums.reduce((a, b) => a + b, 0) / nums.length }
+      finalState[v] = { type: decl.type, ...minMaxAvg(nums) }
     } else {
       const counts: Record<string, number> = {}
       for (const x of values) counts[String(x)] = (counts[String(x)] ?? 0) + 1
@@ -161,9 +173,7 @@ export function simulateStory(story: Story, schema: StateSchema, opts?: Simulati
     endings: endingList,
     deadEnds,
     maxStepsHit,
-    steps: stepCounts.length === 0
-      ? { min: 0, max: 0, avg: 0 }
-      : { min: Math.min(...stepCounts), max: Math.max(...stepCounts), avg: stepCounts.reduce((a, b) => a + b, 0) / stepCounts.length },
+    steps: minMaxAvg(stepCounts),
     passageVisits,
     neverVisitedPassages: passages.filter((p) => (visitedRuns.get(p.id) ?? 0) === 0).map((p) => p.id),
     neverTakenChoices,

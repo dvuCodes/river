@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { PassThrough, Writable } from "node:stream"
 import { describe, expect, it } from "vitest"
 import { run } from "../src/index"
@@ -43,7 +43,9 @@ function makeProject(stories: Record<string, string>) {
     JSON.stringify({ bond: { type: "int", min: 0, max: 100, initial: 50 } }, null, 2),
   )
   for (const [name, content] of Object.entries(stories)) {
-    writeFileSync(join(dir, "stories", name), content, "utf8")
+    const dest = join(dir, "stories", name)
+    mkdirSync(dirname(dest), { recursive: true })
+    writeFileSync(dest, content, "utf8")
   }
   return dir
 }
@@ -110,6 +112,50 @@ describe("multi-file workspace lint and export", () => {
     const lintRes = await cli(["lint", dir, "--no-narrative"])
     expect(lintRes.code).toBe(1)
     expect(lintRes.out).toContain('no passage "Nowhere" in story "ch2"')
+  })
+
+  it("disambiguates same-named stories in subdirectories for lint and export", async () => {
+    const act1Intro = `:: StoryTitle
+Act 1 Intro
+
+:: StoryData
+{"ifid": "9B1D7C2E-3F4A-4B5C-8D6E-7F8091A2B3C4", "start": "Start"}
+
+:: Start
+Begin act 1.
+[[Advance->act2/intro::End]]
+`
+    const act2Intro = `:: StoryTitle
+Act 2 Intro
+
+:: StoryData
+{"ifid": "7A2E9C1D-4B5C-4D6E-9F80-1A2B3C4D5E6F", "start": "End"}
+
+:: End
+@end
+--
+Act 2 finishes here.
+`
+    const dir = makeProject({
+      "act1/intro.twee": act1Intro,
+      "act2/intro.twee": act2Intro,
+    })
+
+    const lintRes = await cli(["lint", dir, "--no-narrative"])
+    expect([lintRes.code, lintRes.err]).toEqual([0, ""])
+    expect(lintRes.out).toContain("0 errors, 0 warnings in 2 passages")
+
+    const exportRes = await cli(["export", dir])
+    expect([exportRes.code, exportRes.err]).toEqual([0, ""])
+    expect(exportRes.out).toContain("wrote data/act1/intro.json")
+    expect(exportRes.out).toContain("wrote data/act2/intro.json")
+
+    const exp1 = JSON.parse(readFileSync(join(dir, "data", "act1", "intro.json"), "utf8"))
+    const exp2 = JSON.parse(readFileSync(join(dir, "data", "act2", "intro.json"), "utf8"))
+    expect(exp1.id).toBe("act1/intro")
+    expect(exp1.passages.start.choices[0].to).toBe("act2/intro::end")
+    expect(exp2.id).toBe("act2/intro")
+    expect(exp2.passages.end.ending).toBe(true)
   })
 })
 

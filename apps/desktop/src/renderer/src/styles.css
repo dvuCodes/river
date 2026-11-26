@@ -1343,6 +1343,44 @@ input[type="checkbox"] {
   color: var(--text);
   font-weight: 600;
 }
+.storylet-draw {
+  width: 100%;
+  margin-bottom: 6px;
+}
+.storylet-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.storylet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  font-size: 12px;
+}
+.storylet-row.is-closed {
+  background: transparent;
+  border-style: dashed;
+  color: var(--muted);
+}
+.storylet-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.storylet-meta {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--muted);
+}
 
 /* frames */
 .framesview {

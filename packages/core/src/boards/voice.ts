@@ -58,7 +58,7 @@ export function withVoiceLine(text: string, heading: string, line: string): stri
 async function addVoiceLine(workspaceRoot: string, heading: string, key: string, text: string): Promise<boolean> {
   return withLock(voiceLockFile(workspaceRoot), "the voice file", async () => {
     const current = (await readVoice(workspaceRoot)) ?? ""
-    if (voiceSection(current, heading).some((b) => b.includes(`(${key})`))) return false
+    if (voiceSection(current, heading).some((b) => b.endsWith(` (${key})`))) return false
     const quoted = text.replace(/\s+/g, " ").trim()
     const next = withVoiceLine(current, heading, `- ${quoted} (${key})`)
     await writeAtomic(voicePath(workspaceRoot), current.includes("\r\n") ? next.replace(/\n/g, "\r\n") : next)

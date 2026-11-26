@@ -30,6 +30,7 @@ const api: RiverApi = {
   playUndo: (id) => invoke("play:undo", id),
   playSetVar: (id, name, value) => invoke("play:setVar", id, name, value),
   playInterrupt: (id, name) => invoke("play:interrupt", id, name),
+  playDrawStorylet: (id) => invoke("play:drawStorylet", id),
   frames: () => invoke("frames:get"),
   capture: (shotId) => invoke("frames:capture", shotId),
   captureAll: () => invoke("frames:captureAll"),

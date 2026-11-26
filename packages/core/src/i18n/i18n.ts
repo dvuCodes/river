@@ -105,7 +105,7 @@ export function tagStoryLines(story: Story): { story: Story; added: number } {
   // Collect all existing line IDs first so new IDs never collide with them.
   const used = new Set<string>()
   for (const p of contentPassages(story)) {
-    const lines = p.rawText.split("\n")
+    const lines = p.rawText.replace(/\r\n/g, "\n").split("\n")
     const blockEnd = ruleBlockEnd(lines)
     const start = blockEnd === undefined ? 0 : blockEnd + 1
     for (let i = start; i < lines.length; i++) {
@@ -117,7 +117,7 @@ export function tagStoryLines(story: Story): { story: Story; added: number } {
   let added = 0
   const passages = story.passages.map((p) => {
     if (isCodePassage(p)) return p
-    const lines = p.rawText.split("\n")
+    const lines = p.rawText.replace(/\r\n/g, "\n").split("\n")
     const blockEnd = ruleBlockEnd(lines)
     const start = blockEnd === undefined ? 0 : blockEnd + 1
     const occ = new Map<string, number>()
@@ -171,7 +171,7 @@ export function extractStrings(story: Story, opts?: { storyId?: string }): Strin
       text: p.name,
     })
 
-    const rawLines = p.rawText.split("\n")
+    const rawLines = p.rawText.replace(/\r\n/g, "\n").split("\n")
     const blockEnd = ruleBlockEnd(rawLines)
     const textStart = blockEnd === undefined ? 0 : blockEnd + 1
     let proseIdx = 0

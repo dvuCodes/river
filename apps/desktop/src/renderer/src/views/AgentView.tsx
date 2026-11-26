@@ -31,7 +31,7 @@ export function useAgentSession() {
   const turnModeRef = useRef<ChatMode>("story")
 
   useEffect(() => {
-    const push = (item: ChatItem) => setItems((xs) => [...xs, item])
+    const push = (item: ChatItem) => setItems((xs) => [...endStreaming(xs), item])
     const offEvent = window.river.onAgentEvent(({ turnId: t, event }) => {
       if (t !== turnRef.current) return
       const e = event as AgentEvent
@@ -133,6 +133,7 @@ export function useAgentSession() {
 
   const stop = useCallback(() => {
     if (turnId) void window.river.agentAbort(turnId)
+    turnRef.current = null
     // The turn's own done/error is ignored once it is no longer the running turn, so stop the streaming here.
     setItems(endStreaming)
     setTurnId(null)

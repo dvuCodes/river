@@ -82,21 +82,27 @@ export function captureTimeoutMs(shot: ShotDef): number {
 /** Godot takes "/" in OS paths on every platform. */
 const godotPath = (p: string) => p.replace(/\\/g, "/")
 
+/** Validate that a shot has a valid frame count and a setup script whenever count > 1. */
+function validateShot(shot: ShotDef, framesScript?: string): void {
+  if (!Number.isInteger(shot.count) || shot.count < 1) {
+    throw new Error(`river: shot ${shot.id} has count ${shot.count}; it must be a whole number of at least 1`)
+  }
+  if (shot.count > 1 && !shot.setup) {
+    const detail = framesScript ? ` (${framesScript} requires --setup)` : ""
+    throw new Error(`river: shot ${shot.id} captures ${shot.count} frames, so it needs a setup script${detail}`)
+  }
+}
+
 /** The Godot command line for one shot. Pure: reads only the project, the shot and the environment. */
 export function buildCaptureCommand(project: Project, shot: ShotDef, outDir: string): { bin: string; args: string[] } {
   const s = godotSettings(project)
   const projectDir = path.resolve(project.root, s.project)
   const out = godotPath(path.resolve(outDir))
-  if (!Number.isInteger(shot.count) || shot.count < 1) {
-    throw new Error(`river: shot ${shot.id} has count ${shot.count}; it must be a whole number of at least 1`)
-  }
+  validateShot(shot, s.framesScript)
   if (shot.count === 1) {
     const args = ["--path", projectDir, "--disable-vsync", "-s", s.screenshotScript, "--", `--scene=${shot.scene}`, `--out=${out}/frame_00.png`]
     if (shot.setup) args.push(`--setup=${shot.setup}`)
     return { bin: s.bin, args }
-  }
-  if (!shot.setup) {
-    throw new Error(`river: shot ${shot.id} captures ${shot.count} frames, so it needs a setup script (${s.framesScript} requires --setup)`)
   }
   return {
     bin: s.bin,
@@ -127,12 +133,10 @@ export interface BatchShot {
   ticks: number
 }
 
-/** The batch manifest for these shots. Throws on a count that is not a whole number of at least 1. */
+/** The batch manifest for these shots. Throws on a count that is not a whole number of at least 1, or count > 1 without a setup script. */
 export function batchManifest(items: readonly { shot: ShotDef; outDir: string }[]): BatchShot[] {
   return items.map(({ shot, outDir }) => {
-    if (!Number.isInteger(shot.count) || shot.count < 1) {
-      throw new Error(`river: shot ${shot.id} has count ${shot.count}; it must be a whole number of at least 1`)
-    }
+    validateShot(shot)
     return { id: shot.id, scene: shot.scene, setup: shot.setup ?? "", outDir: godotPath(path.resolve(outDir)), count: shot.count, ticks: shot.ticks ?? 3 }
   })
 }

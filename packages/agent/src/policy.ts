@@ -93,8 +93,16 @@ export function summarizeToolCall(tool: string, input: Record<string, unknown>):
       return `Edit ${file ?? "?"}${str(input, "planId") ? ` (plan ${str(input, "planId")})` : ""}`
     case "plan_mark_implemented":
       return `Mark plan ${str(input, "planId", "id") ?? "?"} implemented`
-    case "frames_capture":
+    case "frames_capture": {
+      if (input.all === true) return "Capture all shots"
+      if (Array.isArray(input.shotIds) && input.shotIds.length > 0) {
+        const ids = input.shotIds.map(String)
+        const joined = ids.join(", ")
+        const list = joined.length > 80 ? `${joined.slice(0, 77).trimEnd()}...` : joined
+        return `Capture ${ids.length} shot${ids.length === 1 ? "" : "s"}: ${list}`
+      }
       return `Capture shot ${str(input, "shotId", "shot", "id") ?? "?"}`
+    }
     case "concept_write":
       return `Write ${file ?? "?"}`
     case "story_rename_passage":

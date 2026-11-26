@@ -84,6 +84,7 @@ import {
   createPlaytest,
   formatCond,
   lint,
+  lintStoryInWorkspace,
   listCaptures,
   listPlans,
   listStories,
@@ -91,6 +92,7 @@ import {
   loadPlan,
   loadSchema,
   loadStory,
+  loadStoryWorkspace,
   normalizeRel,
   parseTwee3,
   passageById,
@@ -569,6 +571,18 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
     return readFile(safePath(project, rel), "utf8")
   }
 
+  function storyIdFor(rel: string, allStories: readonly string[]): string {
+    const stemOf = (p: string) => path.basename(p).replace(/\.(twee|tw)$/i, "")
+    const stem = stemOf(rel)
+    const lower = stem.toLowerCase()
+    const collides = allStories.filter((s) => stemOf(s).toLowerCase() === lower).length > 1
+    if (!collides) return stem
+    const norm = rel.replace(/\\/g, "/").replace(/^\.\//, "")
+    const prefix = project.manifest.stories.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "")
+    const under = prefix && prefix !== "." && norm.startsWith(`${prefix}/`) ? norm.slice(prefix.length + 1) : norm
+    return under.replace(/\.(twee|tw)$/i, "")
+  }
+
   async function lintFile(rel: string): Promise<{ story: Story; diagnostics: Diagnostic[]; schema: StateSchema }> {
     const schema = await loadSchema(project)
     const { story, diagnostics } = await loadStory(project, rel)
@@ -727,14 +741,45 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
       mutating: false,
       async run({ file, narrative }) {
         const withNotes = narrative !== false
-        const files = file !== undefined ? [await storyRel(file)] : await listStories(project)
+        const allStories = await listStories(project)
+        const files = file !== undefined ? [await storyRel(file)] : allStories
         let errors = 0, warnings = 0, infos = 0, passages = 0
         const lines: string[] = []
         const noteLines: string[] = []
         const allNotes: Diagnostic[] = []
         const data: { file: string; diagnostics: Diagnostic[]; narrative?: Diagnostic[] }[] = []
+
+        const useWorkspace = allStories.length >= 2
+        const schema = useWorkspace ? await loadSchema(project) : undefined
+        const loaded = new Map<string, { story: Story; diagnostics: Diagnostic[] }>()
+        const storyIds = new Map<string, string>()
+        if (useWorkspace) {
+          for (const rel of allStories) {
+            loaded.set(rel, await loadStory(project, rel))
+            storyIds.set(rel, storyIdFor(rel, allStories))
+          }
+        }
+        const workspace = useWorkspace
+          ? loadStoryWorkspace(
+              allStories.map((rel) => ({
+                file: rel,
+                id: storyIds.get(rel)!,
+                story: loaded.get(rel)!.story,
+              })),
+            )
+          : undefined
+
         for (const rel of files) {
-          const { story, diagnostics, schema } = await lintFile(rel)
+          const { story, diagnostics, schema: fileSchema } = workspace
+            ? {
+                story: loaded.get(rel)!.story,
+                diagnostics: [
+                  ...loaded.get(rel)!.diagnostics,
+                  ...lintStoryInWorkspace(workspace, storyIds.get(rel)!, loaded.get(rel)!.story, schema!),
+                ],
+                schema: schema!,
+              }
+            : await lintFile(rel)
           passages += contentPassages(story).length
           if (files.length > 1) lines.push(rel)
           for (const d of diagnostics) {
@@ -747,7 +792,7 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
             data.push({ file: rel, diagnostics })
             continue
           }
-          const notes = narrativeFor(story, schema)
+          const notes = narrativeFor(story, fileSchema)
           if (files.length > 1 && notes.length > 0) noteLines.push(rel)
           noteLines.push(...notes.map(formatNote))
           allNotes.push(...notes)

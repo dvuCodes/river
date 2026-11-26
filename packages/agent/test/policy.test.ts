@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { loadProject, type ChangePlan, type Project } from "@river/core"
-import { createCanUseTool } from "../src/policy"
+import { createCanUseTool, summarizeToolCall } from "../src/policy"
 import type { PermissionDecision, PermissionRequest } from "../src/types"
 import { removeDir, tempGame } from "./helpers"
 
@@ -215,5 +215,19 @@ describe("canUseTool policy", () => {
     await can("mcp__river__story_write_passage", { file: "../../etc/passwd", passageId: "x", rawText: "y" }, opts())
     expect(seen).toHaveLength(1)
     expect(seen[0]!.diff).toBeUndefined()
+  })
+
+  it("summarizes single and batch frames_capture calls", () => {
+    expect(summarizeToolCall("frames_capture", { all: true })).toBe("Capture all shots")
+    expect(summarizeToolCall("frames_capture", { shotIds: ["gate", "pond"] })).toBe("Capture 2 shots: gate, pond")
+    expect(summarizeToolCall("frames_capture", { shotIds: ["gate"] })).toBe("Capture 1 shot: gate")
+    expect(summarizeToolCall("frames_capture", { shotId: "gate" })).toBe("Capture shot gate")
+    expect(summarizeToolCall("frames_capture", {})).toBe("Capture shot ?")
+
+    const many = Array.from({ length: 15 }, (_, i) => `shot_number_${i + 1}`)
+    const summary = summarizeToolCall("frames_capture", { shotIds: many })
+    expect(summary.startsWith("Capture 15 shots: shot_number_1, ")).toBe(true)
+    expect(summary.endsWith("...")).toBe(true)
+    expect(summary.length).toBeLessThanOrEqual("Capture 15 shots: ".length + 80)
   })
 })

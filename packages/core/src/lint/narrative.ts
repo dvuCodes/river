@@ -11,7 +11,7 @@ import { interruptPaths, paths, reachableFromInitial } from "../story/paths"
 import { proseText } from "../story/prose"
 import { parseTemplate, renderProse, templateRefs, type TemplateNode } from "../story/template"
 import type { Choice, Cond, Diagnostic, GameState, InterruptPath, Passage, StateSchema, Story, StoryPath } from "../story/types"
-import { reachable } from "./lint"
+import { beforeEffect, reachable } from "./lint"
 import { narrow, sampleEngineUpdates, stateBox } from "./sat"
 
 export interface NarrativeLintOptions {
@@ -332,7 +332,11 @@ function openWithEngineVars(pt: Playtest, story: Story, schema: StateSchema, ind
   const cost = costCond(choice)
   if (cost) boxes = narrow(boxes, cost, schema)
   const to = choiceTarget(story, choice.target, index)
-  if (to.kind === "passage" && to.passage.when) boxes = narrow(boxes, to.passage.when, schema)
+  if (to.kind === "passage" && to.passage.when) {
+    let needed: Cond | undefined = to.passage.when
+    for (const e of [...choice.cost, ...choice.set].reverse()) needed = needed && beforeEffect(needed, e, schema)
+    boxes = narrow(boxes, needed ?? to.passage.when, schema)
+  }
   if (boxes.length === 0) return false
   const prev = pt.state()
   for (const box of boxes) {

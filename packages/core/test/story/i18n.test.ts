@@ -151,6 +151,49 @@ describe("tagStoryLines", () => {
     const roundTripped = parseTwee3(writeTwee3(first.story), "stories/park_walk.twee").story
     expect(tagStoryLines(roundTripped).added).toBe(0)
   })
+
+  it("normalizes CRLF in rawText without mixing line endings and preserves CRLF on writeTwee3", () => {
+    const crlfSource = [
+      ":: StoryTitle",
+      "Park Walk",
+      "",
+      ":: StoryData",
+      '{ "ifid": "9B1D7C2E-3F4A-4B5C-8D6E-7F8091A2B3C4", "start": "Pond" }',
+      "",
+      ":: Pond",
+      "@id pond",
+      "--",
+      "Ducks. Many ducks.",
+      "Already tagged. #line:deadbeef",
+      "[[Next->End]]",
+      "",
+      ":: End",
+      "@end",
+      "--",
+      "All done.",
+    ].join("\r\n")
+
+    const parsed = parseTwee3(crlfSource, "stories/crlf.twee").story
+    const tagged = tagStoryLines(parsed)
+    expect(tagged.added).toBe(2)
+    expect(tagged.story.passages[0]!.rawText).not.toContain("\r")
+
+    const written = writeTwee3(tagged.story)
+    // Every newline in the output is CRLF (no bare LF, no CRCRLF).
+    expect(written).toContain("\r\n")
+    expect(written.replace(/\r\n/g, "")).not.toContain("\n")
+    expect(written.replace(/\r\n/g, "")).not.toContain("\r")
+
+    // Also handles a passage whose rawText directly contains CRLF without leaving mixed endings.
+    const withCrlfRaw = {
+      ...parsed,
+      passages: parsed.passages.map((p) => ({ ...p, rawText: p.rawText.replace(/\n/g, "\r\n") })),
+    }
+    const taggedDirect = tagStoryLines(withCrlfRaw)
+    expect(taggedDirect.added).toBe(2)
+    expect(taggedDirect.story.passages[0]!.rawText).not.toContain("\r")
+    expect(extractStrings(withCrlfRaw, { storyId: "park" }).every((e) => !e.text.includes("\r"))).toBe(true)
+  })
 })
 
 describe("extractStrings & formatters (CSV, PO, JSON)", () => {

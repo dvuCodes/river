@@ -126,10 +126,12 @@ describe("captureBatch", () => {
     expect(existsSync(calls[0]!.manifestPath)).toBe(false)
   })
 
-  it("does nothing for no shots, and rejects a bad count before starting Godot", async () => {
+  it("does nothing for no shots, and rejects a bad count or missing setup for count > 1 before starting Godot", async () => {
     expect(await createGodotAdapter().captureBatch!(project(), [])).toEqual({})
     const err = await createGodotAdapter().captureBatch!(project(), [{ shot: shot("a", { count: 0 }), outDir: outDirFor("a") }]).catch((e: Error) => e)
     expect((err as Error).message).toContain("shot a has count 0")
+    const setupErr = await createGodotAdapter().captureBatch!(project(), [{ shot: shot("b", { count: 3 }), outDir: outDirFor("b") }]).catch((e: Error) => e)
+    expect((setupErr as Error).message).toContain("needs a setup script")
     expect(calls).toHaveLength(0)
   })
 

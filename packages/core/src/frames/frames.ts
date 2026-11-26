@@ -35,8 +35,16 @@ export async function captureShot(project: Project, shotId: string, adapter: Eng
   const rev = await revOf(project.root)
   const at = new Date().toISOString()
   const outDir = await prepareOutDir(project, shotId, at)
-  const files = await adapter.capture(project, shot, outDir)
-  return recordCapture(project, shotId, rev, at, outDir, files)
+  try {
+    const files = await adapter.capture(project, shot, outDir)
+    if (files.length === 0) {
+      throw new Error(`river: the ${adapter.id} adapter returned no frames for shot ${JSON.stringify(shot.id)}`)
+    }
+    return await recordCapture(project, shotId, rev, at, outDir, files)
+  } catch (err) {
+    await rm(outDir, { recursive: true, force: true }).catch(() => {})
+    throw err
+  }
 }
 
 function findShot(project: Project, shotId: string): ShotDef {
@@ -72,15 +80,28 @@ export async function captureShots(project: Project, shotIds: readonly string[],
     const rev = await revOf(project.root)
     const at = new Date().toISOString()
     const items: { shot: ShotDef; outDir: string }[] = []
-    for (const shot of shots) items.push({ shot, outDir: await prepareOutDir(project, shot.id, at) })
-    const files = await adapter.captureBatch(project, items)
-    const out: Capture[] = []
-    for (const { shot, outDir } of items) {
-      const got = files[shot.id]
-      if (!got) throw new Error(`river: the ${adapter.id} adapter's batch capture returned no frames for shot ${JSON.stringify(shot.id)}`)
-      out.push(await recordCapture(project, shot.id, rev, at, outDir, got))
+    try {
+      for (const shot of shots) items.push({ shot, outDir: await prepareOutDir(project, shot.id, at) })
+      const files = await adapter.captureBatch(project, items)
+      for (const { shot } of items) {
+        if (!files[shot.id]) {
+          throw new Error(`river: the ${adapter.id} adapter's batch capture returned no frames for shot ${JSON.stringify(shot.id)}`)
+        }
+      }
+      for (const { shot } of items) {
+        if (files[shot.id]!.length === 0) {
+          throw new Error(`river: the ${adapter.id} adapter's batch capture returned no frames for shot ${JSON.stringify(shot.id)}`)
+        }
+      }
+      const out: Capture[] = []
+      for (const { shot, outDir } of items) {
+        out.push(await recordCapture(project, shot.id, rev, at, outDir, files[shot.id]!))
+      }
+      return out
+    } catch (err) {
+      await Promise.all(items.map(({ outDir }) => rm(outDir, { recursive: true, force: true }).catch(() => {})))
+      throw err
     }
-    return out
   }
   const out: Capture[] = []
   for (const id of shotIds) out.push(await captureShot(project, id, adapter))

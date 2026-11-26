@@ -230,4 +230,21 @@ describe("sampleTranscripts", () => {
     expect(carried!.note).toBeUndefined()
     expect(carried!.text).toContain("## Carried\n\nCarried at timer 8.")
   })
+
+  it("pulls target @when back through choice @set when opening engine-driven variables", () => {
+    const widerSchema: StateSchema = {
+      ...schema,
+      timer: { type: "int", min: 0, max: 20, initial: 0, engine: true },
+    }
+    const engineStory = story(
+      ":: A", "--", "Waiting.", "[[Boost->Goal]] @set timer += 5",
+      "", ":: Goal", "@when timer == 10", "@end", "--", "Arrived at timer {timer}.",
+    )
+    const ts = sampleTranscripts(engineStory, widerSchema)
+    expect(ts).toHaveLength(1)
+    expect(ts[0]!.complete).toBe(true)
+    expect(ts[0]!.note).toBeUndefined()
+    expect(ts[0]!.ending).toBe("Goal")
+    expect(ts[0]!.text).toContain("## Goal\n\nArrived at timer 10.")
+  })
 })

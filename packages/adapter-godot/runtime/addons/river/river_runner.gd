@@ -9,6 +9,7 @@ signal cue_triggered(name: String, args: String)
 signal state_changed(variable: String, old_value: Variant, new_value: Variant)
 signal story_ended(passage_id: String, ending: bool)
 signal storylet_drawn(passage_id: String)
+signal cross_story_requested(story_id: String, passage_id: String)
 
 const RETURN_TARGET: String = "@return"
 
@@ -220,13 +221,17 @@ func get_choices() -> Array[Dictionary]:
 				closed_by = "cost"
 				closed_reason = "@cost needs %s" % " and ".join(unmet)
 
+		var to_id: String = str(choice.get("to", ""))
+		var cross: PackedStringArray = _split_cross_target(to_id)
+
 		# 4. target passage @when check on state after choice cost + set
 		if closed_by == "":
-			var to_id: String = str(choice.get("to", ""))
 			if to_id == RETURN_TARGET:
 				if ret_to == "" or not _story.passages.has(ret_to):
 					closed_by = "target"
 					closed_reason = "no active interrupt to return from"
+			elif cross.size() == 2:
+				pass
 			elif not _story.passages.has(to_id):
 				closed_by = "target"
 				closed_reason = "missing target passage %s" % to_id
@@ -243,13 +248,18 @@ func get_choices() -> Array[Dictionary]:
 						closed_by = "target"
 						closed_reason = "%s needs %s on arrival" % [str(target_p.get("name", to_id)), _format_cond(t_when)]
 
-		result.append({
+		var entry: Dictionary = {
 			"index": i,
 			"choice": choice,
 			"open": closed_by == "",
 			"closed_by": closed_by,
 			"closed_reason": closed_reason,
-		})
+		}
+		if cross.size() == 2:
+			entry["cross_story"] = true
+			entry["target_story"] = cross[0]
+			entry["target_passage"] = cross[1]
+		result.append(entry)
 
 	return result
 
@@ -298,6 +308,23 @@ func choose(index: int) -> bool:
 		passage_entered.emit(back_id, back_passage)
 		if is_over():
 			story_ended.emit(back_id, bool(back_passage.get("ending", false)))
+		return true
+
+	var cross: PackedStringArray = _split_cross_target(to_id)
+	if cross.size() == 2:
+		_history.append({
+			"passage_id": from_pid,
+			"state": after_choice.duplicate(true),
+			"visits": next_visits,
+			"used_once": next_used_once,
+			"return_to": _current_return_to(),
+			"turn": _current_turn() + 1,
+			"cooldowns": _current_cooldowns().duplicate(true),
+		})
+		choice_taken.emit(from_pid, index, choice)
+		_emit_cues(choice.get("cues", []))
+		_emit_state_diffs(prev_state, after_choice)
+		cross_story_requested.emit(cross[0], cross[1])
 		return true
 
 	if not _story.passages.has(to_id):
@@ -475,8 +502,7 @@ func draw_storylet(rng: RandomNumberGenerator = null, roll: float = -1.0) -> Dic
 	var cooldown: int = int(p.get("cooldown", 0))
 	if cooldown > 0:
 		cds[pid] = next_turn + cooldown
-	_enter_detour(pid, 1, cds)
-	storylet_drawn.emit(pid)
+	_enter_detour(pid, 1, cds, true)
 	var drawn: Dictionary = p.duplicate(false)
 	drawn["id"] = pid
 	return drawn
@@ -530,34 +556,51 @@ func to_dict() -> Dictionary:
 	}
 
 
-func from_dict(snap: Dictionary, story: RiverStory) -> void:
-	_story = story
-	_history.clear()
-	if _story == null:
+func from_dict(snap: Dictionary, story: RiverStory) -> bool:
+	if story == null:
 		push_error("RiverRunner.from_dict: story is null")
-		return
+		return false
 
-	var hist_v: Variant = snap.get("history", null)
-	if hist_v is Array and not (hist_v as Array).is_empty():
-		for step_v: Variant in (hist_v as Array):
+	if snap.has("history"):
+		var hist_v: Variant = snap.get("history", null)
+		if not (hist_v is Array):
+			push_error("RiverRunner.from_dict: history must be an Array")
+			return false
+		var hist_arr: Array = hist_v as Array
+		if hist_arr.is_empty():
+			push_error("RiverRunner.from_dict: history is empty")
+			return false
+		for step_v: Variant in hist_arr:
 			if not (step_v is Dictionary):
-				continue
-			_history.append(_normalize_step(step_v as Dictionary))
-		return
+				push_error("RiverRunner.from_dict: history entry is not a Dictionary")
+				return false
+			var step_dict: Dictionary = step_v as Dictionary
+			var step_pid: String = str(step_dict.get("passage_id", ""))
+			if step_pid == "" or not story.passages.has(step_pid):
+				push_error("RiverRunner.from_dict: invalid passage_id '%s' in history" % step_pid)
+				return false
+		_story = story
+		var next_history: Array[Dictionary] = []
+		for step_v: Variant in hist_arr:
+			next_history.append(_normalize_step(step_v as Dictionary))
+		_history = next_history
+		return true
 
-	var pid: String = str(snap.get("passage_id", _story.start_id))
-	if pid == "" or not _story.passages.has(pid):
+	var pid: String = str(snap.get("passage_id", story.start_id))
+	if pid == "" or not story.passages.has(pid):
 		push_error("RiverRunner.from_dict: invalid passage_id '%s'" % pid)
-		return
-	_history.append(_normalize_step({
+		return false
+	_story = story
+	_history = [_normalize_step({
 		"passage_id": pid,
-		"state": snap.get("state", _story.initial_state()),
+		"state": snap.get("state", story.initial_state()),
 		"visits": snap.get("visits", { pid: 1 }),
 		"used_once": snap.get("used_once", {}),
 		"return_to": str(snap.get("return_to", "")),
 		"turn": snap.get("turn", 0),
 		"cooldowns": snap.get("cooldowns", {}),
-	}))
+	})]
+	return true
 
 
 # --- Internal helpers ---
@@ -633,7 +676,7 @@ func _find_auto_interrupt(arrived_id: String) -> String:
 
 ## Enter a detour (auto interrupt or storylet) from the current passage as a step of its own. An ending has
 ## nowhere to return to. `turns` is how many turns it takes; `cds` becomes the step's cooldowns.
-func _enter_detour(passage_id: String, turns: int, cds: Dictionary) -> void:
+func _enter_detour(passage_id: String, turns: int, cds: Dictionary, emit_storylet_drawn: bool = false) -> void:
 	var target: Dictionary = _story.get_passage(passage_id)
 	var from_pid: String = current_id()
 	var prev_state: Dictionary = _current_state()
@@ -651,11 +694,26 @@ func _enter_detour(passage_id: String, turns: int, cds: Dictionary) -> void:
 		"turn": _current_turn() + turns,
 		"cooldowns": cds.duplicate(true),
 	})
+	if emit_storylet_drawn:
+		storylet_drawn.emit(passage_id)
 	_emit_state_diffs(prev_state, next_state)
 	passage_entered.emit(passage_id, target)
 	_emit_cues(target.get("cues", []))
 	if is_over():
 		story_ended.emit(passage_id, is_ending)
+
+
+func _split_cross_target(to_id: String) -> PackedStringArray:
+	if to_id == RETURN_TARGET:
+		return PackedStringArray()
+	var sep_idx: int = to_id.find("::")
+	if sep_idx == -1:
+		return PackedStringArray()
+	var left: String = to_id.substr(0, sep_idx).strip_edges()
+	var right: String = to_id.substr(sep_idx + 2).strip_edges()
+	if left == "" or right == "":
+		return PackedStringArray()
+	return PackedStringArray([left, right])
 
 
 func _current_passage_visits() -> int:
@@ -1074,7 +1132,9 @@ func _eval_template_expr(inner: String) -> String:
 			var body: String = trimmed.substr(colon_idx + 1)
 			var branches: Array[String] = _split_top_level(body, "|")
 			var parsed_cond: Dictionary = _parse_cond_str(cond_str)
-			if not parsed_cond.is_empty() and eval_cond(parsed_cond):
+			if parsed_cond.is_empty():
+				return "{%s}" % inner
+			if eval_cond(parsed_cond):
 				return _render_template(branches[0].strip_edges())
 			if branches.size() >= 2:
 				var else_parts: PackedStringArray = PackedStringArray()

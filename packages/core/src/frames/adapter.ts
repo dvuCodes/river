@@ -17,17 +17,83 @@ import type { EngineAdapter, Project, ShotDef } from "../project/types"
 const FRAME_FILE = /^frame_(\d+)\.png$/i
 
 /**
+ * Quote or escape an expanded variable value for the active shell, based on whether the variable appeared
+ * bare or inside quotes in the command template.
+ */
+function quoteForShell(resolved: string, quote: "" | '"' | "'", name: string, what: string, trailingQuote: boolean): string {
+  if (/[\0\r\n]/.test(resolved)) {
+    throw new Error(`river: ${what} expanded $${name} to a value containing a control character`)
+  }
+  if (WINDOWS) {
+    // cmd.exe toggles quote mode on every '"' and cannot escape '"' inside "...", so reject embedded quotes.
+    if (resolved.includes('"')) {
+      throw new Error(`river: ${what} expanded $${name} to a value containing '"' which cannot be safely passed to the Windows shell`)
+    }
+    if (quote === '"') {
+      return trailingQuote ? resolved.replace(/\\+$/, "$&$&") : resolved
+    }
+    return `"${resolved.replace(/\\+$/, "$&$&")}"`
+  }
+  if (quote === '"') return resolved.replace(/[\\"$`]/g, "\\$&")
+  if (quote === "'") return resolved.replace(/'/g, "'\\''")
+  return `'${resolved.replace(/'/g, "'\\''")}'`
+}
+
+/**
  * Replace "$VAR" and "${VAR}" with values from `vars` (River's own, which may be empty, e.g. RIVER_SETUP for a
  * shot without a setup script), else from `env`. Throws when a referenced environment variable is unset.
+ * Values are safely quoted/escaped for the surrounding shell quote context.
  */
 function expandVars(value: string, vars: NodeJS.ProcessEnv, env: NodeJS.ProcessEnv, what: string): string {
-  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_m, braced: string | undefined, bare: string | undefined) => {
-    const name = (braced ?? bare) as string
-    if (vars[name] !== undefined) return vars[name]!
-    const v = env[name]
-    if (v === undefined || v === "") throw new Error(`river: ${what} references $${name}, but the environment variable ${name} is not set`)
-    return v
-  })
+  let out = ""
+  let quote: "" | '"' | "'" = ""
+  let i = 0
+  while (i < value.length) {
+    const c = value[i]!
+    if (c === "\\" && i + 1 < value.length) {
+      const next = value[i + 1]!
+      if (!WINDOWS ? quote !== "'" : next === '"' || next === "\\") {
+        out += c + next
+        i += 2
+        continue
+      }
+    }
+    if (c === '"' && quote !== "'") {
+      quote = quote === '"' ? "" : '"'
+      out += c
+      i++
+      continue
+    }
+    if (!WINDOWS && c === "'" && quote !== '"') {
+      quote = quote === "'" ? "" : "'"
+      out += c
+      i++
+      continue
+    }
+    if (c === "$") {
+      const m = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}|^\$([A-Za-z_][A-Za-z0-9_]*)/.exec(value.slice(i))
+      if (m) {
+        const name = (m[1] ?? m[2]) as string
+        let resolved: string
+        if (vars[name] !== undefined) resolved = vars[name]!
+        else {
+          const v = env[name]
+          if (v === undefined || v === "") {
+            throw new Error(`river: ${what} references $${name}, but the environment variable ${name} is not set`)
+          }
+          resolved = v
+        }
+        const after = i + m[0].length
+        const trailingQuote = quote === '"' && value[after] === '"'
+        out += quoteForShell(resolved, quote, name, what, trailingQuote)
+        i = after
+        continue
+      }
+    }
+    out += c
+    i++
+  }
+  return out
 }
 
 /** PNGs named frame_NN.png in outDir, in frame order. */
@@ -97,6 +163,8 @@ interface CommandSettings {
   cwd: string
   /** Overrides each shot's own timeout when set. */
   timeoutS?: number
+  /** Overrides the total batch timeout when set. */
+  batchTimeoutS?: number
 }
 
 function commandSettings(project: Project, key: string): CommandSettings {
@@ -109,12 +177,20 @@ function commandSettings(project: Project, key: string): CommandSettings {
     timeoutS = Number(raw.timeoutS)
     if (!Number.isFinite(timeoutS) || timeoutS <= 0) throw new Error(`river: adapter.${key}.timeoutS must be a positive number of seconds (found ${JSON.stringify(raw.timeoutS)})`)
   }
+  let batchTimeoutS: number | undefined
+  if (raw.batchTimeoutS !== undefined) {
+    batchTimeoutS = Number(raw.batchTimeoutS)
+    if (!Number.isFinite(batchTimeoutS) || batchTimeoutS <= 0) {
+      throw new Error(`river: adapter.${key}.batchTimeoutS must be a positive number of seconds (found ${JSON.stringify(raw.batchTimeoutS)})`)
+    }
+  }
   return {
     key,
     command: raw.command,
     ...(raw.batchCommand ? { batchCommand: raw.batchCommand } : {}),
     cwd: path.resolve(project.root, raw.cwd ?? "."),
     ...(timeoutS !== undefined ? { timeoutS } : {}),
+    ...(batchTimeoutS !== undefined ? { batchTimeoutS } : {}),
   }
 }
 
@@ -155,6 +231,7 @@ export function createCommandAdapter(engineId?: string): EngineAdapter {
     async captureBatch(project, items) {
       const s = commandSettings(project, keyOf(project))
       const out: Record<string, string[]> = {}
+      if (items.length === 0) return out
       if (!s.batchCommand) {
         for (const { shot, outDir } of items) out[shot.id] = await capture(project, shot, outDir)
         return out
@@ -175,7 +252,11 @@ export function createCommandAdapter(engineId?: string): EngineAdapter {
         const vars: NodeJS.ProcessEnv = { RIVER_PROJECT_ROOT: project.root, RIVER_BATCH_MANIFEST: manifestPath }
         const env = { ...process.env, ...vars }
         const command = expandVars(s.batchCommand, vars, process.env, `adapter.${s.key}.batchCommand`)
-        const timeoutS = s.timeoutS ?? items.reduce((sum, { shot }) => sum + (shot.timeoutS ?? 60 + 0.5 * shot.count), 0)
+        const timeoutS =
+          s.batchTimeoutS ??
+          (s.timeoutS !== undefined
+            ? s.timeoutS * items.length
+            : items.reduce((sum, { shot }) => sum + (shot.timeoutS ?? 60 + 0.5 * shot.count), 0))
         await runShell(command, s.cwd, env, timeoutS * 1000, `batch capture of ${items.length} shots`)
         for (const { shot, outDir } of items) {
           const files = await framesIn(outDir)

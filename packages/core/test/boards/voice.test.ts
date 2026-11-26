@@ -44,6 +44,13 @@ describe("voice bible", () => {
     await Promise.all(Array.from({ length: 8 }, (_, i) => addVoiceExemplar(root, `k${i}`, `line ${i}`)))
     expect(voiceSection(voice(), LANDED_HEADING).sort()).toEqual(Array.from({ length: 8 }, (_, i) => `line ${i} (k${i})`).sort())
   })
+
+  it("matches keys only at the end of a bullet so prose containing (key) does not collide", async () => {
+    expect(await addVoiceExemplar(root, "j_0", "Step (1) is to breathe.")).toBe(true)
+    expect(await addVoiceExemplar(root, "1", "Short line.")).toBe(true)
+    expect(await addVoiceExemplar(root, "1", "Duplicate key.")).toBe(false)
+    expect(voiceSection(voice(), LANDED_HEADING)).toEqual(["Step (1) is to breathe. (j_0)", "Short line. (1)"])
+  })
 })
 
 describe("board helpers", () => {

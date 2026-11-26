@@ -119,6 +119,13 @@ const STORY_JSON = {
           cost: [],
           set: [],
         },
+        {
+          label: "Cross to chapter 2",
+          to: "chapter2::gate",
+          cost: [{ variable: "coins", op: "add", amount: -1 }],
+          set: [{ variable: "mood", op: "set", amount: "EXCITED" }],
+          cues: [{ name: "sfx_portal", args: "ch2" }],
+        },
       ],
     },
     pond: {
@@ -314,12 +321,13 @@ func _run_tests() -> void:
 
 	# 3. Inspect choices at start
 	var ch0: Array[Dictionary] = runner.get_choices()
-	_assert(ch0.size() == 6, "start has 6 choices")
+	_assert(ch0.size() == 7, "start has 7 choices")
 	_assert(ch0[0]["open"] == true, "choice 0 (Visit pond) open when treats=1")
 	_assert(ch0[1]["open"] == true, "choice 1 (@once sniff) open initially")
 	_assert(ch0[2]["open"] == false and ch0[2]["closed_by"] == "when", "choice 2 closed by visit when")
 	_assert(ch0[3]["open"] == false and ch0[3]["closed_by"] == "target", "choice 3 closed by target when after -50 energy")
 	_assert(ch0[4]["open"] == true, "choice 4 open because +50 energy clamps to 100 >= 90")
+	_assert(ch0[6]["open"] == true and bool(ch0[6].get("cross_story", false)) and ch0[6].get("target_story", "") == "chapter2" and ch0[6].get("target_passage", "") == "gate", "choice 6 (cross-story chapter2::gate) is open with cross-story metadata")
 	_assert(not runner.choose(2), "cannot take closed choice 2")
 	_assert(not runner.choose(3), "cannot take target-closed choice 3")
 
@@ -429,6 +437,42 @@ func _run_tests() -> void:
 	_assert(runner.is_over(), "story is_over at ending")
 	_assert(ended_log == ["home:true"], "story_ended emitted with (home, true)")
 	_assert(not runner.trigger_interrupt("loud_bang"), "cannot trigger interrupt after ending")
+
+	# 10. Cross-story choice applies cost/set, emits cross_story_requested, and returns true
+	var cross_runner: RiverRunner = RiverRunner.new()
+	var cross_log: Array[String] = []
+	var cross_cues: Array[String] = []
+	var cross_choices: Array[String] = []
+	cross_runner.cross_story_requested.connect(func(sid: String, pid: String) -> void:
+		cross_log.append("%s::%s" % [sid, pid])
+	)
+	cross_runner.cue_triggered.connect(func(cname: String, cargs: String) -> void:
+		cross_cues.append("%s(%s)" % [cname, cargs])
+	)
+	cross_runner.choice_taken.connect(func(pid: String, idx: int, _c: Dictionary) -> void:
+		cross_choices.append("%s:%d" % [pid, idx])
+	)
+	cross_runner.start(story)
+	cross_cues.clear()
+	_assert(cross_runner.choose(6), "cross-story choice returns true")
+	_assert(cross_runner.get_state()["coins"] == 4, "cross-story choice applied cost coins 5-1=4")
+	_assert(cross_runner.get_state()["mood"] == "EXCITED", "cross-story choice applied set mood=EXCITED")
+	_assert(cross_runner.get_turn() == 1, "cross-story choice incremented turn to 1")
+	_assert(cross_choices == ["start:6"], "cross-story choice emitted choice_taken")
+	_assert(cross_cues == ["sfx_portal(ch2)"], "cross-story choice emitted cue_triggered")
+	_assert(cross_log == ["chapter2::gate"], "cross_story_requested emitted (chapter2, gate): " + str(cross_log))
+
+	# 11. Invalid {when ...} template condition renders verbatim instead of falling through to else
+	_assert(cross_runner.render_text("{when ???: a | b}") == "{when ???: a | b}", "invalid when condition renders verbatim: " + cross_runner.render_text("{when ???: a | b}"))
+
+	# 12. from_dict rejects invalid history (unknown passage_id or empty array) without corrupting current runner state
+	var before_id: String = cross_runner.current_id()
+	var before_coins: Variant = cross_runner.get_state()["coins"]
+	var before_turn: int = cross_runner.get_turn()
+	_assert(not cross_runner.from_dict({ "history": [] }, story), "from_dict rejects empty history")
+	_assert(cross_runner.current_id() == before_id and cross_runner.get_state()["coins"] == before_coins and cross_runner.get_turn() == before_turn, "empty history left runner state intact")
+	_assert(not cross_runner.from_dict({ "history": [{ "passage_id": "start", "state": {} }, { "passage_id": "missing_passage", "state": {} }] }, story), "from_dict rejects unknown passage_id in history")
+	_assert(cross_runner.current_id() == before_id and cross_runner.get_state()["coins"] == before_coins and cross_runner.get_turn() == before_turn, "unknown passage_id left runner state intact")
 `
 
 describe("Godot 4 runtime addon packaging", () => {
@@ -695,15 +739,21 @@ func _storylets() -> void:
 	old_save.from_dict({ "history": [{ "passage_id": "hub", "state": { "energy": 5, "rain": false }, "visits": { "hub": 1 }, "used_once": {}, "return_to": "" }] }, deck)
 	_assert(old_save.get_turn() == 0 and old_save.draw_storylet(null, 0.0).get("id", "") == "squirrel", "old history steps still draw")
 
-	# a storylet with @end has nowhere to return to
+	# a storylet with @end has nowhere to return to, and storylet_drawn fires before passage_entered / story_ended
 	var d: RiverRunner = _run("doom")
-	var ended: Array[String] = []
+	var doom_events: Array[String] = []
+	d.storylet_drawn.connect(func(pid: String) -> void:
+		doom_events.append("drawn:%s" % pid)
+	)
+	d.passage_entered.connect(func(pid: String, _p: Dictionary) -> void:
+		doom_events.append("entered:%s" % pid)
+	)
 	d.story_ended.connect(func(pid: String, is_ending: bool) -> void:
-		ended.append("%s:%s" % [pid, str(is_ending)])
+		doom_events.append("ended:%s:%s" % [pid, str(is_ending)])
 	)
 	_assert(d.draw_storylet().get("id", "") == "doom", "draws doom with the global rng")
 	_assert(d.is_over() and _step(d, -1)["return_to"] == "", "doom ends the story with no return")
-	_assert(ended == ["doom:true"], "story_ended for doom: " + str(ended))
+	_assert(doom_events == ["drawn:doom", "entered:doom", "ended:doom:true"], "storylet_drawn fires before passage_entered and story_ended: " + str(doom_events))
 	_assert(d.storylets()[0]["open"] == false, "nothing is open after the end")
 
 

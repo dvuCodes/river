@@ -30,6 +30,11 @@ function FrameImage(props: {
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
   const [failed, setFailed] = useState(false)
 
+  useEffect(() => {
+    setFailed(false)
+    setNatural(null)
+  }, [url])
+
   const toImage = (e: ReactMouseEvent) => {
     const el = img.current!
     const r = el.getBoundingClientRect()

@@ -18,6 +18,7 @@ import {
   type ReviewThread,
   type StateSchema,
   type Story,
+  type StoryWorkspace,
   DEFAULT_BOARD,
   addPassage,
   addThread,
@@ -33,6 +34,7 @@ import {
   formatCond,
   lint,
   lintNarrative,
+  lintStoryInWorkspace,
   listBoards,
   listCaptures,
   listPlans,
@@ -44,6 +46,7 @@ import {
   loadProject,
   loadSchema,
   loadStory,
+  loadStoryWorkspace,
   openChoices,
   parseTwee3,
   pathsAnalysis,
@@ -86,7 +89,7 @@ import * as settings from "./settings"
 import { boardHandlers, closeRowGap, jobLogFile, jobRevisable, lookingJobs } from "./board"
 import { type ProjectWatch, noteOwnWrite, watchProject } from "./watch"
 import { PermissionWaits } from "./permissions"
-import { StoryCache, staleStories } from "./storyCache"
+import { StoryCache, staleStories, storyIdsFor } from "./storyCache"
 import { AgentWork } from "./work"
 
 let project: Project | null = null
@@ -161,8 +164,13 @@ async function projectInfo(): Promise<ProjectInfo | null> {
 interface ParsedStory {
   story: Story
   schema: StateSchema
-  /** The StoryDTO with parse, lint and narrative diagnostics, built on first use and kept with the entry. */
-  dto(): StoryDTO
+  /** The StoryDTO with parse, lint and narrative diagnostics, built on first use and kept for the given workspace. */
+  dto(ws?: StoryWorkspace, storyId?: string): StoryDTO
+}
+
+interface CachedWorkspace {
+  ids: Map<string, string>
+  workspace: StoryWorkspace | undefined
 }
 
 /**
@@ -170,23 +178,24 @@ interface ParsedStory {
  * opens, when River writes a story, and when the watcher reports a story, state or manifest change. Handlers that
  * write read the file fresh, so an outside edit the watcher has not reported yet is never written over.
  */
-const storyCache = new StoryCache<ParsedStory>()
+const storyCache = new StoryCache<ParsedStory, CachedWorkspace>()
 
 async function parseStory(p: Project, rel: string): Promise<ParsedStory> {
   const [{ story, diagnostics }, schema] = await Promise.all([loadStory(p, rel), loadSchema(p)])
-  let dto: StoryDTO | undefined
+  let cached: { ws: StoryWorkspace | undefined; storyId: string | undefined; dto: StoryDTO } | undefined
   return {
     story,
     schema,
-    dto: () => {
-      if (!dto) {
+    dto: (ws, storyId) => {
+      if (!cached || cached.ws !== ws || cached.storyId !== storyId) {
+        const core = ws && storyId ? lintStoryInWorkspace(ws, storyId, story, schema) : lint(story, schema)
         const narrative: Diagnostic[] = lintNarrative(story, schema, {
           ...(p.manifest.copyBudgets ? { copyBudgets: p.manifest.copyBudgets } : {}),
           shotIds: p.manifest.shots.map((s) => s.id),
         })
-        dto = storyDTO(story, [...diagnostics, ...lint(story, schema), ...narrative], schema)
+        cached = { ws, storyId, dto: storyDTO(story, [...diagnostics, ...core, ...narrative], schema) }
       }
-      return dto
+      return cached.dto
     },
   }
 }
@@ -195,6 +204,37 @@ async function parseStory(p: Project, rel: string): Promise<ParsedStory> {
 function readStory(rel: string): Promise<ParsedStory> {
   const p = need()
   return storyCache.get(rel, () => parseStory(p, rel))
+}
+
+/**
+ * Multi-story workspace (cached alongside parsed stories and dropped on any story, state or manifest change).
+ * Single-story projects skip building a workspace so their performance and behavior stay unchanged.
+ */
+function readWorkspace(p: Project): Promise<CachedWorkspace> {
+  return storyCache.getWorkspace(async () => {
+    const files = await listStories(p)
+    const ids = storyIdsFor(files, p.manifest.stories)
+    if (files.length < 2) return { ids, workspace: undefined }
+    const loaded = await Promise.all(
+      files.map(async (file) => ({
+        file,
+        id: ids.get(file) ?? basename(file).replace(/\.(twee|tw)$/i, ""),
+        story: (await storyCache.get(file, () => parseStory(p, file))).story,
+      })),
+    )
+    return { ids, workspace: loadStoryWorkspace(loaded) }
+  })
+}
+
+function storyIdFrom(ws: CachedWorkspace, rel: string): string {
+  const norm = rel.replace(/\\/g, "/")
+  return ws.ids.get(norm) ?? basename(norm).replace(/\.(twee|tw)$/i, "")
+}
+
+async function storyDto(rel: string): Promise<StoryDTO> {
+  const p = need()
+  const [entry, ws] = await Promise.all([readStory(rel), readWorkspace(p)])
+  return ws.workspace ? entry.dto(ws.workspace, storyIdFrom(ws, rel)) : entry.dto()
 }
 
 /** The story read from disk now, for a handler that writes it. */
@@ -226,7 +266,7 @@ async function writeStory(rel: string, story: Story): Promise<void> {
 
 async function storyAfterWrite(rel: string, story: Story): Promise<StoryDTO> {
   await writeStory(rel, story)
-  return (await readStory(rel)).dto()
+  return storyDto(rel)
 }
 
 // ---- playtest sessions live here; the Playtest object holds closures and cannot cross IPC.
@@ -257,6 +297,14 @@ function snapshot(sessionId: string): PlaySnapshot {
       name: passage.name,
       open,
       ...(passage.when ? { when: formatCond(passage.when) } : {}),
+    })),
+    storylets: pt.storylets().map(({ passage, open, weight, priority, cooldownLeft }) => ({
+      id: passage.id,
+      name: passage.name,
+      open,
+      weight,
+      priority,
+      cooldownLeft,
     })),
     inInterrupt: history.at(-1)?.returnTo !== undefined,
     state: pt.state(),
@@ -436,7 +484,7 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
     return projectInfo()
   })
 
-  handle("story:load", async (rel: string) => (await readStory(rel)).dto())
+  handle("story:load", async (rel: string) => storyDto(rel))
   handle("story:savePassage", async (rel: string, id: string, raw: string) => storyAfterWrite(rel, updatePassageText(await freshStory(rel), id, raw)))
   handle("story:rename", async (rel: string, id: string, name: string) => {
     const trimmed = name.trim()
@@ -465,10 +513,10 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
   })
   handle("story:export", async (rel: string): Promise<{ outFile: string; passageCount: number }> => {
     const p = need()
-    const { story, schema } = await readStory(rel)
-    const stem = basename(rel).replace(/\.(twee|tw)$/i, "")
-    const data = exportStory(story, schema, stem)
-    const outFile = `${p.manifest.export}/${stem}.json`.replace(/\\/g, "/")
+    const [{ story, schema }, ws] = await Promise.all([readStory(rel), readWorkspace(p)])
+    const id = storyIdFrom(ws, rel)
+    const data = ws.workspace ? exportStory(story, schema, id, { workspace: ws.workspace }) : exportStory(story, schema, id)
+    const outFile = `${p.manifest.export}/${id}.json`.replace(/\\/g, "/")
     const target = safePath(p, outFile)
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, JSON.stringify(data, null, 2) + "\n", "utf8")
@@ -522,6 +570,10 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
   })
   handle("play:interrupt", (id: string, name: string) => {
     sessions.get(id)?.pt.interrupt(name)
+    return snapshot(id)
+  })
+  handle("play:drawStorylet", (id: string) => {
+    sessions.get(id)?.pt.drawStorylet()
     return snapshot(id)
   })
 
@@ -622,7 +674,13 @@ export function registerIpc(windowGetter: () => BrowserWindow | null, opts: { jo
   handle("agent:abort", (turnId: string) => {
     turns.get(turnId)?.abort()
   })
-  handle("agent:restore", (ref: string) => restoreCheckpoint(need().root, ref))
+  handle("agent:restore", async (ref: string) => {
+    try {
+      await restoreCheckpoint(need().root, ref)
+    } finally {
+      storyCache.invalidate()
+    }
+  })
 
   /** Jobs run in the background; one that fails before its job file exists (bad mark, no git) is thrown here. */
   /** The settings and agent turn a job runs with, once the jobs folder is watched. */

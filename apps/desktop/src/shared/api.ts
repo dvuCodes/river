@@ -122,6 +122,15 @@ export interface PlayInterruptDTO {
   when?: string
 }
 
+export interface PlayStoryletDTO {
+  id: string
+  name: string
+  open: boolean
+  weight: number
+  priority: number
+  cooldownLeft: number
+}
+
 export interface OpenStateDTO {
   passages: Record<string, boolean>
   choices: Record<string, boolean[]>
@@ -135,6 +144,8 @@ export interface PlaySnapshot {
   choices: PlayChoiceDTO[]
   /** The story's interrupt passages and whether each can start now. */
   interrupts: PlayInterruptDTO[]
+  /** The story's storylet passages, with whether each can be drawn now, its weight, priority and cooldown. */
+  storylets?: PlayStoryletDTO[]
   /** An interrupt is running: a `@return` choice goes back to where it started. */
   inInterrupt: boolean
   state: GameState
@@ -330,6 +341,8 @@ export interface RiverApi {
   playSetVar(sessionId: string, name: string, value: number | string | boolean): Promise<PlaySnapshot>
   /** Start an interrupt passage (by name) from the current passage. */
   playInterrupt(sessionId: string, name: string): Promise<PlaySnapshot>
+  /** Draw one open storylet from the deck. */
+  playDrawStorylet(sessionId: string): Promise<PlaySnapshot>
   // frames and review
   frames(): Promise<FramesDTO>
   capture(shotId: string): Promise<CaptureDTO>

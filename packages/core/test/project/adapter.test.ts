@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createCommandAdapter, resolveAdapter } from "../../src/frames/adapter"
-import { captureShots, listCaptures } from "../../src/frames/frames"
+import { captureShot, captureShots, listCaptures } from "../../src/frames/frames"
 import type { EngineAdapter, Project, ShotDef } from "../../src/project/types"
 import { project, removeDir, tempDir } from "./helpers"
 
@@ -127,6 +127,38 @@ describe("createCommandAdapter.capture", { timeout: 30_000 }, () => {
     writeFileSync(quiet, "")
     await expect(a.capture(cmdProject({ command: `${node} ${JSON.stringify(quiet)}` }), shots[1]!, outDir)).rejects.toThrow("wrote no frame_NN.png")
   })
+
+  it("safely quotes paths with spaces and blocks command injection in expanded variables", async () => {
+    const spacedDir = path.join(root, "my out dir", "idle shot")
+    const pBare = cmdProject({ command: `${node} ${JSON.stringify(singleScript())} $RIVER_OUT_DIR "$RIVER_OUT_DIR"` })
+    await createCommandAdapter().capture(pBare, shots[1]!, spacedDir)
+    const seen = JSON.parse(readFileSync(path.join(spacedDir, "env.json"), "utf8"))
+    expect(seen.argv).toEqual([path.resolve(spacedDir), path.resolve(spacedDir)])
+
+    // A value containing shell metacharacters (&) does not execute injected commands.
+    const marker = path.join(root, "pwned.txt")
+    const metacharShot: ShotDef = { id: "idle", scene: `scene & echo pwned > ${marker}`, count: 1 }
+    const outMeta = path.join(root, "out", "meta")
+    await createCommandAdapter().capture(cmdProject({ command: `${node} ${JSON.stringify(singleScript())} $RIVER_SCENE` }), metacharShot, outMeta)
+    expect(existsSync(marker)).toBe(false)
+    expect(JSON.parse(readFileSync(path.join(outMeta, "env.json"), "utf8")).argv).toEqual([metacharShot.scene])
+
+    // A value containing a quote breakout `" & echo pwned` never executes the injected command.
+    const quoteShot: ShotDef = { id: "idle", scene: `a" & echo pwned > ${marker}`, count: 1 }
+    const outQuote = path.join(root, "out", "quote")
+    const pQuoted = cmdProject({ command: `${node} ${JSON.stringify(singleScript())} "$RIVER_SCENE"` })
+    if (process.platform === "win32") {
+      await expect(createCommandAdapter().capture(pQuoted, quoteShot, outQuote)).rejects.toThrow(/cannot be safely passed/)
+    } else {
+      await createCommandAdapter().capture(pQuoted, quoteShot, outQuote)
+      expect(JSON.parse(readFileSync(path.join(outQuote, "env.json"), "utf8")).argv).toEqual([quoteShot.scene])
+    }
+    expect(existsSync(marker)).toBe(false)
+
+    // Control characters in expanded values are rejected.
+    const nlShot: ShotDef = { id: "idle", scene: "scene\necho pwned", count: 1 }
+    await expect(createCommandAdapter().capture(pQuoted, nlShot, path.join(root, "out", "nl"))).rejects.toThrow(/control character/)
+  })
 })
 
 describe("createCommandAdapter.captureBatch", { timeout: 30_000 }, () => {
@@ -160,6 +192,16 @@ describe("createCommandAdapter.captureBatch", { timeout: 30_000 }, () => {
     const result = await createCommandAdapter().captureBatch!(p, items)
     expect(Object.keys(result)).toEqual(["walk", "idle"])
     expect(JSON.parse(readFileSync(path.join(root, "out", "idle", "env.json"), "utf8")).env.RIVER_SHOT_ID).toBe("idle")
+  })
+
+  it("scales timeoutS by item count for batchCommand, unless batchTimeoutS is explicitly set", async () => {
+    const hang = path.join(root, "hang-batch.mjs")
+    writeFileSync(hang, `setTimeout(() => {}, 10_000)`)
+    const items = shots.map((shot) => ({ shot, outDir: path.join(root, "out", shot.id) }))
+    const scaled = cmdProject({ command: "x", batchCommand: `${node} ${JSON.stringify(hang)}`, timeoutS: "0.2", cwd: path.dirname(root) })
+    await expect(createCommandAdapter().captureBatch!(scaled, items)).rejects.toThrow("batch capture of 2 shots ran longer than 0.4 s and was stopped")
+    const explicit = cmdProject({ command: "x", batchCommand: `${node} ${JSON.stringify(hang)}`, timeoutS: "0.2", batchTimeoutS: "0.25", cwd: path.dirname(root) })
+    await expect(createCommandAdapter().captureBatch!(explicit, items)).rejects.toThrow("batch capture of 2 shots ran longer than 0.25 s and was stopped")
   })
 })
 
@@ -246,9 +288,37 @@ describe("captureShots", { timeout: 30_000 }, () => {
     expect(await captureShots(p, [], batch)).toEqual([])
   })
 
-  it("throws when the batch result misses a shot", async () => {
+  it("throws when the batch result misses a shot and cleans up orphan capture directories", async () => {
+    const p = project(root, { shots })
     const adapter: EngineAdapter = { id: "fake", capture: async () => [], captureBatch: async () => ({ walk: [] }) }
-    await expect(captureShots(project(root, { shots }), ["walk", "idle"], adapter)).rejects.toThrow('batch capture returned no frames for shot "idle"')
+    await expect(captureShots(p, ["walk", "idle"], adapter)).rejects.toThrow('batch capture returned no frames for shot "idle"')
+    expect(readdirSync(path.join(root, ".river", "captures", "walk"))).toEqual([])
+    expect(readdirSync(path.join(root, ".river", "captures", "idle"))).toEqual([])
+  })
+
+  it("cleans up orphan capture directories when capture or captureBatch fails or returns empty frames", async () => {
+    const p = project(root, { shots })
+    const failSingle: EngineAdapter = { id: "fake", capture: async () => { throw new Error("boom") } }
+    await expect(captureShot(p, "idle", failSingle)).rejects.toThrow("boom")
+    expect(readdirSync(path.join(root, ".river", "captures", "idle"))).toEqual([])
+
+    const emptySingle: EngineAdapter = { id: "fake", capture: async () => [] }
+    await expect(captureShot(p, "idle", emptySingle)).rejects.toThrow('returned no frames for shot "idle"')
+    expect(readdirSync(path.join(root, ".river", "captures", "idle"))).toEqual([])
+
+    const partialBatch: EngineAdapter = {
+      id: "fake",
+      capture: async () => [],
+      captureBatch: async (_p, items) => {
+        const walkFrame = path.join(items[0]!.outDir, "frame_00.png")
+        writeFileSync(walkFrame, "png")
+        return { walk: [walkFrame], idle: [] }
+      },
+    }
+    await expect(captureShots(p, ["walk", "idle"], partialBatch)).rejects.toThrow('batch capture returned no frames for shot "idle"')
+    expect(readdirSync(path.join(root, ".river", "captures", "walk"))).toEqual([])
+    expect(readdirSync(path.join(root, ".river", "captures", "idle"))).toEqual([])
+    expect(await listCaptures(p, "walk")).toEqual([])
   })
 
   it("works end to end with the command adapter's batchCommand", async () => {
