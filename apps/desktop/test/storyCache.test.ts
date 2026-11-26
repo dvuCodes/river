@@ -94,9 +94,9 @@ describe("storyIdsFor", () => {
     expect(ids.get("stories/act2/ch2.tw")).toBe("ch2")
   })
 
-  it("uses relative path under manifest.stories when basenames collide", () => {
-    const ids = storyIdsFor(["stories/act1/intro.twee", "stories/act2/intro.twee", "stories/outro.twee"], "stories")
-    expect(ids.get("stories/act1/intro.twee")).toBe("act1/intro")
+  it("uses relative path under manifest.stories when basenames collide (case-insensitively)", () => {
+    const ids = storyIdsFor(["stories/act1/Intro.twee", "stories/act2/intro.twee", "stories/outro.twee"], "stories")
+    expect(ids.get("stories/act1/Intro.twee")).toBe("act1/Intro")
     expect(ids.get("stories/act2/intro.twee")).toBe("act2/intro")
     expect(ids.get("stories/outro.twee")).toBe("outro")
   })

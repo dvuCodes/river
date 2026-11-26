@@ -66,7 +66,7 @@ export function storyIdsFor(files: readonly string[], storiesDir: string): Map<s
   const normFiles = files.map((f) => f.replace(/\\/g, "/"))
   const stems = normFiles.map((f) => stripStoryExt(basename(f)))
   const counts = new Map<string, number>()
-  for (const s of stems) counts.set(s, (counts.get(s) ?? 0) + 1)
+  for (const s of stems) counts.set(s.toLowerCase(), (counts.get(s.toLowerCase()) ?? 0) + 1)
 
   const dir = storiesDir.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "")
   const prefix = dir && dir !== "." ? `${dir}/` : ""
@@ -75,7 +75,7 @@ export function storyIdsFor(files: readonly string[], storiesDir: string): Map<s
   for (let i = 0; i < normFiles.length; i++) {
     const f = normFiles[i]!
     const stem = stems[i]!
-    if ((counts.get(stem) ?? 0) > 1) {
+    if ((counts.get(stem.toLowerCase()) ?? 0) > 1) {
       const under = prefix && f.startsWith(prefix) ? f.slice(prefix.length) : f.replace(/^\.\//, "")
       out.set(f, stripStoryExt(under))
     } else {

@@ -1,7 +1,12 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import { describe, expect, it } from "vitest"
 import { exportStory } from "../../src/export/export"
 import { parseTwee3 } from "../../src/formats/twee3"
 import { lint } from "../../src/lint/lint"
+import { runCheckData } from "../../src/project/check-data"
+import { loadProject } from "../../src/project/project"
 import type { StateSchema } from "../../src/story/types"
 import {
   lintWorkspace,
@@ -247,5 +252,79 @@ describe("exportStory with workspace", () => {
     expect(() => exportStory(broken, schema, "broken", { workspace: wsBroken })).toThrow(
       /no passage "Missing" in story "chapter2"/,
     )
+  })
+})
+
+describe("runCheckData in a multi-file workspace", () => {
+  it("exports cross-story links and disambiguates colliding nested basenames", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "river-checkdata-ws-"))
+    try {
+      mkdirSync(path.join(root, "stories", "act1"), { recursive: true })
+      mkdirSync(path.join(root, "stories", "act2"), { recursive: true })
+      writeFileSync(path.join(root, "stories", "state.json"), "{}\n", "utf8")
+      writeFileSync(
+        path.join(root, "stories", "act1", "Intro.twee"),
+        [
+          ":: StoryTitle",
+          "Act 1",
+          "",
+          ":: StoryData",
+          '{ "ifid": "9B1D7C2E-3F4A-4B5C-8D6E-7F8091A2B3C4", "start": "Start" }',
+          "",
+          ":: Start",
+          "[[Next->act2/intro::End]]",
+        ].join("\n"),
+        "utf8",
+      )
+      writeFileSync(
+        path.join(root, "stories", "act2", "intro.twee"),
+        [
+          ":: StoryTitle",
+          "Act 2",
+          "",
+          ":: StoryData",
+          '{ "ifid": "9B1D7C2E-3F4A-4B5C-8D6E-7F8091A2B3C5", "start": "End" }',
+          "",
+          ":: End",
+          "@end",
+          "--",
+          "Fin.",
+        ].join("\n"),
+        "utf8",
+      )
+      writeFileSync(
+        path.join(root, "check.mjs"),
+        [
+          'import { readFileSync } from "node:fs"',
+          'const d = process.env.RIVER_EXPORT_DIR',
+          'const a = JSON.parse(readFileSync(d + "/act1/Intro.json", "utf8"))',
+          'const b = JSON.parse(readFileSync(d + "/act2/intro.json", "utf8"))',
+          'if (a.passages.start.choices[0].to !== "act2/intro::end") process.exit(2)',
+          'if (b.id !== "act2/intro") process.exit(3)',
+          'console.log("ok")',
+        ].join("\n"),
+        "utf8",
+      )
+      writeFileSync(
+        path.join(root, "river.json"),
+        JSON.stringify({
+          name: "ws",
+          engine: "none",
+          stories: "stories",
+          state: "stories/state.json",
+          export: "export",
+          adapter: {},
+          shots: [],
+          checkData: "node check.mjs",
+        }),
+        "utf8",
+      )
+      const project = await loadProject(root)
+      const res = await runCheckData(project, {})
+      expect(res.ok).toBe(true)
+      expect(res.output.trim()).toBe("ok")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
