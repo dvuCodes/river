@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react"
-import type { Diagnostic } from "@river/core"
+import type { CheckDataResult, Diagnostic } from "@river/core"
 import type { PassageDTO, StoryDTO } from "../../../shared/api"
 import { StoryMap } from "../components/StoryMap"
 import { cx, errorText, useSmokeReady } from "../util"
@@ -86,6 +86,16 @@ function Inspector(props: {
   }, [passage.rawText])
   useEffect(() => setName(passage.name), [passage.name])
   useEffect(() => setStatus(null), [passage.id])
+  const tagsText = passage.tags.join(" ")
+  const [tagDraft, setTagDraft] = useState(tagsText)
+  const tagBase = useRef(tagsText)
+  // As with the text: follow outside changes to the tags unless the user is editing them.
+  useEffect(() => {
+    const prev = tagBase.current
+    tagBase.current = tagsText
+    setTagDraft((d) => (d === prev ? tagsText : d))
+  }, [tagsText])
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const dirty = draft !== passage.rawText
   const run = async (fn: () => Promise<StoryDTO>, okText: string) => {
@@ -110,6 +120,23 @@ function Inspector(props: {
   }
   const save = () => run(() => window.river.savePassage(storyRel, passage.id, draft), "Saved to the story file.")
   const rename = () => run(() => window.river.renamePassage(storyRel, passage.id, name), "Renamed, and links to it updated.")
+  const tagList = tagDraft.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean)
+  const tagsDirty = tagList.join(" ") !== tagsText
+  const saveTags = () => {
+    if (tagsDirty && !busy) void run(() => window.river.setPassageTags(storyRel, passage.id, tagList), "Tags saved.")
+  }
+  const remove = async () => {
+    setBusy(true)
+    try {
+      const story = await window.river.deletePassage(storyRel, passage.id)
+      onSaved(story)
+      onClose()
+    } catch (err) {
+      setStatus({ kind: "err", text: errorText(err) })
+      setConfirmDelete(false)
+      setBusy(false)
+    }
+  }
 
   return (
     <aside className="inspector">
@@ -118,6 +145,16 @@ function Inspector(props: {
         <span className="insp-id mono">@id {passage.id}</span>
         <button className="btn insp-pin" data-pin-passage={passage.id} onClick={() => void pin()} title="Add this passage to the storyboard canvas">
           Pin to canvas
+        </button>
+        <button
+          className={cx("btn", confirmDelete && "btn-danger")}
+          data-delete-passage={passage.id}
+          disabled={busy || passage.isStart}
+          title={passage.isStart ? "This is the story's start passage, so it cannot be deleted" : confirmDelete ? "Click again to delete this passage from the story file" : "Delete this passage (links to it are kept; lint reports them as broken)"}
+          onClick={() => (confirmDelete ? void remove() : setConfirmDelete(true))}
+          onBlur={() => setConfirmDelete(false)}
+        >
+          {confirmDelete ? "Confirm delete" : "Delete"}
         </button>
         <button className="icon-btn" onClick={onClose} title="Close inspector" aria-label="Close inspector">
           ×
@@ -136,18 +173,36 @@ function Inspector(props: {
         </button>
       </form>
       <dl className="insp-facts">
-        {passage.tags.length > 0 && (
-          <>
-            <dt>tags</dt>
-            <dd>
-              {passage.tags.map((t) => (
-                <span key={t} className="chip">
-                  {t}
-                </span>
-              ))}
-            </dd>
-          </>
-        )}
+        <dt>tags</dt>
+        <dd>
+          <form
+            className="insp-tags"
+            onSubmit={(e) => {
+              e.preventDefault()
+              saveTags()
+            }}
+          >
+            <input
+              className="mono"
+              value={tagDraft}
+              placeholder="none · e.g. interrupt night"
+              spellCheck={false}
+              aria-label="Passage tags"
+              data-passage-tags={passage.id}
+              onChange={(e) => setTagDraft(e.target.value)}
+              onBlur={saveTags}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setTagDraft(tagsText)
+              }}
+            />
+            {tagsDirty && (
+              // Keep focus in the input so its blur does not save a second time.
+              <button type="submit" className="btn" disabled={busy} onMouseDown={(e) => e.preventDefault()}>
+                Apply
+              </button>
+            )}
+          </form>
+        </dd>
         {passage.when && (
           <>
             <dt>when</dt>
@@ -185,6 +240,163 @@ function Inspector(props: {
         </button>
       </footer>
     </aside>
+  )
+}
+
+/** "+ Passage": a small form under the button for a name and optional tags; the new passage is selected once added. */
+function AddPassage(props: { storyRel: string; story: StoryDTO; onAdded(story: StoryDTO, id: string): void }) {
+  const { storyRel, story, onAdded } = props
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState("")
+  const [tags, setTags] = useState("")
+  const [err, setErr] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const close = () => {
+    setOpen(false)
+    setErr(null)
+  }
+  const taken = story.passages.some((p) => p.name === name.trim())
+  const submit = async () => {
+    const n = name.trim()
+    if (!n || taken) return
+    setBusy(true)
+    try {
+      const tagList = tags.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean)
+      const next = await window.river.addPassage(storyRel, n, "", tagList)
+      const added = next.passages.find((p) => p.name === n)
+      onAdded(next, added?.id ?? "")
+      setName("")
+      setTags("")
+      close()
+    } catch (e) {
+      setErr(errorText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="tb-pop-wrap">
+      <button className={cx("btn", open && "is-on")} data-action="add-passage" onClick={() => (open ? close() : setOpen(true))} title="Add a passage to this story">
+        + Passage
+      </button>
+      {open && (
+        <form
+          className="tb-pop add-passage"
+          onSubmit={(e) => {
+            e.preventDefault()
+            void submit()
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault()
+              close()
+            }
+          }}
+        >
+          <label className="field">
+            <span>Name</span>
+            <input autoFocus value={name} placeholder="The old bridge" onChange={(e) => (setName(e.target.value), setErr(null))} aria-label="New passage name" />
+          </label>
+          <label className="field">
+            <span>Tags (optional)</span>
+            <input value={tags} placeholder="interrupt, night" onChange={(e) => setTags(e.target.value)} aria-label="New passage tags" />
+          </label>
+          {taken && <p className="err-note">A passage with this name already exists.</p>}
+          {err && <p className="err-note">{err}</p>}
+          <footer className="tb-pop-foot">
+            <button type="button" className="btn" onClick={close}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" data-action="add-passage-confirm" disabled={busy || !name.trim() || taken}>
+              {busy ? "Adding…" : "Add"}
+            </button>
+          </footer>
+        </form>
+      )}
+    </div>
+  )
+}
+
+/** Export writes the story's JSON for the game; the result shows beside the button for a few seconds. */
+function ExportButton(props: { storyRel: string }) {
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+  useEffect(() => setStatus(null), [props.storyRel])
+  const run = async () => {
+    setBusy(true)
+    window.clearTimeout(timer.current)
+    try {
+      const r = await window.river.exportStory(props.storyRel)
+      setStatus({ ok: true, text: `Wrote ${r.outFile} · ${r.passageCount} passages` })
+      timer.current = window.setTimeout(() => setStatus(null), 5_000)
+    } catch (e) {
+      setStatus({ ok: false, text: errorText(e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <>
+      {status && (
+        <span className={cx("tb-status", !status.ok && "is-err")} data-export-status={status.ok ? "ok" : "err"} title={status.text}>
+          {status.text}
+        </span>
+      )}
+      <button className="btn" data-action="export-story" disabled={busy} onClick={() => void run()} title="Write this story's JSON export for the game">
+        {busy ? "Exporting…" : "Export"}
+      </button>
+    </>
+  )
+}
+
+/** Runs river.json's checkData command after a fresh export, and shows whether it passed and what it printed. */
+function CheckDataButton() {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<CheckDataResult | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const run = async () => {
+    setOpen(true)
+    setBusy(true)
+    setErr(null)
+    try {
+      setResult(await window.river.checkData())
+    } catch (e) {
+      setResult(null)
+      setErr(errorText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="tb-pop-wrap">
+      <button
+        className={cx("btn", result && !busy && (result.ok ? "is-pass" : "is-fail"))}
+        data-action="check-data"
+        disabled={busy}
+        onClick={() => void run()}
+        title="Export every story, then run river.json's checkData command"
+      >
+        {busy ? "Checking…" : result ? (result.ok ? "✓ Check data" : "✕ Check data") : "Check data"}
+      </button>
+      {open && !busy && (result || err) && (
+        <div className="tb-pop check-data" data-check-data={result ? (result.ok ? "pass" : "fail") : "error"}>
+          <header className="tb-pop-head">
+            <span className={cx("check-verdict", result?.ok ? "is-pass" : "is-fail")}>{result ? (result.ok ? "Passed" : "Failed") : "Could not run"}</span>
+            {result && <span className="mono sec-hint check-cmd">{result.command}</span>}
+            <span className="tb-spacer" />
+            <button className="icon-btn" onClick={() => setOpen(false)} aria-label="Close">
+              ×
+            </button>
+          </header>
+          {err && <p className="err-note">{err}</p>}
+          {result?.problem && <p className="err-note">{result.problem}</p>}
+          {result && (result.output.trim() ? <pre className="check-output mono">{result.output}</pre> : <p className="sec-hint">The command printed nothing.</p>)}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -239,8 +451,10 @@ export function StoryMapView(props: {
   onPlayFrom(name: string): void
   /** The canvas board that pins go to. */
   board: string
+  /** river.json has a checkData command: show the Check data button. */
+  hasCheckData?: boolean
 }) {
-  const { stories, storyRel, onStory, story, storyError, selectedId, onSelect, onStoryChanged, onPlayFrom, board } = props
+  const { stories, storyRel, onStory, story, storyError, selectedId, onSelect, onStoryChanged, onPlayFrom, board, hasCheckData } = props
   const [focus, setFocus] = useState<{ id: string; nonce: number }>()
   const [mapReady, setMapReady] = useState(false)
   const saveTimer = useRef<number | undefined>(undefined)
@@ -279,6 +493,22 @@ export function StoryMapView(props: {
             {story.title} · {story.passages.length} passages
           </span>
         )}
+        {story && (
+          <AddPassage
+            storyRel={storyRel}
+            story={story}
+            onAdded={(next, id) => {
+              onStoryChanged(next)
+              if (id) {
+                onSelect(id)
+                // The map lays the new card out on the next render; center on it after that.
+                window.setTimeout(() => setFocus({ id, nonce: Date.now() }), 60)
+              }
+            }}
+          />
+        )}
+        {story && <ExportButton storyRel={storyRel} />}
+        {hasCheckData && <CheckDataButton />}
         <button className="btn btn-primary" disabled={!selected} onClick={() => selected && onPlayFrom(selected.name)}>
           ▶ Play from here
         </button>

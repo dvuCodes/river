@@ -16,9 +16,16 @@
  * One rule decides whether a choice is open, the same in play, paths, lint and for a game reading the export:
  * its `@when` holds, the player can pay every `@cost` (`@cost treats 1` needs `treats >= 1`), and the target
  * passage's `@when` holds on the state after the choice's `@cost` and `@set`. Then the target's `@set` runs.
+ * `visited(id)` / `visits(id)` in any condition count the entries made BEFORE this one, so a passage with
+ * `@when not visited(<its own id>)` can be entered exactly once. A `@return` is not an entry.
  *
  * A passage tagged `interrupt` can be entered from any passage while its `@when` holds (the game decides when to
  * fire it). Its choices can target `@return` (`[[Back->@return]]`) to go back to the passage it interrupted.
+ * With `@auto` the playtest starts it by itself after a choice, as soon as its `@when` holds (highest `@priority` first).
+ *
+ * A passage tagged `storylet` is drawn from a deck: when the game asks for one, an open storylet (its `@when`
+ * holds, it is not on `@cooldown`) of the highest `@priority` is picked at random by `@weight`. Like an interrupt
+ * it can `@return` to the passage it was drawn from.
  */
 
 /** A position in a source file. Lines and columns start at 1. */
@@ -37,6 +44,21 @@ export type Cond =
   | { kind: "and"; terms: Cond[] }
   | { kind: "or"; terms: Cond[] }
   | { kind: "not"; term: Cond }
+  /**
+   * Visit memory: how many times the player has entered a passage (by id). `visited(id)` is
+   * `{ op: ">=", value: 1 }`; `visits(id) > 2` compares the count. Paths and lint treat the count as free.
+   */
+  | { kind: "visit"; passageId: string; op: CmpOp; value: number }
+
+/** A value in `@meta key=value` (a number, a bool, or a string). */
+export type MetaValue = number | string | boolean
+
+/** A cue for the game (sound, camera, animation), written `@cue <name> [args]`. */
+export interface Cue {
+  name: string
+  /** Everything after the name, as written (trimmed). */
+  args?: string
+}
 
 /**
  * One state change. `@set bond += 10` is { variable: "bond", op: "add", amount: 10 }; `-= 10` is add -10;
@@ -67,6 +89,12 @@ export interface Choice {
   when?: Cond
   /** A short line a game shows with the option, written `@hint "Costs one treat"`. */
   hint?: string
+  /** `@once`: the choice closes after the player takes it once. */
+  once?: boolean
+  /** `@meta key=value, key2="text"`: free data for the game. */
+  meta?: Record<string, MetaValue>
+  /** `@cue name [args]`: cues the game fires when the choice is taken. */
+  cues?: Cue[]
   span: SourceSpan
 }
 
@@ -83,6 +111,20 @@ export interface Passage {
   onEnter: Effect[]
   /** `@end` marks an ending. An ending with no choices is not a dead end. */
   isEnding: boolean
+  /** `@meta key=value, key2="text"` lines in the rule block, merged. */
+  meta?: Record<string, MetaValue>
+  /** `@shot <shotId>`: the manifest shot that shows this passage. */
+  shot?: string
+  /** `@cue name [args]` lines in the rule block: cues the game fires on entry. */
+  cues?: Cue[]
+  /** `@weight <positive number>`: how likely a `[storylet]` passage is drawn among the open ones of its priority. Default 1. */
+  weight?: number
+  /** `@priority <integer>`: higher goes first, for `[storylet]` draws and `@auto` `[interrupt]`s. Default 0. */
+  priority?: number
+  /** `@cooldown <whole number>`: turns before a `[storylet]` can be drawn again. */
+  cooldown?: number
+  /** `@auto` on an `[interrupt]`: it starts by itself after a choice, as soon as its `@when` holds. */
+  auto?: boolean
   /** Prose after the `--` line (or the whole text if there are no rules), with choice lines kept. */
   text: string
   choices: Choice[]
@@ -185,7 +227,11 @@ export interface StoryPath {
   steps: PathStep[]
   /** The conditions checked along the route, in order, each written once: passage `@when`, choice `@when`, and what each `@cost` needs. */
   conditions: Cond[]
-  /** "ending" if the last passage has @end; "dead-end" if it has no open route on and no @end; "loop" if it stops at a passage already on the route. */
+  /**
+   * "ending" if the last passage has @end; "dead-end" if it has no open route on and no @end; "loop" if it stops at
+   * a passage already on the route. A route whose state is already impossible on arrival at a passage that is not an
+   * ending stops there as a "dead-end" with `satisfiable: false` (nothing past it can be taken either).
+   */
   end: "ending" | "dead-end" | "loop"
   /**
    * False when no state within the schema ranges lets the player take the route: the conditions are checked

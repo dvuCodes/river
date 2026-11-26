@@ -115,8 +115,20 @@ export class MessageMapper {
         return this.user(msg)
       case "result":
         return this.result(msg)
+      case "stream_event":
+        return this.streamEvent(msg)
       default:
         return
+    }
+  }
+
+  /** A partial message (includePartialMessages): text deltas become "text-delta" events; everything else is ignored. */
+  private streamEvent(msg: Obj): void {
+    if (msg.parent_tool_use_id) return
+    const event = isObj(msg.event) ? msg.event : undefined
+    if (event?.type !== "content_block_delta" || !isObj(event.delta)) return
+    if (event.delta.type === "text_delta" && typeof event.delta.text === "string" && event.delta.text) {
+      this.emit({ type: "text-delta", text: event.delta.text })
     }
   }
 

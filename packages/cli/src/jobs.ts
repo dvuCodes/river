@@ -8,6 +8,7 @@ import {
   formatBoard,
   frameCardFiles,
   IMAGE_CARD_W,
+  jobKind,
   jobRenderName,
   listBoards,
   loadBoard,
@@ -28,7 +29,7 @@ import {
   type Job,
   type MarkStatusChange,
 } from "@river/core"
-import type { AgentBackend, AgentEvent, AgentModel } from "@river/agent"
+import type { AgentBackend, AgentEvent, AgentModel, WritingTakeView } from "@river/agent"
 
 interface Out {
   line(s?: string): void
@@ -56,10 +57,36 @@ export interface JobArgs {
   by?: string | undefined
   /** `job approve --yes`: skip the agent's look at its renders. */
   "skip-self-check"?: boolean | undefined
+  /** `job start|revise|approve`: a different model for the look at the renders. */
+  "self-check-model"?: string | undefined
+}
+
+export interface WriteJobArgs {
+  root: string
+  board?: string | undefined
+  mark?: string | undefined
+  job?: string | undefined
+  story?: string | undefined
+  backend?: string | undefined
+  model?: string | undefined
+  /** `write-job accept`: the take variant to keep ("a".."e"). */
+  variant?: string | undefined
+  /** `write-job accept`: do not append a line of the take to .river/voice.md. */
+  "no-exemplar"?: boolean | undefined
+  /** `write-job dismiss`: why, added to .river/voice.md under "Lines we cut". */
+  reason?: string | undefined
+  /** `write-job start`: who asks, "you" by default (writing_request passes its agent). */
+  by?: string | undefined
+  /** `write-job start|revise`: skip the table read turn. */
+  "skip-self-check"?: boolean | undefined
+  /** `write-job start|revise`: a different model for the table read. */
+  "self-check-model"?: string | undefined
 }
 
 const BACKENDS: readonly AgentBackend[] = ["claude-code", "api-key"]
-const MODELS: readonly AgentModel[] = ["claude-sonnet-5-5", "claude-opus-5-5"]
+const DEFAULT_JOB_MODEL = "claude-sonnet-5-5"
+const MODEL_HINT = "a model id: letters, digits and . _ : - only, starting with a letter or digit (for example claude-sonnet-5-5, claude-opus-5-5, claude-haiku-4-5)"
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 
 /** Points around an ellipse, the outline of a circle mark. */
 function ellipse(cx: number, cy: number, rx: number, ry: number, n = 24): number[] {
@@ -118,7 +145,11 @@ export async function cmdMark(
     }
     const mark = await replyToMark(root, o.board, o.mark, "you", text)
     out.line(`${mark.id}  ${mark.status}  ${mark.thread.length} messages${mark.jobId ? `  job ${mark.jobId}` : ""}`)
-    if (mark.jobId && ["answered", "accepted", "open"].includes(mark.status)) out.line(`next: river job revise --root ${root} --job ${mark.jobId}`)
+    if (mark.jobId && ["answered", "accepted", "open"].includes(mark.status)) {
+      const linked = await loadJob(root, mark.jobId).catch(() => undefined)
+      const revCmd = linked && jobKind(linked) === "writing" ? "write-job" : "job"
+      out.line(`next: river ${revCmd} revise --root ${root} --job ${mark.jobId}`)
+    }
     return 0
   }
   await ensureBoard(root, o.board)
@@ -158,8 +189,13 @@ export function terminalText(text: string): string {
 /** Every line goes through terminalText: the job file and the text in it may be the agent's. */
 function printJob(root: string, job: Job, sink: Out): void {
   const out = { line: (s: string) => sink.line(terminalText(s)) }
-  out.line(`job ${job.id}  ${job.status}`)
-  out.line(`  mark ${job.markId} on board ${job.board}, concept concepts/${job.conceptId}/${job.parentJobId ? `, revises ${job.parentJobId}` : ""}`)
+  const isWriting = jobKind(job) === "writing"
+  out.line(`job ${job.id}  ${job.status}${isWriting ? "  (writing)" : ""}`)
+  if (isWriting) {
+    out.line(`  mark ${job.markId} on board ${job.board}${job.storyFile ? `, story ${job.storyFile}` : ""}${job.parentJobId ? `, revises ${job.parentJobId}` : ""}`)
+  } else {
+    out.line(`  mark ${job.markId} on board ${job.board}, concept concepts/${job.conceptId}/${job.parentJobId ? `, revises ${job.parentJobId}` : ""}`)
+  }
   if (job.summary) out.line(`  summary: ${indent(job.summary, "           ")}`)
   if (job.error) out.line(`  error: ${indent(job.error, "         ")}`)
   for (const s of job.scripts ?? []) {
@@ -169,6 +205,61 @@ function printJob(root: string, job: Job, sink: Out): void {
     const png = path.join(root, ".river", "jobs", job.id, jobRenderName(s.variant))
     if (existsSync(png)) out.line(`  render: ${png}`)
   }
+  for (const t of job.takes ?? []) {
+    const caption = t.caption ? ` "${t.caption}"` : ""
+    const lint = `${plural(t.lintErrors ?? 0, "error")}, ${plural(t.lintWarnings ?? 0, "warning")}`
+    out.line(`  take ${t.variant.toUpperCase()}${caption}  ${t.file}  ${lint}${t.accepted ? "  accepted" : ""}`)
+    if (t.summary) out.line(`    summary: ${indent(t.summary, "             ")}`)
+  }
+}
+
+/** Full take details (diff, new diagnostics or staleness error), sanitized for the terminal. */
+function printWritingTakes(views: WritingTakeView[], sink: Out): void {
+  const out = { line: (s = "") => sink.line(terminalText(s)) }
+  for (const v of views) {
+    out.line()
+    out.line(`--- take ${v.variant.toUpperCase()}${v.caption ? ` "${v.caption}"` : ""} (${v.storyFile}) ---`)
+    if (v.error) {
+      out.line(`  error: ${indent(v.error, "         ")}`)
+      continue
+    }
+    if (v.diagnostics.length > 0) {
+      out.line("  new diagnostics:")
+      for (const d of v.diagnostics) out.line(`    ${d.severity.padEnd(6)} ${d.message}  (${d.code})`)
+    }
+    if (v.diff) {
+      out.line("  diff:")
+      for (const l of v.diff.trimEnd().split("\n")) out.line(`    ${l}`)
+    }
+  }
+}
+
+/** An error message when --self-check-model is given and is not a model id, else undefined. */
+function selfCheckModelError(a: { "self-check-model"?: string | undefined }, isValidModel: (v: unknown) => boolean): string | undefined {
+  const m = a["self-check-model"]
+  if (m !== undefined && !isValidModel(m)) return `--self-check-model is ${MODEL_HINT}`
+  return undefined
+}
+
+/** `{ selfCheckModel }` for JobDeps / WritingJobDeps when --self-check-model was given (already validated), else nothing. */
+const selfCheckModelDep = (a: { "self-check-model"?: string | undefined }): { selfCheckModel?: AgentModel } => {
+  const m = a["self-check-model"]
+  return m !== undefined ? { selfCheckModel: m } : {}
+}
+
+function jobSettings(
+  a: { backend?: string | undefined; model?: string | undefined; "self-check-model"?: string | undefined },
+  isValidModel: (v: unknown) => boolean,
+): { model: AgentModel; backend: AgentBackend; apiKey?: string } | string {
+  const backend = (a.backend ?? "claude-code") as AgentBackend
+  const model: AgentModel = a.model ?? DEFAULT_JOB_MODEL
+  if (!BACKENDS.includes(backend)) return `--backend is ${BACKENDS.join(" or ")}`
+  if (!isValidModel(model)) return `--model is ${MODEL_HINT}`
+  const bad = selfCheckModelError(a, isValidModel)
+  if (bad) return bad
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (backend === "api-key" && !apiKey) return "the api-key backend reads ANTHROPIC_API_KEY"
+  return { model, backend, ...(backend === "api-key" && apiKey ? { apiKey } : {}) }
 }
 
 /** --sha256 values as approveJobScripts takes them: a bare hex for a job with one script, "<letter>=<hex>" per option. */
@@ -211,15 +302,6 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
     if (spent.usd > 0) out.line(`cost: $${spent.usd.toFixed(4)} (as Claude reported it; a resumed session reports its earlier turns too)`)
   }
 
-  const settings = () => {
-    const backend = (a.backend ?? "claude-code") as AgentBackend
-    const model = (a.model ?? "claude-sonnet-5-5") as AgentModel
-    if (!BACKENDS.includes(backend)) return `--backend is ${BACKENDS.join(" or ")}`
-    if (!MODELS.includes(model)) return `--model is ${MODELS.join(" or ")}`
-    const apiKey = process.env.ANTHROPIC_API_KEY
-    if (backend === "api-key" && !apiKey) return "the api-key backend reads ANTHROPIC_API_KEY"
-    return { model, backend, ...(backend === "api-key" && apiKey ? { apiKey } : {}) }
-  }
   const afterTurn = (job: Job) => {
     printJob(root, job, out)
     cost()
@@ -229,18 +311,18 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
 
   if (sub === "start") {
     if (!a.mark) return usage("start needs --mark <id>")
-    const s = settings()
+    const s = jobSettings(a, agent.isValidModel)
     if (typeof s === "string") return usage(s)
     const request = { workspaceRoot: root, board: a.board ?? DEFAULT_BOARD, markId: a.mark, ...(a.job ? { jobId: a.job } : {}), ...(a.by ? { by: a.by } : {}), ...s }
-    return afterTurn(await agent.startConceptJob(request, { onEvent }))
+    return afterTurn(await agent.startConceptJob(request, { onEvent, ...selfCheckModelDep(a) }))
   }
 
   if (!a.job) return usage(`${sub ?? "job"} needs --job <id>`)
   switch (sub) {
     case "revise": {
-      const s = settings()
+      const s = jobSettings(a, agent.isValidModel)
       if (typeof s === "string") return usage(s)
-      return afterTurn(await agent.reviseJob(root, a.job, s, { onEvent }))
+      return afterTurn(await agent.reviseJob(root, a.job, s, { onEvent, ...selfCheckModelDep(a) }))
     }
     case "show": {
       printJob(root, await loadJob(root, a.job), out)
@@ -252,13 +334,16 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
         if (!a.sha256?.length) {
           return usage("approve --yes needs --sha256 for every script: run `river job approve --job <id>` first, read the scripts, then pass the sha256 values it printed")
         }
+        const badModel = selfCheckModelError(a, agent.isValidModel)
+        if (badModel) return usage(badModel)
         const shas = shaMap(await loadJob(root, a.job), a.sha256)
         if (typeof shas === "string") return usage(shas)
         const before = await loadJob(root, a.job)
         const apiKey = process.env.ANTHROPIC_API_KEY
+        const lookModel = a["self-check-model"] ?? (before.model as AgentModel)
         // The look at the renders runs as the job ran; an api-key job needs the key from the environment again.
-        const selfCheck = a["skip-self-check"] ? false : before.backend === "api-key" && apiKey ? { model: before.model as AgentModel, backend: before.backend, apiKey } : undefined
-        const job = await agent.approveJobScripts(root, a.job, shas, { onEvent, ...(selfCheck !== undefined ? { selfCheck } : {}) })
+        const selfCheck = a["skip-self-check"] ? false : before.backend === "api-key" && apiKey ? { model: lookModel, backend: before.backend, apiKey } : undefined
+        const job = await agent.approveJobScripts(root, a.job, shas, { onEvent, ...(selfCheck !== undefined ? { selfCheck } : {}), ...selfCheckModelDep(a) })
         printJob(root, job, out)
         cost()
         return job.status === "answered" ? 0 : 1
@@ -292,6 +377,93 @@ export async function cmdJob(sub: string | undefined, a: JobArgs, out: Out, err:
     }
     default:
       return usage("use start, revise, show, approve, accept or dismiss")
+  }
+}
+
+/** `river write-job start|revise|show|accept|dismiss`. Loads @river/agent only here. */
+export async function cmdWriteJob(sub: string | undefined, a: WriteJobArgs, out: Out, err: Out): Promise<number> {
+  const usage = (msg: string) => {
+    err.line(`river write-job: ${msg}`)
+    return 2
+  }
+  if (!sub || !["start", "revise", "show", "accept", "dismiss"].includes(sub)) {
+    return usage("use start, revise, show, accept or dismiss")
+  }
+  if (sub === "start" && !a.mark) return usage("start needs --mark <id>")
+  if (sub !== "start" && !a.job) return usage(`${sub} needs --job <id>`)
+  if (sub === "accept") {
+    if (!a.variant?.trim()) return usage("accept needs --variant <a|b|c|d|e>")
+    if (!/^[a-eA-E]$/.test(a.variant.trim())) return usage(`--variant is one of a, b, c, d, e; got ${JSON.stringify(a.variant)}`)
+  }
+  const root = (await loadProject(a.root)).root
+  const agent = await import("@river/agent")
+  const spent = { usd: 0 }
+  const onEvent = (e: AgentEvent) => progress(e, err, spent)
+  const cost = () => {
+    if (spent.usd > 0) out.line(`cost: $${spent.usd.toFixed(4)} (as Claude reported it; a resumed session reports its earlier turns too)`)
+  }
+  const afterTurn = (job: Job) => {
+    printJob(root, job, out)
+    cost()
+    if (job.status === "answered") out.line(`next: river write-job show --root ${root} --job ${job.id}`)
+    return job.status === "answered" ? 0 : 1
+  }
+  const selfCheckFor = (s: { model: AgentModel; backend: AgentBackend; apiKey?: string }) => {
+    if (a["skip-self-check"]) return false as const
+    if (s.backend === "api-key" && s.apiKey && process.env.RIVER_SELF_CHECK !== "off") return { ...s, model: a["self-check-model"] ?? s.model }
+    return undefined
+  }
+
+  switch (sub) {
+    case "start": {
+      const s = jobSettings(a, agent.isValidModel)
+      if (typeof s === "string") return usage(s)
+      const selfCheck = selfCheckFor(s)
+      const request = {
+        workspaceRoot: root,
+        board: a.board ?? DEFAULT_BOARD,
+        markId: a.mark!,
+        ...(a.job ? { jobId: a.job } : {}),
+        ...(a.by ? { by: a.by } : {}),
+        ...(a.story ? { storyFile: a.story } : {}),
+        ...s,
+      }
+      return afterTurn(await agent.startWritingJob(request, { onEvent, ...(selfCheck !== undefined ? { selfCheck } : {}), ...selfCheckModelDep(a) }))
+    }
+    case "revise": {
+      const s = jobSettings(a, agent.isValidModel)
+      if (typeof s === "string") return usage(s)
+      const selfCheck = selfCheckFor(s)
+      return afterTurn(await agent.reviseWritingJob(root, a.job!, s, { onEvent, ...(selfCheck !== undefined ? { selfCheck } : {}), ...selfCheckModelDep(a) }))
+    }
+    case "show": {
+      const job = await loadJob(root, a.job!)
+      if (jobKind(job) !== "writing") {
+        err.line(`river write-job: job ${a.job} is not a writing job; inspect it with \`river job show --job ${a.job}\``)
+        return 1
+      }
+      printJob(root, job, out)
+      if ((job.takes?.length ?? 0) > 0 && job.headSha) {
+        const views = await agent.readWritingTakes(root, a.job!).catch(() => undefined)
+        if (views && views.length > 0) printWritingTakes(views, out)
+      }
+      if (job.status === "answered" && (job.takes?.length ?? 0) > 0) {
+        out.line(`next: river write-job accept --root ${root} --job ${job.id} --variant ${job.takes![0]!.variant}`)
+      }
+      return 0
+    }
+    case "accept": {
+      const variant = a.variant!.trim().toLowerCase()
+      const job = await agent.acceptWritingJob(root, a.job!, { variant, saveExemplar: !a["no-exemplar"] })
+      printJob(root, job, out)
+      return job.status === "accepted" ? 0 : 1
+    }
+    case "dismiss": {
+      printJob(root, await agent.dismissWritingJob(root, a.job!, a.reason), out)
+      return 0
+    }
+    default:
+      return usage("use start, revise, show, accept or dismiss")
   }
 }
 

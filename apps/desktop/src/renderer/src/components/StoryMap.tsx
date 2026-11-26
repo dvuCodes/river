@@ -20,6 +20,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { OpenStateDTO, PassageDTO, StoryDTO } from "../../../shared/api"
 import { NODE_W, autoLayout, estimateHeight } from "../layout"
 import { cx } from "../util"
+import { reconcileNodes, sameArray, sameSet } from "./reconcile"
 
 export interface Highlight {
   passages: Set<string>
@@ -100,6 +101,49 @@ function GhostCard({ data }: NodeProps<GhostNode>) {
 
 const nodeTypes: NodeTypes = { passage: PassageCard, ghost: GhostCard } as unknown as NodeTypes
 
+type MapNode = PassageNode | GhostNode
+
+/** A node's data is unchanged: same passage object and the same overlay flags. */
+function sameNodeData(a: MapNode, b: MapNode): boolean {
+  if (a.type === "ghost" || b.type === "ghost") return a.type === "ghost" && b.type === "ghost" && a.data.name === b.data.name
+  const x = a.data
+  const y = b.data
+  return (
+    x.passage === y.passage &&
+    x.selected === y.selected &&
+    x.dim === y.dim &&
+    x.closed === y.closed &&
+    sameArray(x.closedChoices, y.closedChoices) &&
+    sameSet(x.litChoices, y.litChoices)
+  )
+}
+
+interface EdgeColors {
+  danger: string
+  accent: string
+  edge: string
+}
+
+/** The theme colours edges are drawn in, read from the CSS variables. */
+function readEdgeColors(): EdgeColors {
+  const css = getComputedStyle(document.documentElement)
+  const color = (name: string) => css.getPropertyValue(name).trim() || "#888"
+  return { danger: color("--danger"), accent: color("--accent"), edge: color("--edge") }
+}
+
+/** Edge colours, read once and again only when the OS switches between light and dark. */
+function useEdgeColors(): EdgeColors {
+  const [colors, setColors] = useState(readEdgeColors)
+  useEffect(() => {
+    const mq = window.matchMedia?.("(prefers-color-scheme: dark)")
+    if (!mq) return
+    const update = () => setColors(readEdgeColors())
+    mq.addEventListener("change", update)
+    return () => mq.removeEventListener("change", update)
+  }, [])
+  return colors
+}
+
 export interface StoryMapProps {
   story: StoryDTO
   selectedId?: string | undefined
@@ -122,19 +166,37 @@ function MapInner(props: StoryMapProps) {
     fileRef.current = story.file
     positions.current = {}
   }
-  positions.current = autoLayout(story, positions.current)
+  // Laid out once per story; drags write into positions.current, which the next layout keeps.
+  const layout = useMemo(() => {
+    positions.current = autoLayout(story, positions.current)
+    return positions.current
+  }, [story])
+  const colors = useEdgeColors()
 
-  const built = useMemo(() => {
-    const css = getComputedStyle(document.documentElement)
-    const color = (name: string) => css.getPropertyValue(name).trim() || "#888"
-    const ns: (PassageNode | GhostNode)[] = []
-    const es: Edge[] = []
+  /** Missing targets go in their own column right of the map, so they never sit on a card. Placed once per layout. */
+  const ghostNodes = useMemo(() => {
     const ghosts = new Map<string, GhostNode>()
-    // Missing targets go in their own column right of the map, so they never sit on a card.
-    const ghostX = Math.max(0, ...Object.values(positions.current).map(([px]) => px)) + NODE_W + 96
+    const ghostX = Math.max(0, ...Object.values(layout).map(([px]) => px)) + NODE_W + 96
     const usedGhostY: number[] = []
     for (const p of story.passages) {
-      const [x, y] = positions.current[p.id] ?? [0, 0]
+      const [, y] = layout[p.id] ?? [0, 0]
+      p.choices.forEach((c, i) => {
+        if (c.targetId) return
+        const target = `missing:${c.target}`
+        if (ghosts.has(target)) return
+        let gy = y + 30 + i * 24
+        while (usedGhostY.some((u) => Math.abs(u - gy) < 52)) gy += 52
+        usedGhostY.push(gy)
+        ghosts.set(target, { id: target, type: "ghost", position: { x: ghostX, y: gy }, data: { name: c.target }, draggable: false })
+      })
+    }
+    return [...ghosts.values()]
+  }, [story, layout])
+
+  const builtNodes = useMemo(() => {
+    const ns: MapNode[] = []
+    for (const p of story.passages) {
+      const [x, y] = layout[p.id] ?? [0, 0]
       const closedChoices = open?.choices[p.id]
       const lit = highlight
         ? new Set(p.choices.map((_, i) => i).filter((i) => highlight.edges.has(`${p.id}:${i}`)))
@@ -153,27 +215,22 @@ function MapInner(props: StoryMapProps) {
           litChoices: lit,
         },
       })
+    }
+    ns.push(...ghostNodes)
+    return ns
+    // The selection only changes node data, so edges are built apart and do not depend on it.
+  }, [story, layout, ghostNodes, selectedId, highlight, open])
+
+  const edges = useMemo(() => {
+    const es: Edge[] = []
+    for (const p of story.passages) {
+      const closedChoices = open?.choices[p.id]
       p.choices.forEach((c, i) => {
         const id = `${p.id}:${i}`
-        let target = c.targetId
-        if (!target) {
-          target = `missing:${c.target}`
-          if (!ghosts.has(target)) {
-            let gy = y + 30 + i * 24
-            while (usedGhostY.some((u) => Math.abs(u - gy) < 52)) gy += 52
-            usedGhostY.push(gy)
-            ghosts.set(target, {
-              id: target,
-              type: "ghost",
-              position: { x: ghostX, y: gy },
-              data: { name: c.target },
-              draggable: false,
-            })
-          }
-        }
+        const target = c.targetId ?? `missing:${c.target}`
         const isLit = highlight?.edges.has(id) ?? false
         const isDim = (highlight && !isLit) || closedChoices?.[i] === false
-        const stroke = !c.targetId ? color("--danger") : isLit ? color("--accent") : color("--edge")
+        const stroke = !c.targetId ? colors.danger : isLit ? colors.accent : colors.edge
         es.push({
           id,
           source: p.id,
@@ -190,14 +247,12 @@ function MapInner(props: StoryMapProps) {
         })
       })
     }
-    ns.push(...ghosts.values())
-    return { nodes: ns, edges: es }
-    // positions.current is derived from story; rebuild on story/selection/overlay changes only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [story, selectedId, highlight, open])
+    return es
+  }, [story, highlight, open, colors])
 
-  const [nodes, setNodes] = useState(built.nodes)
-  useEffect(() => setNodes(built.nodes), [built])
+  const [nodes, setNodes] = useState<MapNode[]>(builtNodes)
+  // Unchanged nodes keep their objects (and React Flow's measured size), so a click redraws two cards, not all of them.
+  useEffect(() => setNodes((prev) => reconcileNodes(prev, builtNodes, sameNodeData)), [builtNodes])
 
   // Fit once the cards have real sizes. In xyflow v13 a numeric padding is pixels, not a fraction.
   const measured = useNodesInitialized()
@@ -235,7 +290,7 @@ function MapInner(props: StoryMapProps) {
   return (
     <ReactFlow
       nodes={nodes}
-      edges={built.edges}
+      edges={edges}
       nodeTypes={nodeTypes}
       onNodesChange={(changes) => setNodes((ns) => changes.applyTo(ns))}
       onNodeDragStop={onDragStop}

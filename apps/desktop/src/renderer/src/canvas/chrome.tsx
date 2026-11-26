@@ -507,8 +507,11 @@ export function TextPanel(props: { title: string; sub: string; load(): Promise<s
   )
 }
 
-/** Dismiss a whole answer; the reason, when given, joins the project brief so later answers avoid it. */
-export function DismissDialog(props: { onDismiss(reason: string): Promise<void>; onCancel(): void }) {
+/**
+ * Dismiss a whole answer; the reason, when given, joins the project brief so later answers avoid it (for a writing
+ * job, .river/voice.md under "Lines we cut").
+ */
+export function DismissDialog(props: { writing?: boolean; onDismiss(reason: string): Promise<void>; onCancel(): void }) {
   const [reason, setReason] = useState("")
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -529,8 +532,17 @@ export function DismissDialog(props: { onDismiss(reason: string): Promise<void>;
           <h2>Dismiss this answer</h2>
         </header>
         <label className="field">
-          <span>Why not? Optional; it goes into the project brief, so later answers avoid it.</span>
-          <input value={reason} placeholder="too dark, wrong era, the dog is missing…" autoFocus onChange={(e) => setReason(e.target.value)} />
+          <span>
+            {props.writing
+              ? "Why not? Optional; it goes into the voice notes (.river/voice.md), so later takes avoid it."
+              : "Why not? Optional; it goes into the project brief, so later answers avoid it."}
+          </span>
+          <input
+            value={reason}
+            placeholder={props.writing ? "too wordy, she would never say that, the joke lands flat…" : "too dark, wrong era, the dog is missing…"}
+            autoFocus
+            onChange={(e) => setReason(e.target.value)}
+          />
         </label>
         {err && <p className="err-note">{err}</p>}
         <footer className="dialog-foot">
@@ -593,13 +605,19 @@ const STATUS_LABEL: Record<MarkStatus, string> = {
   dismissed: "dismissed",
 }
 
+export type JobKindName = "concept" | "writing"
+
 export function MarkPanel(props: {
   mark: Mark
   answers: number
   cardTitle(id: string): string
+  /** The mark is on a passage card: asking the story writer is the likely request. */
+  onPassage: boolean
   onAsk(): Promise<void>
+  onAskWriter(): Promise<void>
   onReply(text: string): Promise<void>
-  onRevise(jobId: string): Promise<void>
+  /** Revise the mark's latest answer; a writing job and a concept job are revised by different calls. */
+  onRevise(jobId: string, kind: JobKindName): Promise<void>
   /** Close a mark that follows no job: dismissed (the text says why) or accepted as resolved. */
   onSettle(status: "dismissed" | "accepted", text: string): Promise<void>
   onShowAnswer(): void
@@ -607,10 +625,11 @@ export function MarkPanel(props: {
   onClose(): void
 }) {
   const { mark: m } = props
-  const [asking, setAsking] = useState(false)
+  const [asking, setAsking] = useState<JobKindName | null>(null)
   const [reply, setReply] = useState("")
   const [sending, setSending] = useState(false)
   const [revisable, setRevisable] = useState(false)
+  const [jobKind, setJobKind] = useState<JobKindName>("concept")
   const [dismissing, setDismissing] = useState(false)
   const [why, setWhy] = useState("")
   const [settling, setSettling] = useState(false)
@@ -628,7 +647,15 @@ export function MarkPanel(props: {
   useEffect(() => {
     let live = true
     if (!m.jobId) setRevisable(false)
-    else window.river.jobGet(m.jobId).then((d) => live && setRevisable(d.revisable), () => live && setRevisable(false))
+    else
+      window.river.jobGet(m.jobId).then(
+        (d) => {
+          if (!live) return
+          setRevisable(d.revisable)
+          setJobKind(d.job.kind === "writing" ? "writing" : "concept")
+        },
+        () => live && setRevisable(false),
+      )
     return () => {
       live = false
     }
@@ -682,22 +709,39 @@ export function MarkPanel(props: {
           </li>
         ))}
       </ul>
-      {m.status === "open" && (
-        <button
-          className="btn btn-primary mark-ask"
-          data-action="ask-concept"
-          disabled={asking}
-          onClick={() => {
-            setAsking(true)
-            void props.onAsk().finally(() => setAsking(false))
-          }}
-        >
-          {asking ? "Starting…" : "✦ Ask concept artist"}
-        </button>
-      )}
+      {m.status === "open" &&
+        (() => {
+          const ask = (kind: JobKindName) => {
+            setAsking(kind)
+            void (kind === "writing" ? props.onAskWriter() : props.onAsk()).finally(() => setAsking(null))
+          }
+          const concept = (
+            <button key="concept" className={cx("btn mark-ask", !props.onPassage && "btn-primary")} data-action="ask-concept" disabled={asking !== null} onClick={() => ask("concept")}>
+              {asking === "concept" ? "Starting…" : "✦ Ask concept artist"}
+            </button>
+          )
+          const writer = (
+            <button
+              key="writer"
+              className={cx("btn mark-ask", props.onPassage && "btn-primary")}
+              data-action="ask-writer"
+              disabled={asking !== null}
+              title="The story writer drafts takes of the passages this mark is on"
+              onClick={() => ask("writing")}
+            >
+              {asking === "writing" ? "Starting…" : "✦ Ask story writer"}
+            </button>
+          )
+          // The primary request goes first.
+          return <div className="mark-asks">{props.onPassage ? [writer, concept] : [concept, writer]}</div>
+        })()}
       {m.status === "working" && !claim && (
         <p className="mark-working">
-          {m.jobId ? "✦ The concept artist is on it. Its card beside the mark shows each step." : `✦ ${m.claimedBy ?? "An agent"} took this ${m.claimedAt ? shortTime(m.claimedAt) : ""} and has gone quiet; another agent may take it over.`}
+          {m.jobId
+            ? jobKind === "writing"
+              ? "✦ The story writer is on it. Its note beside the mark shows each step."
+              : "✦ The concept artist is on it. Its card beside the mark shows each step."
+            : `✦ ${m.claimedBy ?? "An agent"} took this ${m.claimedAt ? shortTime(m.claimedAt) : ""} and has gone quiet; another agent may take it over.`}
         </p>
       )}
       <form
@@ -724,7 +768,7 @@ export function MarkPanel(props: {
         </button>
       </form>
       {revisable && m.jobId && (
-        <button className="btn btn-primary mark-ask" data-action="revise" onClick={() => void props.onRevise(m.jobId!).then(() => setRevisable(false))}>
+        <button className="btn btn-primary mark-ask" data-action="revise" data-job-kind={jobKind} onClick={() => void props.onRevise(m.jobId!, jobKind).then(() => setRevisable(false))}>
           ✦ Revise the answer
         </button>
       )}

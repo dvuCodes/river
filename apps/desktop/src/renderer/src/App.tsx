@@ -163,6 +163,7 @@ export function App() {
         encryptionAvailable: false,
         backend: "api-key",
         backendChosen: false,
+        knownModels: [],
         model: "claude-opus-5-5",
         claudeCode: null,
         selfCheck: true,
@@ -171,9 +172,16 @@ export function App() {
     return window.river.onNavigate((v) => setView(v))
   }, [applyProject])
 
-  // Coming back to the window (e.g. from the Claude sign-in terminal): check the sign-in again.
+  // Coming back to the window (e.g. from the Claude sign-in terminal): check the sign-in again, but only while it
+  // matters (Settings is open, or Claude Code is not signed in). Each check starts a `claude auth status` process, so
+  // an Alt-Tab must not start one. Refs keep the listener from being re-added on every status change.
+  const settingsOpenRef = useRef(settingsOpen)
+  settingsOpenRef.current = settingsOpen
+  const agentStatusRef = useRef(agentStatus)
+  agentStatusRef.current = agentStatus
   useEffect(() => {
     const onFocus = () => {
+      if (!settingsOpenRef.current && agentStatusRef.current?.claudeCode?.loggedIn) return
       void window.river.refreshAgentStatus().then(setAgentStatus, () => {})
     }
     window.addEventListener("focus", onFocus)
@@ -285,6 +293,7 @@ export function App() {
         ) : view === "story-map" ? (
           <StoryMapView
             board={openBoard}
+            hasCheckData={Boolean(project.hasCheckData)}
             stories={project.stories}
             storyRel={storyRel}
             onStory={setStoryRel}

@@ -43,14 +43,33 @@ export function gitTry(root: string, args: string[], opts: GitOptions = {}): Pro
   return git(root, args, opts).catch(() => null)
 }
 
-/** Identity for commit-tree when the repo has none configured (River's commits are local only). */
+/** identityEnv per resolved root: two `git config` runs per commit add up over a job's many commits. */
+const identityCache = new Map<string, Promise<NodeJS.ProcessEnv>>()
+
+/** Forget cached identities (after the user sets user.name or user.email, and in tests). */
+export function clearIdentityCache(): void {
+  identityCache.clear()
+}
+
+/**
+ * Identity for commit-tree when the repo has none configured (River's commits are local only). Cached per
+ * resolved root for the life of the process; `clearIdentityCache` drops it.
+ */
 export async function identityEnv(root: string): Promise<NodeJS.ProcessEnv> {
-  const env: NodeJS.ProcessEnv = {}
-  const name = await gitTry(root, ["config", "--get", "user.name"])
-  const email = await gitTry(root, ["config", "--get", "user.email"])
-  if (!name?.trim() && !process.env.GIT_AUTHOR_NAME) env.GIT_AUTHOR_NAME = env.GIT_COMMITTER_NAME = "river"
-  if (!email?.trim() && !process.env.GIT_AUTHOR_EMAIL) env.GIT_AUTHOR_EMAIL = env.GIT_COMMITTER_EMAIL = "river@localhost"
-  return env
+  const key = path.resolve(root)
+  let pending = identityCache.get(key)
+  if (!pending) {
+    pending = (async () => {
+      const env: NodeJS.ProcessEnv = {}
+      const [name, email] = await Promise.all([gitTry(root, ["config", "--get", "user.name"]), gitTry(root, ["config", "--get", "user.email"])])
+      if (!name?.trim() && !process.env.GIT_AUTHOR_NAME) env.GIT_AUTHOR_NAME = env.GIT_COMMITTER_NAME = "river"
+      if (!email?.trim() && !process.env.GIT_AUTHOR_EMAIL) env.GIT_AUTHOR_EMAIL = env.GIT_COMMITTER_EMAIL = "river@localhost"
+      return env
+    })()
+    identityCache.set(key, pending)
+    pending.catch(() => identityCache.delete(key))
+  }
+  return { ...(await pending) }
 }
 
 /** Run `fn` with a throwaway index file outside the working tree, so the user's index is never touched. */

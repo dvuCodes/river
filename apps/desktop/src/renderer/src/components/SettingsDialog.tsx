@@ -1,10 +1,20 @@
-import { useEffect, useRef, useState } from "react"
+import { type KeyboardEvent, useEffect, useRef, useState } from "react"
 import type { AgentBackend } from "@river/agent"
 import type { AgentStatus } from "../../../shared/api"
+import { modelLabel } from "../models"
 import { errorText } from "../util"
 import { BACKEND_LABEL, claudeCodeLine } from "../views/AgentView"
 
 const SETUP_URL = "https://code.claude.com/docs/en/setup"
+const CUSTOM = "__custom__"
+
+/** Enter in a text field saves it (by blurring) instead of submitting the dialog's API-key form. */
+const blurOnEnter = (e: KeyboardEvent<HTMLInputElement>) => {
+  if (e.key === "Enter") {
+    e.preventDefault()
+    e.currentTarget.blur()
+  }
+}
 
 export function SettingsDialog(props: { status: AgentStatus | null; onStatus(s: AgentStatus): void; onClose(): void }) {
   const { status, onStatus, onClose } = props
@@ -13,6 +23,11 @@ export function SettingsDialog(props: { status: AgentStatus | null; onStatus(s: 
   const [err, setErr] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [checking, setChecking] = useState(false)
+  const known = status?.knownModels ?? []
+  const savedModel = status?.model ?? ""
+  const [customModel, setCustomModel] = useState(savedModel && !known.includes(savedModel) ? savedModel : "")
+  const [customOpen, setCustomOpen] = useState(Boolean(savedModel) && !known.includes(savedModel))
+  const [selfCheckModel, setSelfCheckModel] = useState(status?.selfCheckModel ?? "")
   const ref = useRef<HTMLDialogElement>(null)
 
   useEffect(() => {
@@ -50,6 +65,22 @@ export function SettingsDialog(props: { status: AgentStatus | null; onStatus(s: 
     setChecking(true)
     await act(() => window.river.setAgentPrefs({ claudePath }))
     setChecking(false)
+  }
+  const pickModel = (v: string) => {
+    if (v === CUSTOM) {
+      setCustomOpen(true)
+      return
+    }
+    setCustomOpen(false)
+    void act(() => window.river.setAgentPrefs({ model: v }))
+  }
+  const saveCustomModel = () => {
+    const t = customModel.trim()
+    if (t && t !== savedModel) void act(() => window.river.setAgentPrefs({ model: t }), `Model set to ${t}.`)
+  }
+  const saveSelfCheckModel = () => {
+    const t = selfCheckModel.trim()
+    if (t !== (status?.selfCheckModel ?? "")) void act(() => window.river.setAgentPrefs({ selfCheckModel: t }), t ? `Self-check turns use ${t}.` : "Self-check turns use the main model.")
   }
   const signIn = () =>
     act(() => window.river.openClaudeSignIn(), "A terminal window opened with Claude Code's own sign-in. Finish there, then come back here (or press Refresh).")
@@ -133,13 +164,59 @@ export function SettingsDialog(props: { status: AgentStatus | null; onStatus(s: 
             {status && !status.encryptionAvailable && <p className="err-note">Secure storage is not available on this system, so a key cannot be saved.</p>}
           </>
         )}
+        <label className="field">
+          <span>Model</span>
+          <select data-setting="model" value={customOpen ? CUSTOM : savedModel} onChange={(e) => pickModel(e.target.value)}>
+            {known.map((m) => (
+              <option key={m} value={m}>
+                {modelLabel(m)} ({m})
+              </option>
+            ))}
+            <option value={CUSTOM}>Custom model ID…</option>
+          </select>
+        </label>
+        {customOpen && (
+          <label className="field">
+            <span>Custom model ID</span>
+            <input
+              type="text"
+              data-setting="custom-model"
+              spellCheck={false}
+              value={customModel}
+              onChange={(e) => setCustomModel(e.target.value)}
+              onBlur={saveCustomModel}
+              onKeyDown={blurOnEnter}
+              placeholder="e.g. claude-sonnet-5-5"
+            />
+          </label>
+        )}
+        <label className="field">
+          <span>Self-check model (optional)</span>
+          <input
+            type="text"
+            data-setting="self-check-model"
+            spellCheck={false}
+            list="river-known-models"
+            value={selfCheckModel}
+            onChange={(e) => setSelfCheckModel(e.target.value)}
+            onBlur={saveSelfCheckModel}
+            onKeyDown={blurOnEnter}
+            placeholder="Same as main model, e.g. claude-haiku-4-5"
+          />
+          <datalist id="river-known-models">
+            {known.map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+        </label>
         <label className="radio-row self-check-row">
           <input type="checkbox" data-setting="self-check" checked={status?.selfCheck ?? true} onChange={(e) => void act(() => window.river.setAgentPrefs({ selfCheck: e.target.checked }))} />
           <span>Look at the renders before answering</span>
         </label>
         <p className="dialog-note">
-          After Godot draws a concept, the agent takes one more short turn to look at the pictures and fix its note and captions. It uses the
-          backend and model above. Turn it off to answer as soon as the renders are done.
+          After Godot draws a concept, the agent takes one more short turn to look at the pictures and fix its note and captions; a writing job
+          reads its takes back the same way (the table read). These turns use the backend above and the self-check model, or the main model when
+          none is set. Turn it off to answer as soon as the renders are done.
         </p>
         {err && <p className="err-note">{err}</p>}
         {note && <p className="ok-note">{note}</p>}

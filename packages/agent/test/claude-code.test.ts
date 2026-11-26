@@ -47,6 +47,7 @@ describe("claude-code arguments", () => {
     expect(args[0]).toBe("-p")
     expect(flag(args, "--output-format")).toBe("stream-json")
     expect(flag(args, "--verbose")).toBe(true)
+    expect(flag(args, "--include-partial-messages")).toBe(true)
     expect(flag(args, "--model")).toBe("claude-sonnet-5-5")
     expect(flag(args, "--permission-mode")).toBe("default")
     expect(flag(args, "--permission-prompts")).toBe("host")
@@ -85,7 +86,7 @@ describe("claude-code arguments", () => {
       "--root",
       "/game",
       "--tools",
-      "project_info,story_list,story_read,story_lint,story_paths,playtest_run,frames_list,review_list,plan_list,plan_read,board_read,marks_open,brief_read,card_read,mark_read,card_view,story_write_passage,story_add_passage",
+      "project_info,story_list,story_read,story_lint,story_paths,playtest_run,frames_list,review_list,plan_list,plan_read,board_read,marks_open,brief_read,card_read,mark_read,card_view,voice_read,story_outline,story_read_passage,story_search,story_sample_transcripts,story_pacing,story_simulate,story_write_passage,story_add_passage,story_rename_passage,story_delete_passage,story_batch_edit,voice_note",
       "--approval-pipe",
       "\\\\.\\pipe\\river-test",
     ])

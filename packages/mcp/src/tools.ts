@@ -5,11 +5,14 @@
  * Every path argument is relative to the project root and goes through core `safePath`.
  * Handlers throw on bad input; the MCP server turns a throw into an `isError` tool result.
  */
-import { existsSync } from "node:fs"
+import { createHash } from "node:crypto"
+import { existsSync, realpathSync } from "node:fs"
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { conceptScriptProblem, createGodotAdapter, lintConceptScript } from "@river/adapter-godot"
 import {
+  addVoiceCut,
+  addVoiceExemplar,
   answerStart,
   assertConceptFile,
   assertConceptId,
@@ -18,16 +21,24 @@ import {
   cardHeight,
   cardImageFile,
   cardRect,
+  choiceTarget,
   claimMark,
   conceptCaptionName,
   conceptPath,
+  createStoryIndex,
+  CUT_HEADING,
   DEFAULT_BOARD,
   deleteCard,
   deleteEdge,
+  deletePassage,
   elementRect,
   formatBoard,
   formatClosed,
+  formatEffects,
+  formatPacingReport,
+  formatSimulationReport,
   formatPathList,
+  initialState,
   interruptPaths,
   summarizePaths,
   frameCardFiles,
@@ -35,31 +46,45 @@ import {
   formatCard,
   formatMark,
   IMAGE_CARD_W,
+  isInterrupt,
+  isStorylet,
   jobRenderName,
+  LANDED_HEADING,
+  lintNarrative,
   listBoards,
   listJobs,
   loadBoard,
   loadCard,
   loadJob,
   markRect,
+  mulberry32,
   newBoardId,
+  noPassageError,
   NOTE_CARD_W,
   occupiedRects,
   openMarks,
   optionLabels,
+  pacingReport,
   parseConceptScriptName,
+  parseProseBlocks,
   placeRow,
   readBrief,
+  readVoice,
+  renamePassage,
+  resolveAdapter,
+  renderProse,
   replyToMark,
   RESERVED_AUTHORS,
   saveCard,
   saveEdge,
   assertEditAllowed,
   captureShot,
+  captureShots,
   contentPassages,
   createPlaytest,
   formatCond,
   lint,
+  lintStoryInWorkspace,
   listCaptures,
   listPlans,
   listStories,
@@ -67,6 +92,7 @@ import {
   loadPlan,
   loadSchema,
   loadStory,
+  loadStoryWorkspace,
   normalizeRel,
   parseTwee3,
   passageById,
@@ -74,15 +100,22 @@ import {
   proseText,
   reply,
   safePath,
+  sampleTranscripts,
   savePlan,
   saveStory,
   setPlanStatus,
+  simulateStory,
+  templateRefs,
   updatePassageText,
+  VOICE_FILE,
+  voiceSection,
+  writeAtomic,
+  writeTwee3,
 } from "@river/core"
-import type { Board, Card, ChangePlan, Diagnostic, EngineAdapter, Job, Mark, Passage, Project, StateSchema, Story } from "@river/core"
+import type { Board, Card, ChangePlan, Choice, Cond, Diagnostic, EngineAdapter, Job, Mark, Passage, Project, StateSchema, Story, StoryIndex } from "@river/core"
 import { z } from "zod"
 import { unifiedDiff } from "./diff"
-import { launchConceptJob, type JobLauncher } from "./jobs"
+import { launchConceptJob, launchWritingJob, type JobLauncher } from "./jobs"
 
 export const READ_TOOL_NAMES = [
   "project_info",
@@ -90,7 +123,14 @@ export const READ_TOOL_NAMES = [
   "story_read",
   "story_lint",
   "story_paths",
+  "story_outline",
+  "story_read_passage",
+  "story_search",
+  "story_pacing",
+  "story_sample_transcripts",
+  "story_simulate",
   "playtest_run",
+  "voice_read",
   "frames_list",
   "review_list",
   "plan_list",
@@ -106,6 +146,10 @@ export const READ_TOOL_NAMES = [
 export const WRITE_TOOL_NAMES = [
   "story_write_passage",
   "story_add_passage",
+  "story_rename_passage",
+  "story_delete_passage",
+  "story_batch_edit",
+  "voice_note",
   "review_reply",
   "plan_save",
   "implement_edit",
@@ -121,6 +165,8 @@ export const WRITE_TOOL_NAMES = [
   "board_update_note",
   "board_remove_card",
   "concept_request",
+  "writing_request",
+  "writing_write",
 ] as const
 
 export type RiverToolName = (typeof READ_TOOL_NAMES)[number] | (typeof WRITE_TOOL_NAMES)[number]
@@ -156,17 +202,26 @@ export interface RiverToolsOptions {
   conceptId?: string
   /** How concept_request starts a job in its own process. Default: River's CLI, `river job start`, detached. */
   jobLauncher?: JobLauncher
+  /**
+   * The writing job this server works for. writing_write exists only when this is set, and writes only
+   * .river/writing/<writingId>/take_<variant>.json. Cannot be set together with conceptId.
+   */
+  writingId?: string
+  /** How writing_request starts a job in its own process. Default: River's CLI, `river write-job start`, detached. */
+  writingJobLauncher?: JobLauncher
 }
 
-/** The engine adapter for a project, by manifest.engine. */
+/**
+ * The engine adapter for a project: Godot's for engine "godot", else the command adapter when river.json sets
+ * `adapter.<engine>.command` (or the engine is "command"). Throws when there is neither.
+ */
 export function adapterFor(project: Project): EngineAdapter {
-  const engine = project.manifest.engine
-  if (engine === "godot") return createGodotAdapter()
-  if (engine === "none" || engine === "") {
-    throw new Error(`river: this project has engine "${engine}" in river.json, so it cannot capture frames (set "engine": "godot" and adapter.godot.bin)`)
-  }
-  throw new Error(`river: unknown engine "${engine}" in river.json; supported: godot`)
+  return resolveAdapter(project, [createGodotAdapter()])
 }
+
+/** A model id River can pass to `claude --model`: letters, digits and . _ : - only, never a flag. */
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/
+const modelId = z.string().regex(MODEL_ID, "a model id: letters, digits and . _ : - (at most 100), not starting with a symbol")
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 
@@ -185,6 +240,8 @@ function schemaLines(schema: StateSchema): string[] {
   })
 }
 const formatDiag = (d: Diagnostic) => `${d.severity.padEnd(6)} ${d.message}`
+/** A narrative note with its rule code, so the reader can tell a false-choice from an unused-state-var. */
+const formatNote = (d: Diagnostic) => `${formatDiag(d)}  (${d.code})`
 const diagKey = (d: Diagnostic) => `${d.severity}|${d.code}|${d.message}`
 
 const escapeHeaderPart = (s: string) => s.replace(/[\\[\]{}]/g, (c) => `\\${c}`)
@@ -200,6 +257,271 @@ function parseOnePassage(name: string, tags: string[], rawText: string, file: st
   const passage = parseTwee3(`${header}\n${body}\n`, file).story.passages[0]
   if (!passage || passage.name !== name) throw new Error(`cannot use "${name}" as a passage name`)
   return passage
+}
+
+const wordCount = (text: string) => (text.match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? []).length
+
+function condVars(c: Cond | undefined, out: Set<string>): void {
+  if (!c) return
+  switch (c.kind) {
+    case "cmp": out.add(c.variable); break
+    case "and":
+    case "or": c.terms.forEach((t) => condVars(t, out)); break
+    case "not": condVars(c.term, out); break
+    case "visit": break
+  }
+}
+
+/** Where a passage reads or writes each state variable: variable -> places ("@when", "choice 1 @cost", "prose {when}"). */
+function variableUses(p: Passage): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  const add = (v: string, where: string) => {
+    const list = out.get(v)
+    if (!list) out.set(v, [where])
+    else if (!list.includes(where)) list.push(where)
+  }
+  const cond = (c: Cond | undefined, where: string) => {
+    const vars = new Set<string>()
+    condVars(c, vars)
+    vars.forEach((v) => add(v, where))
+  }
+  cond(p.when, "@when")
+  p.onEnter.forEach((e) => add(e.variable, "@set"))
+  const refs = templateRefs(proseText(p.text))
+  refs.conds.forEach((c) => cond(c, "prose {when}"))
+  refs.variables.forEach((v) => add(v, "prose {var}"))
+  p.choices.forEach((c, i) => {
+    cond(c.when, `choice ${i} @when`)
+    c.cost.forEach((e) => add(e.variable, `choice ${i} @cost`))
+    c.set.forEach((e) => add(e.variable, `choice ${i} @set`))
+  })
+  return out
+}
+
+/** `@meta` values as they are written: key=value, with a string quoted unless it is a bare word. */
+function formatMeta(meta: Record<string, number | string | boolean>): string {
+  return Object.entries(meta)
+    .map(([k, v]) => {
+      const bare = typeof v !== "string" || (/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(v) && v !== "true" && v !== "false")
+      return `${k}=${bare ? String(v) : JSON.stringify(v)}`
+    })
+    .join(", ")
+}
+
+/** A passage's rule block as written rules: "@when energy >= 20", "@set bond += 10", "@shot pond", "@meta k=v", "@end". */
+function passageRules(p: Passage): string[] {
+  const out: string[] = []
+  if (p.when) out.push(`@when ${formatCond(p.when)}`)
+  if (p.onEnter.length > 0) out.push(`@set ${formatEffects(p.onEnter)}`)
+  if (p.auto) out.push("@auto")
+  if (p.priority !== undefined) out.push(`@priority ${p.priority}`)
+  if (p.weight !== undefined) out.push(`@weight ${p.weight}`)
+  if (p.cooldown !== undefined) out.push(`@cooldown ${p.cooldown}`)
+  if (p.shot !== undefined) out.push(`@shot ${p.shot}`)
+  if (p.meta && Object.keys(p.meta).length > 0) out.push(`@meta ${formatMeta(p.meta)}`)
+  for (const c of p.cues ?? []) out.push(`@cue ${c.name}${c.args ? ` ${c.args}` : ""}`)
+  if (p.isEnding) out.push("@end")
+  return out
+}
+
+/** The rules written after a link: "@cost treats 1", "@set bond -= 5", "@when treats >= 1", "@once", "@hint \"...\"". */
+function choiceRules(c: Choice): string[] {
+  const out: string[] = []
+  if (c.cost.length > 0) out.push(`@cost ${c.cost.map((e) => `${e.variable} ${typeof e.amount === "number" ? -e.amount : String(e.amount)}`).join(", ")}`)
+  if (c.set.length > 0) out.push(`@set ${formatEffects(c.set)}`)
+  if (c.when) out.push(`@when ${formatCond(c.when)}`)
+  if (c.once) out.push("@once")
+  if (c.hint !== undefined) out.push(`@hint ${JSON.stringify(c.hint)}`)
+  if (c.meta && Object.keys(c.meta).length > 0) out.push(`@meta ${formatMeta(c.meta)}`)
+  for (const cue of c.cues ?? []) out.push(`@cue ${cue.name}${cue.args ? ` ${cue.args}` : ""}`)
+  return out
+}
+
+/** "1: Throw a treat -> Treat (id treat)  @cost treats 1": where the choice leads, a broken link marked MISSING. */
+function choiceLine(story: Story, c: Choice, i: number, index: StoryIndex): string {
+  const to = choiceTarget(story, c.target, index)
+  const dest = to.kind === "passage" ? `${c.target} (id ${to.passage.id})` : to.kind === "return" ? `${c.target} (back to the interrupted passage)` : `${c.target} (MISSING: no such passage)`
+  const rules = choiceRules(c)
+  return `${i}: ${c.label} -> ${dest}${rules.length > 0 ? `  ${rules.join(" ")}` : ""}`
+}
+
+/** Every link to a passage that does not exist: `text` is "From [label] -> Target"; `key` names the passage by id, which a rename keeps. */
+function brokenLinks(story: Story): { key: string; text: string }[] {
+  const index = createStoryIndex(story)
+  const out: { key: string; text: string }[] = []
+  for (const p of contentPassages(story)) {
+    for (const c of p.choices) {
+      if (choiceTarget(story, c.target, index).kind === "missing") out.push({ key: `${p.id}\n${c.label}\n${c.target}`, text: `${p.name} [${c.label}] -> ${c.target}` })
+    }
+  }
+  return out
+}
+
+/** The broken links `after` has that `before` did not, as "From [label] -> Target". */
+function newlyBrokenLinks(before: Story, after: Story): string[] {
+  const was = new Set(brokenLinks(before).map((l) => l.key))
+  return brokenLinks(after).filter((l) => !was.has(l.key)).map((l) => l.text)
+}
+
+/** A passage that got a new name, with its old one. */
+interface Rename {
+  from: string
+  to: string
+}
+
+/** Past this many, a rename no longer adds its reading of the old problems (only a story of one-letter names gets here). */
+const KNOWN_PROBLEMS_MAX = 5000
+
+/**
+ * The keys of the problems a story had before an edit. Lint messages name passages, so after a rename the same
+ * problem reads differently: each rename, in order, adds the old problems as they read under the new name, and
+ * an edit that only renames reports nothing new.
+ */
+function knownProblems(before: readonly Diagnostic[], renames: readonly Rename[] = []): Set<string> {
+  let all = [...before]
+  for (const r of renames) {
+    if (all.length > KNOWN_PROBLEMS_MAX) break
+    all = [...all, ...all.filter((d) => d.message.includes(r.from)).map((d) => ({ ...d, message: d.message.replaceAll(r.from, r.to) }))]
+  }
+  return new Set(all.map(diagKey))
+}
+
+const passageName = z.string().min(1).regex(/^[^\r\n]+$/, "one line")
+const passageTags = z.array(z.string().regex(/^[^\s[\]]+$/, "no spaces or brackets"))
+
+const storyEdit = z.discriminatedUnion("op", [
+  z.object({ op: z.literal("write"), passageId: z.string().min(1), rawText: z.string() }).describe("Replace one passage's full raw text (rules block, --, prose and choice lines; not the :: header)"),
+  z.object({ op: z.literal("add"), name: passageName, rawText: z.string(), tags: passageTags.optional() }).describe("Append a new passage"),
+  z.object({ op: z.literal("rename"), passageId: z.string().min(1), newName: passageName }).describe("Rename a passage; links to it are rewritten and its id stays"),
+  z.object({ op: z.literal("delete"), passageId: z.string().min(1) }).describe("Remove a passage; links to it are left as written"),
+])
+
+/** One step of story_batch_edit and writing_write. A later edit sees the story the earlier ones left (an added passage's id, a new name). */
+export type StoryEdit = z.infer<typeof storyEdit>
+
+/** The most edits one batch or take holds; River's writing jobs read a take's edits back with the same limit. */
+const STORY_EDITS_MAX = 64
+/** story_read_passage shows at most this many neighbours, the nearest first. */
+const NEIGHBOURS_MAX = 24
+/** story_search lists at most this many passages. */
+const SEARCH_MAX = 50
+
+/** Passage text as the story file keeps it: LF, and no trailing newline (the file puts the blank line between passages). */
+const normalRawText = (rawText: string) => rawText.replace(/\r\n?/g, "\n").replace(/\n+$/, "")
+
+/**
+ * Apply edits in order to a story in memory. Nothing is read or written. Throws on the first edit that fails,
+ * naming it, so the caller writes all of the edits or none.
+ */
+export function applyStoryEdits(story: Story, edits: readonly StoryEdit[], file: string): { story: Story; applied: string[]; passageIds: string[]; renames: { from: string; to: string }[] } {
+  const applied: string[] = []
+  const renames: Rename[] = []
+  const passageIds = new Set<string>()
+  let next = story
+  for (const [i, e] of edits.entries()) {
+    const target = e.op === "add" ? JSON.stringify(e.name) : e.passageId
+    try {
+      switch (e.op) {
+        case "write":
+          next = updatePassageText(next, e.passageId, normalRawText(e.rawText))
+          passageIds.add(e.passageId)
+          applied.push(`write ${e.passageId}`)
+          break
+        case "add": {
+          if (next.passages.some((p) => p.name === e.name)) throw new Error(`a passage named "${e.name}" already exists`)
+          const passage = parseOnePassage(e.name, e.tags ?? [], e.rawText, file)
+          if (next.passages.some((p) => p.id === passage.id)) throw new Error(`a passage with id "${passage.id}" already exists; add an @id rule with another id`)
+          next = { ...next, passages: [...next.passages, passage] }
+          passageIds.add(passage.id)
+          applied.push(`add ${e.name} (id ${passage.id})`)
+          break
+        }
+        case "rename": {
+          const old = passageById(next, e.passageId)?.name
+          next = renamePassage(next, e.passageId, e.newName)
+          passageIds.add(e.passageId)
+          if (old !== undefined && old !== e.newName) renames.push({ from: old, to: e.newName })
+          applied.push(`rename ${e.passageId}: ${old} -> ${e.newName}`)
+          break
+        }
+        case "delete":
+          next = deletePassage(next, e.passageId)
+          passageIds.delete(e.passageId)
+          applied.push(`delete ${e.passageId}`)
+          break
+      }
+    } catch (err) {
+      throw new Error(`edit ${i + 1} of ${edits.length} (${e.op} ${target}) failed: ${(err as Error).message}\nNothing was written: fix this edit and send all of them again.`)
+    }
+  }
+  return { story: next, applied, passageIds: [...passageIds], renames }
+}
+
+/**
+ * The file text a story writes to, checked to read back as the same passages: a name the header cannot hold, or
+ * a text line that reads as a new header, would otherwise change the story silently.
+ */
+function checkedStoryText(story: Story, file: string): { text: string; story: Story; diagnostics: Diagnostic[] } {
+  const text = writeTwee3(story)
+  const back = parseTwee3(text, file)
+  const want = story.passages.map((p) => `${p.id}\n${p.name}`)
+  const got = back.story.passages.map((p) => `${p.id}\n${p.name}`)
+  const at = want.findIndex((w, i) => w !== got[i])
+  if (at !== -1 || got.length !== want.length) {
+    const p = story.passages[at === -1 ? want.length - 1 : at]
+    const read = back.story.passages[at === -1 ? want.length : at]
+    throw new Error(
+      `the story would not read back as written: passage "${p?.name}" (id ${p?.id}) reads back as ${read ? `"${read.name}" (id ${read.id})` : "nothing"}. ` +
+        "Use a one-line name without leading or trailing spaces, and no text line that starts with ::",
+    )
+  }
+  return { text, story: back.story, diagnostics: back.diagnostics }
+}
+
+const narrativeTally = (notes: readonly Diagnostic[]) => {
+  const warnings = notes.filter((d) => d.severity === "warn").length
+  return { warnings, infos: notes.length - warnings }
+}
+
+/** "Narrative notes (...): 1 warning, 2 info", or that there are none. */
+function narrativeHeading(notes: readonly Diagnostic[]): string {
+  if (notes.length === 0) return "Narrative notes: none."
+  const { warnings, infos } = narrativeTally(notes)
+  return `Narrative notes (craft advice, never blocks an export): ${plural(warnings, "warning")}, ${infos} info`
+}
+
+const WRITING_VARIANTS = ["a", "b", "c", "d", "e"] as const
+
+/** What writing_write stores in .river/writing/<writingId>/take_<variant>.json: one take of a writing job. */
+export interface WritingTakeFile {
+  version: 1
+  writingId: string
+  /** "a".."e". Its card is labelled with the upper-case letter. */
+  variant: (typeof WRITING_VARIANTS)[number]
+  /** One line shown under the take's card. */
+  caption: string
+  /** What the take changes, in a sentence or two. */
+  summary: string
+  /** The story file the take rewrites, relative to the project root. */
+  storyFile: string
+  /** The edits, as checked: applying them in order to the story file gives `text`. A write's rawText is stored with LF line ends and no trailing newline. */
+  edits: StoryEdit[]
+  /** Ids of the passages the edits wrote, added or renamed. */
+  passageIds: string[]
+  /** sha256 (hex) of the story file the edits were checked against. */
+  baseSha256: string
+  /** The whole story file with the edits applied. The story file itself is not changed. */
+  text: string
+  /** Unified diff from the story file to `text`. */
+  diff: string
+  /** `lint` errors and warnings in the take's story. */
+  lintErrors: number
+  lintWarnings: number
+  /** `lintNarrative` notes in the take's story. */
+  narrativeWarnings: number
+  narrativeInfos: number
+  /** ISO time. */
+  writtenAt: string
 }
 
 function define<S extends Record<string, z.ZodType>>(def: {
@@ -231,6 +553,7 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
   const defaultAuthor = opts.author ?? "agent"
   // River trusts "you" as the user's own words (a reply that starts a revision), and concept-artist as its job's answer.
   assertAgentAuthor(defaultAuthor)
+  if (opts.conceptId !== undefined && opts.writingId !== undefined) throw new Error("river: a server works for a concept job (--concept) or a writing job (--writing), not both")
 
   /** The story file, checked to be inside the root and one of the project's story files. */
   async function storyRel(file: string): Promise<string> {
@@ -248,26 +571,76 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
     return readFile(safePath(project, rel), "utf8")
   }
 
-  async function lintFile(rel: string): Promise<{ story: Story; diagnostics: Diagnostic[] }> {
-    const schema = await loadSchema(project)
-    const { story, diagnostics } = await loadStory(project, rel)
-    return { story, diagnostics: [...diagnostics, ...lint(story, schema)] }
+  function storyIdFor(rel: string, allStories: readonly string[]): string {
+    const stemOf = (p: string) => path.basename(p).replace(/\.(twee|tw)$/i, "")
+    const stem = stemOf(rel)
+    const lower = stem.toLowerCase()
+    const collides = allStories.filter((s) => stemOf(s).toLowerCase() === lower).length > 1
+    if (!collides) return stem
+    const norm = rel.replace(/\\/g, "/").replace(/^\.\//, "")
+    const prefix = project.manifest.stories.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "")
+    const under = prefix && prefix !== "." && norm.startsWith(`${prefix}/`) ? norm.slice(prefix.length + 1) : norm
+    return under.replace(/\.(twee|tw)$/i, "")
   }
 
-  /** Save a changed story, then diff and re-lint it from disk. */
-  async function writeStory(rel: string, before: string, beforeDiags: Diagnostic[], next: Story, what: string): Promise<RiverToolResult> {
+  async function lintFile(rel: string): Promise<{ story: Story; diagnostics: Diagnostic[]; schema: StateSchema }> {
+    const schema = await loadSchema(project)
+    const { story, diagnostics } = await loadStory(project, rel)
+    return { story, diagnostics: [...diagnostics, ...lint(story, schema)], schema }
+  }
+
+  /** The narrative craft notes for a story, with the manifest's copy budgets and shot ids. Every one is "info" or "warn". */
+  const narrativeFor = (story: Story, schema: StateSchema): Diagnostic[] =>
+    lintNarrative(story, schema, { copyBudgets: project.manifest.copyBudgets, shotIds: project.manifest.shots.map((s) => s.id) })
+
+  /**
+   * Apply edits to a story file in memory and check the result: the text it would write, read back and linted
+   * (lint and narrative notes). Writes nothing. Throws when any edit fails.
+   */
+  async function stageEdits(file: string, edits: readonly StoryEdit[]) {
+    const rel = await storyRel(file)
+    const before = await readText(rel)
+    const { story, diagnostics: beforeDiags, schema } = await lintFile(rel)
+    const { story: next, applied, passageIds, renames } = applyStoryEdits(story, edits, rel)
+    const known = knownProblems([...beforeDiags, ...narrativeFor(story, schema)], renames)
+    const checked = checkedStoryText(next, rel)
+    const diagnostics = [...checked.diagnostics, ...lint(checked.story, schema)]
+    const narrative = narrativeFor(checked.story, schema)
+    const newlyBroken = newlyBrokenLinks(story, checked.story)
+    return { rel, before, beforeDiags, after: checked.text, story: next, applied, passageIds, diagnostics, narrative, known, newlyBroken }
+  }
+
+  /** The whole lint and narrative report of a staged story, with the problems the edits brought marked "(new)". */
+  function stagedReport(staged: { diagnostics: Diagnostic[]; narrative: Diagnostic[]; known: Set<string> }) {
+    const isNew = (d: Diagnostic) => (staged.known.has(diagKey(d)) ? "" : "  (new)")
+    const errors = staged.diagnostics.filter((d) => d.severity === "error").length
+    const warnings = staged.diagnostics.filter((d) => d.severity === "warn").length
+    const newProblems = [...staged.diagnostics, ...staged.narrative].filter((d) => !staged.known.has(diagKey(d)))
+    const lines = [`Lint: ${plural(errors, "error")}, ${plural(warnings, "warning")}`, ...staged.diagnostics.map((d) => `${formatDiag(d)}${isNew(d)}`), narrativeHeading(staged.narrative), ...staged.narrative.map((d) => `${formatNote(d)}${isNew(d)}`)]
+    return { lines, errors, warnings, newProblems }
+  }
+
+  /** Save a changed story, then diff and re-lint it from disk. `notes` go after the lint problems; `renames` are the passages the change renamed. */
+  async function writeStory(
+    rel: string,
+    before: string,
+    beforeDiags: Diagnostic[],
+    next: Story,
+    what: string,
+    { notes = [], extra = {}, renames = [] }: { notes?: string[]; extra?: Record<string, unknown>; renames?: Rename[] } = {},
+  ): Promise<RiverToolResult> {
     await saveStory(project, rel, next)
     const after = await readText(rel)
     const diff = unifiedDiff(before, after, rel)
     const { diagnostics } = await lintFile(rel)
-    const known = new Set(beforeDiags.map(diagKey))
+    const known = knownProblems(beforeDiags, renames)
     const newProblems = diagnostics.filter((d) => !known.has(diagKey(d)) && d.severity !== "info")
     const errors = diagnostics.filter((d) => d.severity === "error").length
     const lines = [what, "", diff || "(no change to the file)"]
     if (newProblems.length > 0) lines.push("New lint problems:", ...newProblems.map(formatDiag))
     else lines.push("No new lint problems.")
-    lines.push(`${plural(errors, "error")} in the file now.`)
-    return { text: lines.join("\n"), data: { file: rel, diff, newProblems, diagnostics } }
+    lines.push(...notes, `${plural(errors, "error")} in the file now.`)
+    return { text: lines.join("\n"), data: { file: rel, diff, newProblems, diagnostics, ...extra } }
   }
 
   function passageSummary(story: Story) {
@@ -356,16 +729,57 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
 
     define({
       name: "story_lint",
-      description: "Check stories for broken links, dead ends, never-true conditions, unknown variables and type mismatches. Without file, checks every story.",
-      inputSchema: { file: storyFile.optional() },
+      description:
+        "Check stories for broken links, dead ends, never-true conditions, unknown variables and type mismatches. Without file, checks every story. " +
+        "After the lint summary come the narrative notes (advice, never errors): a state variable nothing reads (unused-state-var), choices that all lead to the same place " +
+        "(false-choice), repeated labels or hints (duplicate-copy), copy over its budget (copy-budget-exceeded), a passage no game from the initial state reaches " +
+        "(unreachable-from-initial), and a @shot the manifest lacks (unknown-shot). narrative: false leaves them out.",
+      inputSchema: {
+        file: storyFile.optional(),
+        narrative: z.boolean().optional().describe("Also give the narrative craft notes. Default true"),
+      },
       mutating: false,
-      async run({ file }) {
-        const files = file !== undefined ? [await storyRel(file)] : await listStories(project)
+      async run({ file, narrative }) {
+        const withNotes = narrative !== false
+        const allStories = await listStories(project)
+        const files = file !== undefined ? [await storyRel(file)] : allStories
         let errors = 0, warnings = 0, infos = 0, passages = 0
         const lines: string[] = []
-        const data: { file: string; diagnostics: Diagnostic[] }[] = []
+        const noteLines: string[] = []
+        const allNotes: Diagnostic[] = []
+        const data: { file: string; diagnostics: Diagnostic[]; narrative?: Diagnostic[] }[] = []
+
+        const useWorkspace = allStories.length >= 2
+        const schema = useWorkspace ? await loadSchema(project) : undefined
+        const loaded = new Map<string, { story: Story; diagnostics: Diagnostic[] }>()
+        const storyIds = new Map<string, string>()
+        if (useWorkspace) {
+          for (const rel of allStories) {
+            loaded.set(rel, await loadStory(project, rel))
+            storyIds.set(rel, storyIdFor(rel, allStories))
+          }
+        }
+        const workspace = useWorkspace
+          ? loadStoryWorkspace(
+              allStories.map((rel) => ({
+                file: rel,
+                id: storyIds.get(rel)!,
+                story: loaded.get(rel)!.story,
+              })),
+            )
+          : undefined
+
         for (const rel of files) {
-          const { story, diagnostics } = await lintFile(rel)
+          const { story, diagnostics, schema: fileSchema } = workspace
+            ? {
+                story: loaded.get(rel)!.story,
+                diagnostics: [
+                  ...loaded.get(rel)!.diagnostics,
+                  ...lintStoryInWorkspace(workspace, storyIds.get(rel)!, loaded.get(rel)!.story, schema!),
+                ],
+                schema: schema!,
+              }
+            : await lintFile(rel)
           passages += contentPassages(story).length
           if (files.length > 1) lines.push(rel)
           for (const d of diagnostics) {
@@ -374,12 +788,22 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
             else if (d.severity === "warn") warnings++
             else infos++
           }
-          data.push({ file: rel, diagnostics })
+          if (!withNotes) {
+            data.push({ file: rel, diagnostics })
+            continue
+          }
+          const notes = narrativeFor(story, fileSchema)
+          if (files.length > 1 && notes.length > 0) noteLines.push(rel)
+          noteLines.push(...notes.map(formatNote))
+          allNotes.push(...notes)
+          data.push({ file: rel, diagnostics, narrative: notes })
         }
+        // The summary line counts lint only, as it did before there were narrative notes: those are advice and follow it.
         let summary = `${plural(errors, "error")}, ${plural(warnings, "warning")}`
         if (infos > 0) summary += `, ${infos} info`
         lines.push(`${summary} in ${plural(passages, "passage")}`)
-        return { text: lines.join("\n"), data: { errors, warnings, files: data } }
+        if (withNotes) lines.push(narrativeHeading(allNotes), ...noteLines)
+        return { text: lines.join("\n"), data: { errors, warnings, files: data, ...(withNotes ? { narrative: narrativeTally(allNotes) } : {}) } }
       },
     }),
 
@@ -410,47 +834,401 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
     define({
       name: "playtest_run",
       description:
-        "Play a story without the engine. Takes a list of choice indexes (0-based, as story_read lists them) and returns the transcript: each passage, its choices (a closed one says why) and the state after each step. A choice is open when its @when holds, its @cost can be paid, and its target's @when holds after the cost and set.",
+        "Play a story without the engine. Takes a list of choice indexes (0-based, as story_read lists them) and returns the transcript: each passage with its prose as the player reads it " +
+        "(templates filled in for the state and the visit), its choices (a closed one says why) and the state after each step. A choice is open when its @when holds, its @cost can be paid, and its target's @when holds after the cost and set. " +
+        "steps does more than choices: one step can set state variables (what the engine would change mid-run), start an [interrupt] passage or draw a [storylet] (drawStorylet: true, optional seed) and take a choice, in that order. " +
+        "proseOnly returns only the prose the player reads, in order.",
       inputSchema: {
         file: storyFile,
         from: z.string().optional().describe("Passage name (or id) to start from. Default: the story start"),
-        choices: z.array(z.number().int().min(0)).describe("Choice indexes to take in order, 0-based"),
+        choices: z.array(z.number().int().min(0)).optional().describe("Choice indexes to take in order, 0-based"),
+        steps: z
+          .array(
+            z.object({
+              set: z.record(z.string(), scalar).optional().describe("State variables to set first, as the engine would (checked against the schema)"),
+              interrupt: z.string().min(1).optional().describe("Then start this [interrupt] passage (name or id); its @when must hold"),
+              choice: z.number().int().min(0).optional().describe("Then take this choice of the passage on screen, 0-based"),
+              drawStorylet: z.literal(true).optional().describe("Draw one open [storylet] from the deck (highest @priority, then random by @weight) and enter it, as a detour. Use alone or before choice"),
+              seed: z.number().int().optional().describe("With drawStorylet: seed for a repeatable draw (mulberry32). Default: random"),
+            }),
+          )
+          .optional()
+          .describe("Steps to take in order (after choices, when both are given). A step with only set shows the passage again in the new state"),
         state: z.record(z.string(), scalar).optional().describe("Starting values for state variables, over the schema initial values"),
+        proseOnly: z.boolean().optional().describe("Only the rendered prose of each passage: no names, choices or state. Default false"),
       },
       mutating: false,
-      async run({ file, from, choices, state }) {
+      async run({ file, from, choices, steps: more, state, proseOnly }) {
         const rel = await storyRel(file)
         const schema = await loadSchema(project)
         const { story } = await loadStory(project, rel)
         const play = createPlaytest(story, schema, { ...(from !== undefined ? { from } : {}), ...(state !== undefined ? { state } : {}) })
+        type Did = { choice?: number; interrupt?: string; storylet?: string; set?: Record<string, number | string | boolean> }
         const lines: string[] = []
-        const steps: { passageId: string; name: string; choice?: number; state: Record<string, unknown> }[] = []
+        const prose: string[] = []
+        const read = new Map<string, string>()
+        const steps: ({ passageId: string; name: string; text: string; state: Record<string, unknown> } & Did)[] = []
         const show = () => {
           const p = play.current()
+          const history = play.history()
           lines.push(`== ${p.name} == (id ${p.id})`)
-          const prose = proseText(p.text)
-          if (prose) lines.push(prose)
+          const text = play.renderedText()
+          if (text) lines.push(text)
+          // The prose the player reads: each entry to a passage, and a passage still on screen (after a set, or back
+          // from an interrupt) only when the new state changed its text.
+          const shown = `${play.visits()[p.id] ?? 1}\n${text}`
+          if (text && read.get(p.id) !== shown) prose.push(text)
+          read.set(p.id, shown)
           for (const c of play.choices()) {
             lines.push(`  ${c.index}: ${c.choice.label} -> ${c.choice.target}${c.choice.hint ? `  (${c.choice.hint})` : ""}${c.closed ? `  [closed: ${formatClosed(c.closed)}]` : ""}`)
+          }
+          // Only a run that uses steps can start an interrupt, so only there does the transcript say which could start.
+          if (more !== undefined && history.at(-1)!.returnTo === undefined && !p.isEnding) {
+            for (const i of play.interrupts()) {
+              lines.push(`  interrupt ${i.passage.name}${i.open ? "  [can start]" : i.passage.when ? `  [closed: ${formatCond(i.passage.when)}]` : ""}`)
+            }
+            // The open storylets the deck could draw now (priority and weight decide the draw).
+            for (const s of play.storylets()) {
+              if (s.open) lines.push(`  storylet ${s.passage.name}  [can draw${s.priority !== 0 ? `, priority ${s.priority}` : ""}${s.weight !== 1 ? `, weight ${s.weight}` : ""}]`)
+            }
           }
           const st = play.state()
           lines.push(`  state: ${Object.entries(st).map(([k, v]) => `${k}=${String(v)}`).join(", ")}`)
           if (play.isOver()) lines.push(p.isEnding ? "  -- the end --" : "  -- no open choices --")
           lines.push("")
-          return { passageId: p.id, name: p.name, state: st }
+          return { passageId: p.id, name: p.name, text, state: st }
+        }
+        const fail = (k: number, what: string, e: unknown): never => {
+          throw new Error(`step ${k + 1} (${what}) failed: ${(e as Error).message}\n\nTranscript so far:\n${lines.join("\n")}`)
         }
         steps.push(show())
-        for (const [k, index] of choices.entries()) {
-          const label = play.choices()[index]?.choice.label
-          try {
-            play.choose(index)
-          } catch (e) {
-            throw new Error(`step ${k + 1} (choice ${index}) failed: ${(e as Error).message}\n\nTranscript so far:\n${lines.join("\n")}`)
+        const all: NonNullable<typeof more> = [...(choices ?? []).map((choice) => ({ choice })), ...(more ?? [])]
+        for (const [k, step] of all.entries()) {
+          if (step.set === undefined && step.interrupt === undefined && step.drawStorylet === undefined && step.choice === undefined) fail(k, "empty", new Error("a step needs set, interrupt, drawStorylet or choice"))
+          if (step.interrupt !== undefined && step.drawStorylet !== undefined) fail(k, "interrupt and drawStorylet", new Error("a step starts an interrupt or draws a storylet, not both"))
+          if (step.seed !== undefined && step.drawStorylet === undefined) fail(k, "seed", new Error("seed only goes with drawStorylet"))
+          let did: Did = {}
+          if (step.set !== undefined) {
+            for (const [name, value] of Object.entries(step.set)) {
+              try {
+                play.setVar(name, value)
+              } catch (e) {
+                fail(k, `set ${name}`, e)
+              }
+            }
+            did.set = step.set
+            lines.push(`~ set ${Object.entries(step.set).map(([n, v]) => `${n}=${String(v)}`).join(", ")}`, "")
           }
-          lines.push(`> ${index}: ${label ?? ""}`, "")
-          steps.push({ ...show(), choice: index })
+          if (step.interrupt !== undefined || step.drawStorylet !== undefined) {
+            if (step.interrupt !== undefined) {
+              try {
+                play.interrupt(step.interrupt)
+              } catch (e) {
+                fail(k, `interrupt ${JSON.stringify(step.interrupt)}`, e)
+              }
+              did.interrupt = play.current().id
+              lines.push(`! interrupt: ${play.current().name}`, "")
+            } else {
+              let drawn: Passage | undefined
+              try {
+                drawn = play.drawStorylet(step.seed !== undefined ? mulberry32(step.seed) : undefined)
+              } catch (e) {
+                fail(k, "drawStorylet", e)
+              }
+              if (!drawn) fail(k, "drawStorylet", new Error(`no storylet is open${play.storylets().length === 0 ? " (the story has no [storylet] passages)" : ""}`))
+              did.storylet = play.current().id
+              lines.push(`! storylet: ${play.current().name}`, "")
+            }
+            // The interrupt or storylet passage is shown before the step's own choice is taken in it.
+            if (step.choice !== undefined) {
+              steps.push({ ...show(), ...did })
+              did = {}
+            }
+          }
+          if (step.choice !== undefined) {
+            const index = step.choice
+            const label = play.choices()[index]?.choice.label
+            try {
+              play.choose(index)
+            } catch (e) {
+              fail(k, `choice ${index}`, e)
+            }
+            did.choice = index
+            lines.push(`> ${index}: ${label ?? ""}`, "")
+          }
+          steps.push({ ...show(), ...did })
         }
-        return { text: lines.join("\n").trimEnd(), data: { steps, over: play.isOver() } }
+        return { text: proseOnly ? prose.join("\n\n") : lines.join("\n").trimEnd(), data: { steps, over: play.isOver(), prose } }
+      },
+    }),
+
+    define({
+      name: "story_outline",
+      description:
+        "The structure of one story without its prose: each passage's id, name, tags, rules (@when, @set, @auto, @priority, @weight, @cooldown, @shot, @meta, @cue, @end; the last four are what a [storylet] deck and an @auto [interrupt] use) and word count, and each choice with its index, target and rules. " +
+        "Start here in a long story, then read the passages you need with story_read_passage.",
+      inputSchema: { file: storyFile },
+      mutating: false,
+      async run({ file }) {
+        const rel = await storyRel(file)
+        const { story } = await loadStory(project, rel)
+        const schema = await loadSchema(project).catch(() => undefined)
+        const state = schema ? initialState(schema) : {}
+        const index = createStoryIndex(story)
+        const passages = contentPassages(story).map((p) => ({
+          id: p.id,
+          name: p.name,
+          tags: p.tags,
+          isEnding: p.isEnding,
+          rules: passageRules(p),
+          words: wordCount(renderProse(proseText(p.text), { state })),
+          choices: p.choices.map((c, i) => {
+            const to = choiceTarget(story, c.target, index)
+            return { index: i, label: c.label, target: c.target, ...(to.kind === "passage" ? { targetId: to.passage.id } : to.kind === "missing" ? { missing: true } : {}), rules: choiceRules(c) }
+          }),
+        }))
+        const words = passages.reduce((n, p) => n + p.words, 0)
+        const lines = [`${rel}  "${story.title}"  ${plural(passages.length, "passage")}, ${plural(words, "word")}, start: ${story.start}`]
+        for (const [k, p] of contentPassages(story).entries()) {
+          const o = passages[k]!
+          lines.push(`- ${p.name} (id ${p.id})${p.tags.length > 0 ? ` [${p.tags.join(" ")}]` : ""}${o.rules.length > 0 ? `  ${o.rules.join(" ")}` : ""}  ${plural(o.words, "word")}`)
+          p.choices.forEach((c, i) => lines.push(`    ${choiceLine(story, c, i, index)}`))
+        }
+        return { text: lines.join("\n"), data: { file: rel, title: story.title, start: story.start, words, passages } }
+      },
+    }),
+
+    define({
+      name: "story_read_passage",
+      description:
+        "Read one passage in full: its raw text, its prose as a new game shows it, the links that lead to it and the links it has. Then its neighbourhood, the passages up to depth links away (in or out) with their raw text, " +
+        "and only the state variables these passages use. For work on one scene of a long story, in place of story_read.",
+      inputSchema: {
+        file: storyFile,
+        passageId: z.string().min(1).describe("The passage id (story_outline lists them), or its exact name"),
+        depth: z.number().int().min(0).max(2).optional().describe("How many links away the neighbourhood reaches. 0: the passage alone. Default 1, max 2"),
+      },
+      mutating: false,
+      async run({ file, passageId, depth }) {
+        const rel = await storyRel(file)
+        const { story } = await loadStory(project, rel)
+        const schema = await loadSchema(project).catch(() => undefined)
+        const index = createStoryIndex(story)
+        const focus = index.byId.get(passageId) ?? index.byName.get(passageId)
+        if (!focus) throw noPassageError(story, passageId)
+        const reach = depth ?? 1
+
+        const distance = new Map<string, number>([[focus.id, 0]])
+        let frontier: Passage[] = [focus]
+        for (let d = 1; d <= reach; d++) {
+          const next: Passage[] = []
+          for (const p of frontier) {
+            const out = (index.outgoing.get(p.id) ?? []).map((o) => o.to).filter((t): t is Passage => typeof t === "object" && t !== null)
+            for (const q of [...out, ...(index.incoming.get(p.id) ?? []).map((i) => i.from)]) {
+              if (distance.has(q.id)) continue
+              distance.set(q.id, d)
+              next.push(q)
+            }
+          }
+          frontier = next
+        }
+        const around = contentPassages(story)
+          .filter((p) => (distance.get(p.id) ?? 0) > 0)
+          .sort((a, b) => distance.get(a.id)! - distance.get(b.id)!)
+        const shown = around.slice(0, NEIGHBOURS_MAX)
+
+        const tagsOf = (p: Passage) => (p.tags.length > 0 ? ` [${p.tags.join(" ")}]` : "")
+        const incoming = (index.incoming.get(focus.id) ?? []).map(({ from, choiceIndex }) => ({ from: from.id, name: from.name, choiceIndex, label: from.choices[choiceIndex]!.label }))
+        const rendered = renderProse(proseText(focus.text), { state: schema ? initialState(schema) : {} })
+        const lines = [`${focus.name} (id ${focus.id})${tagsOf(focus)} in ${rel}`]
+        if (story.start === focus.name) lines.push("The story starts here.")
+        if (isInterrupt(focus)) lines.push("An [interrupt] passage: the game can start it from any passage while its @when holds.")
+        lines.push("", "Raw text:", focus.rawText, "", "Prose as a new game shows it (initial state, first visit):", rendered || "(none)", "")
+        lines.push(`Links to it (${incoming.length}):`, ...incoming.map((l) => `  ${l.name} (id ${l.from}) choice ${l.choiceIndex}: ${l.label}`))
+        lines.push(`Its links (${focus.choices.length}):`, ...focus.choices.map((c, i) => `  ${choiceLine(story, c, i, index)}`))
+        if (reach > 0) {
+          lines.push("", `Neighbourhood, up to ${plural(reach, "link")} away (${plural(around.length, "passage")}${around.length > shown.length ? `, the nearest ${shown.length} shown` : ""}):`)
+          for (const p of shown) lines.push("", `:: ${p.name} (id ${p.id})${tagsOf(p)}, ${plural(distance.get(p.id)!, "link")} away`, p.rawText)
+        }
+        const used = new Set<string>()
+        for (const p of [focus, ...shown]) for (const v of variableUses(p).keys()) used.add(v)
+        const variables = schema ? Object.fromEntries(Object.entries(schema).filter(([name]) => used.has(name))) : {}
+        if (schema) {
+          const names = Object.keys(variables)
+          lines.push("", names.length > 0 ? `State variables these passages use (${project.manifest.state}):` : "These passages use no state variable.", ...schemaLines(variables))
+        }
+        return {
+          text: lines.join("\n"),
+          data: {
+            file: rel,
+            passage: { id: focus.id, name: focus.name, tags: focus.tags, rawText: focus.rawText, rendered },
+            incoming,
+            outgoing: focus.choices.map((c, i) => ({ index: i, label: c.label, target: c.target })),
+            neighbours: shown.map((p) => ({ id: p.id, name: p.name, distance: distance.get(p.id)!, rawText: p.rawText })),
+            variables,
+          },
+        }
+      },
+    }),
+
+    define({
+      name: "story_search",
+      description:
+        "Find passages in one story (or, without file, in every story). query: text in a passage's name, prose, choice lines or hints, any case. tag: a passage tag. " +
+        "variable: a state variable the passage reads or writes (@when, @set, @cost, prose templates). speaker: who speaks a dialogue line (Rex [excited]: ..., Mara: \"...\"). " +
+        "Give at least one; several narrow the result. Each match shows why it matched.",
+      inputSchema: {
+        file: storyFile.optional(),
+        query: z.string().min(1).optional().describe("Text to find, any case"),
+        tag: z.string().min(1).optional().describe("A passage tag, e.g. interrupt"),
+        variable: z.string().min(1).optional().describe("A state variable name, e.g. bond"),
+        speaker: z.string().min(1).optional().describe("A dialogue speaker, e.g. Rex"),
+      },
+      mutating: false,
+      async run({ file, query, tag, variable, speaker }) {
+        if (query === undefined && tag === undefined && variable === undefined && speaker === undefined) throw new Error("story_search needs at least one of query, tag, variable, speaker")
+        const files = file !== undefined ? [await storyRel(file)] : await listStories(project)
+        const clip = (s: string) => (s.length > 160 ? `${s.slice(0, 157)}...` : s)
+        const some = (hits: string[]) => (hits.length > 3 ? [...hits.slice(0, 3), `(+${hits.length - 3} more)`] : hits)
+        const matches: { file: string; id: string; name: string; tags: string[]; why: string[] }[] = []
+        for (const rel of files) {
+          const { story } = await loadStory(project, rel)
+          for (const p of contentPassages(story)) {
+            const why: string[] = []
+            if (tag !== undefined && !p.tags.some((t) => t.toLowerCase() === tag.toLowerCase())) continue
+            if (query !== undefined) {
+              const q = query.toLowerCase()
+              const hits: string[] = []
+              if (p.name.toLowerCase().includes(q)) hits.push(`name: ${p.name}`)
+              const textLines = p.text.split("\n").filter((l) => l.toLowerCase().includes(q))
+              hits.push(...textLines.map((l) => `text: ${clip(l.trim())}`))
+              // A hint is in its choice line as written; this catches one the line escapes differently.
+              for (const c of p.choices) if (c.hint?.toLowerCase().includes(q) && !textLines.some((l) => l.includes(c.hint!))) hits.push(`hint: ${clip(c.hint)}`)
+              if (hits.length === 0) continue
+              why.push(...some(hits))
+            }
+            if (variable !== undefined) {
+              const uses = variableUses(p).get(variable)
+              if (!uses) continue
+              why.push(`${variable}: ${uses.join(", ")}`)
+            }
+            if (speaker !== undefined) {
+              const said = parseProseBlocks(proseText(p.text, { keepCues: true })).flatMap((b) => (b.kind === "dialogue" && b.speaker.toLowerCase() === speaker.toLowerCase() ? [b] : []))
+              if (said.length === 0) continue
+              why.push(...some(said.map((b) => clip(`${b.speaker}${b.mood ? ` [${b.mood}]` : ""}: ${b.text}`))))
+            }
+            matches.push({ file: rel, id: p.id, name: p.name, tags: p.tags, why })
+          }
+        }
+        const asked = [query !== undefined ? `query ${JSON.stringify(query)}` : "", tag !== undefined ? `tag ${tag}` : "", variable !== undefined ? `variable ${variable}` : "", speaker !== undefined ? `speaker ${speaker}` : ""].filter(Boolean).join(", ")
+        const where = file !== undefined ? files[0]! : plural(files.length, "story file")
+        if (matches.length === 0) return { text: `No passage matches ${asked} in ${where}.`, data: { matches } }
+        const shown = matches.slice(0, SEARCH_MAX)
+        const lines = [`${plural(matches.length, "passage")} match${matches.length === 1 ? "es" : ""} ${asked} in ${where}${matches.length > shown.length ? ` (the first ${shown.length} shown)` : ""}:`]
+        let last = ""
+        for (const m of shown) {
+          if (files.length > 1 && m.file !== last) lines.push(m.file)
+          last = m.file
+          lines.push(`- ${m.name} (id ${m.id})${m.tags.length > 0 ? ` [${m.tags.join(" ")}]` : ""}`, ...m.why.map((w) => `    ${w}`))
+        }
+        return { text: lines.join("\n"), data: { matches } }
+      },
+    }),
+
+    define({
+      name: "story_pacing",
+      description:
+        "A pacing summary of one story: passages, words and words per passage, choices per passage, endings, how long the possible routes read (words) and how many decisions they hold, and the longest passages.",
+      inputSchema: {
+        file: storyFile,
+        maxPaths: z.number().int().min(1).max(5000).optional().describe("Count at most this many routes. Default 500"),
+      },
+      mutating: false,
+      async run({ file, maxPaths }) {
+        const rel = await storyRel(file)
+        const schema = await loadSchema(project)
+        const { story } = await loadStory(project, rel)
+        const report = pacingReport(story, schema, maxPaths !== undefined ? { maxPaths } : undefined)
+        return { text: [rel, ...formatPacingReport(report)].join("\n"), data: { file: rel, ...report } }
+      },
+    }),
+
+    define({
+      name: "story_sample_transcripts",
+      description:
+        "A table read: a few routes through one story as the player reads them, chosen to reach every ending and as many passages as possible. Each is played from the initial state, " +
+        "with the prose templates filled in and every @ rule, link line and cue left out; the choice taken shows as > label. Read these to hear how the story flows before and after you change it.",
+      inputSchema: {
+        file: storyFile,
+        maxTranscripts: z.number().int().min(1).max(20).optional().describe("How many routes at most. Default 5"),
+        includeInterrupts: z.boolean().optional().describe("Also read one route through each [interrupt] passage. Default false"),
+        proseOnly: z.boolean().optional().describe("Only the prose: no passage names, no choices. Default false"),
+      },
+      mutating: false,
+      async run({ file, maxTranscripts, includeInterrupts, proseOnly }) {
+        const rel = await storyRel(file)
+        const schema = await loadSchema(project)
+        const { story } = await loadStory(project, rel)
+        const transcripts = sampleTranscripts(story, schema, {
+          ...(maxTranscripts !== undefined ? { maxTranscripts } : {}),
+          ...(includeInterrupts !== undefined ? { includeInterrupts } : {}),
+          ...(proseOnly !== undefined ? { proseOnly } : {}),
+        })
+        if (transcripts.length === 0) return { text: `No transcript: ${rel} has no start passage or no route a player can take.`, data: { file: rel, transcripts } }
+        const lines = [`${plural(transcripts.length, "transcript")} of ${rel}`]
+        transcripts.forEach((t, i) => {
+          const end = t.end === "ending" ? `ending: ${t.ending ?? "?"}` : t.end === "return" ? "interrupt, back to the story" : t.end
+          lines.push("", `--- ${i + 1} of ${transcripts.length}: ${t.route.join(" > ")} (${end}) ---`, t.text)
+          if (!t.complete) lines.push(`(stopped early: ${t.note ?? "the route could not be played from the initial state"})`)
+        })
+        return { text: lines.join("\n"), data: { file: rel, transcripts } }
+      },
+    }),
+
+    define({
+      name: "story_simulate",
+      description:
+        "Play many random games of one story without the engine (each step takes a random open choice; with none open it draws a [storylet], else it is a dead end) and report: how often each ending is reached, " +
+        "dead ends, how many steps a game takes, the passages and choices no game ever reached, and where each state variable ends up (min/avg/max, or counts). " +
+        "The same seed gives the same report. Use it to check balance and that storylets and @auto interrupts actually come up; story_paths and story_pacing are static counts.",
+      inputSchema: {
+        file: storyFile.optional().describe("Story file. Default: the project's only story file"),
+        runs: z.number().int().min(1).max(2000).optional().describe("Games to play. Default 200, max 2000"),
+        seed: z.number().int().optional().describe("PRNG seed. Default 1"),
+        maxSteps: z.number().int().min(1).max(1000).optional().describe("Choices and draws per game before it counts as stuck. Default 100, max 1000"),
+        includeStorylets: z.boolean().optional().describe("Draw a storylet when no choice is open. Default true"),
+      },
+      mutating: false,
+      async run({ file, runs, seed, maxSteps, includeStorylets }) {
+        let rel: string
+        if (file !== undefined) rel = await storyRel(file)
+        else {
+          const stories = await listStories(project)
+          if (stories.length !== 1) throw new Error(`river: give a story file; this project has ${stories.length === 0 ? "none" : `${stories.length}: ${stories.join(", ")}`}`)
+          rel = stories[0]!
+        }
+        const schema = await loadSchema(project)
+        const { story } = await loadStory(project, rel)
+        const report = simulateStory(story, schema, {
+          runs: runs ?? 200,
+          seed: seed ?? 1,
+          maxSteps: maxSteps ?? 100,
+          includeStorylets: includeStorylets ?? true,
+        })
+        return { text: [rel, ...formatSimulationReport(report)].join("\n"), data: { file: rel, report } }
+      },
+    }),
+
+    define({
+      name: "voice_read",
+      description:
+        `Read the narrative bible (${VOICE_FILE}): how the story should sound. The user writes its voice pillars, character voices and anti-patterns; River adds the lines that landed and the lines that were cut. Read it before you write or rewrite prose.`,
+      inputSchema: {},
+      mutating: false,
+      async run() {
+        const voice = await readVoice(project.root)
+        if (voice === undefined) return { text: `No voice bible yet (${VOICE_FILE} does not exist or is empty).`, data: { voice: null, landed: [], cut: [] } }
+        return { text: voice, data: { voice, landed: voiceSection(voice, LANDED_HEADING), cut: voiceSection(voice, CUT_HEADING) } }
       },
     }),
 
@@ -553,6 +1331,112 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
         const passage = parseOnePassage(name, tags ?? [], rawText, rel)
         if (story.passages.some((p) => p.id === passage.id)) throw new Error(`a passage with id "${passage.id}" already exists in ${rel}; add an @id rule with another id`)
         return writeStory(rel, before, diagnostics, { ...story, passages: [...story.passages, passage] }, `Added passage ${name} (id ${passage.id}) to ${rel}.`)
+      },
+    }),
+
+    define({
+      name: "story_rename_passage",
+      description:
+        "Rename one passage and rewrite every link to it, save the file, and return a unified diff and any new lint problems. The passage id stays (an @id rule is added when the id came from the old name), so cards and layouts keyed by id still match.",
+      inputSchema: {
+        file: storyFile,
+        passageId: z.string().min(1).describe("The passage id (from story_outline or story_read)"),
+        newName: passageName.describe("The new passage name, as links will name it"),
+      },
+      mutating: true,
+      async run({ file, passageId, newName }) {
+        const rel = await storyRel(file)
+        const before = await readText(rel)
+        const { story, diagnostics } = await lintFile(rel)
+        const old = passageById(story, passageId)
+        if (!old) throw noPassageError(story, passageId)
+        if (old.name === newName) throw new Error(`passage ${passageId} is already named "${newName}"`)
+        const next = renamePassage(story, passageId, newName)
+        checkedStoryText(next, rel)
+        const links = (createStoryIndex(story).incoming.get(old.id) ?? []).length
+        const what = `Renamed passage ${passageId} from "${old.name}" to "${newName}" in ${rel} (${plural(links, "link")} to it). Its id is still ${passageId}.`
+        return writeStory(rel, before, diagnostics, next, what, { extra: { passageId, oldName: old.name, newName }, renames: [{ from: old.name, to: newName }] })
+      },
+    }),
+
+    define({
+      name: "story_delete_passage",
+      description:
+        "Remove one passage, save the file, and return a unified diff, the links the removal broke (they are left as written: point them elsewhere or remove them) and any new lint problems.",
+      inputSchema: {
+        file: storyFile,
+        passageId: z.string().min(1).describe("The passage id (from story_outline or story_read)"),
+      },
+      mutating: true,
+      async run({ file, passageId }) {
+        const rel = await storyRel(file)
+        const before = await readText(rel)
+        const { story, diagnostics } = await lintFile(rel)
+        const gone = passageById(story, passageId)
+        if (!gone) throw noPassageError(story, passageId)
+        const next = deletePassage(story, passageId)
+        const broken = newlyBrokenLinks(story, next)
+        const notes = broken.length > 0 ? [`Links this broke (${broken.length}); point them at another passage or remove them:`, ...broken.map((l) => `  ${l}`)] : ["No link led to it."]
+        if (story.start === gone.name) notes.push(`${gone.name} was the story's start passage: set "start" in StoryData to another passage.`)
+        return writeStory(rel, before, diagnostics, next, `Deleted passage ${gone.name} (id ${passageId}) from ${rel}.`, { notes, extra: { passageId, brokenLinks: broken } })
+      },
+    }),
+
+    define({
+      name: "story_batch_edit",
+      description:
+        "Apply several passage edits to one story file as one change: write (replace a passage's raw text), add, rename and delete, in the order given, each seeing the story the earlier ones left. " +
+        "All of them are applied or none: if any edit fails nothing is written and the error names the edit. The file is saved once; the result is one unified diff, then the whole lint report and the narrative notes, " +
+        "with every problem the edits brought marked (new). Use it for a rewrite that touches more than one passage.",
+      inputSchema: {
+        file: storyFile,
+        edits: z.array(storyEdit).min(1).max(STORY_EDITS_MAX).describe("The edits, in order. rawText is passage text without the :: header line; passageId is the id, not the name"),
+        summary: z.string().max(200).optional().describe("What the change does, in a line. Shown to the user when the client asks them to approve it"),
+      },
+      mutating: true,
+      async run({ file, edits, summary }) {
+        const staged = await stageEdits(file, edits)
+        await saveStory(project, staged.rel, staged.story)
+        const diff = unifiedDiff(staged.before, await readText(staged.rel), staged.rel)
+        const report = stagedReport(staged)
+        const why = summary?.replace(/\s+/g, " ").trim()
+        const lines = [`Applied ${plural(edits.length, "edit")} to ${staged.rel} in one write${why ? ` (${why})` : ""}:`, ...staged.applied.map((a, i) => `  ${i + 1}. ${a}`), "", diff || "(no change to the file)"]
+        if (staged.newlyBroken.length > 0) lines.push(`Links these edits broke (${staged.newlyBroken.length}):`, ...staged.newlyBroken.map((l) => `  ${l}`))
+        lines.push(...report.lines)
+        return {
+          text: lines.join("\n"),
+          data: { file: staged.rel, diff, applied: staged.applied, passageIds: staged.passageIds, diagnostics: staged.diagnostics, narrative: staged.narrative, newProblems: report.newProblems, brokenLinks: staged.newlyBroken },
+        }
+      },
+    }),
+
+    define({
+      name: "voice_note",
+      description:
+        `Record a line of taste in the narrative bible (${VOICE_FILE}): kind "landed" for a line that sounds right (an example to write toward), "cut" for a line that was thrown out (an example to avoid). ` +
+        `It goes under "${LANDED_HEADING}" or "${CUT_HEADING}"; the rest of the file is the user's and is not touched. Record what the user said about a line, not your own guess.`,
+      inputSchema: {
+        kind: z.enum(["landed", "cut"]),
+        key: z
+          .string()
+          .regex(/^[A-Za-z0-9][A-Za-z0-9 _.:#-]{0,63}$/, "letters, digits, spaces and _ . : # -")
+          .optional()
+          .describe("Where the line is from, written after it in brackets: a job, take or passage id. A key already in that section is not added twice. Default: a new one"),
+        text: z.string().min(1).max(600).describe("The line itself, or the line with a few words on why"),
+      },
+      mutating: true,
+      async run({ kind, key, text }) {
+        const line = text.replace(/\s+/g, " ").trim()
+        if (!line) throw new Error("voice_note needs a line of text")
+        const heading = kind === "landed" ? LANDED_HEADING : CUT_HEADING
+        const noteKey = key ?? `${defaultAuthor.replace(/[^A-Za-z0-9_.-]+/g, "-")}-${Date.now().toString(36)}`
+        const current = (await readVoice(project.root)) ?? ""
+        if (voiceSection(current, heading).some((b) => b === line || b.startsWith(`${line} (`))) {
+          return { text: `Already recorded under "${heading}" in ${VOICE_FILE}: ${line}`, data: { added: false, kind, key: noteKey } }
+        }
+        const added = await (kind === "landed" ? addVoiceExemplar : addVoiceCut)(project.root, noteKey, line)
+        if (!added) return { text: `Not added: "${heading}" in ${VOICE_FILE} already has a line with the key (${noteKey}). Pass another key to record this line too.`, data: { added: false, kind, key: noteKey } }
+        return { text: `Recorded under "${heading}" in ${VOICE_FILE}:\n- ${line} (${noteKey})`, data: { added: true, kind, key: noteKey, line } }
       },
     }),
 
@@ -672,25 +1556,143 @@ export function createRiverTools(project: Project, opts: RiverToolsOptions = {})
 
     define({
       name: "frames_capture",
-      description: "Run the engine to capture one shot from river.json. Saves the PNG frames under .river/captures/<shotId>/ and returns their paths.",
-      inputSchema: { shotId: z.string().min(1) },
+      description:
+        "Run the engine to capture shots from river.json. Give shotId for one shot, shotIds for several, or all: true for every shot. " +
+        "Saves the PNG frames under .river/captures/<shotId>/ and returns their paths. Several shots run in one engine call when the adapter can batch them.",
+      inputSchema: {
+        shotId: z.string().min(1).optional().describe("One shot id"),
+        shotIds: z.array(z.string().min(1)).max(200).optional().describe("Several shot ids, captured together"),
+        all: z.boolean().optional().describe("Capture every shot in river.json"),
+      },
       mutating: true,
-      async run({ shotId }) {
-        if (!project.manifest.shots.some((s) => s.id === shotId)) {
-          throw new Error(`no shot "${shotId}" in river.json. Shots: ${project.manifest.shots.map((s) => s.id).join(", ") || "(none)"}`)
+      async run({ shotId, shotIds, all }) {
+        const given = [shotId !== undefined, (shotIds?.length ?? 0) > 0, all === true].filter(Boolean).length
+        if (given === 0) throw new Error('frames_capture needs one of: shotId (one shot), shotIds (a non-empty list) or all: true (every shot in river.json)')
+        if (given > 1) throw new Error("frames_capture takes only one of shotId, shotIds and all")
+        const known = project.manifest.shots.map((s) => s.id)
+        const missing = (id: string) => new Error(`no shot "${id}" in river.json. Shots: ${known.join(", ") || "(none)"}`)
+        if (shotId !== undefined) {
+          if (!known.includes(shotId)) throw missing(shotId)
+          const adapter = opts.adapter ?? adapterFor(project)
+          const capture = await captureShot(project, shotId, adapter)
+          return { text: [`Captured ${shotId} at rev ${capture.rev} (${plural(capture.files.length, "frame")}):`, ...capture.files].join("\n"), data: capture }
         }
+        const ids = all === true ? known : [...new Set(shotIds)]
+        if (all === true && ids.length === 0) throw new Error("river.json has no shots to capture")
+        for (const id of ids) if (!known.includes(id)) throw missing(id)
         const adapter = opts.adapter ?? adapterFor(project)
-        const capture = await captureShot(project, shotId, adapter)
-        return { text: [`Captured ${shotId} at rev ${capture.rev} (${plural(capture.files.length, "frame")}):`, ...capture.files].join("\n"), data: capture }
+        const captures = await captureShots(project, ids, adapter)
+        const lines = [`Captured ${plural(captures.length, "shot")}:`]
+        for (const c of captures) lines.push(`${c.shotId} at rev ${c.rev} (${plural(c.files.length, "frame")}):`, ...c.files.map((f) => `  ${f}`))
+        return { text: lines.join("\n"), data: { captures } }
       },
     }),
   ]
 
+  /** writing_write: one take of this server's writing job, checked like story_batch_edit but saved beside the story, never in it. */
+  function writingWrite(writingId: string): RiverTool {
+    assertWritingId(writingId)
+    const folder = writingPath(writingId)
+    /** The take file, refused unless it is exactly <root>/.river/writing/<id>/take_<variant>.json with no link leading elsewhere. */
+    const takeFile = (variant: string) => {
+      const rel = `${folder}/take_${variant}.json`
+      const full = safePath(project, rel)
+      const want = path.join(realpathSync(project.root), ".river", "writing", writingId, `take_${variant}.json`)
+      if (path.resolve(full) !== path.resolve(want)) throw new Error(`river: cannot write ${rel}: it does not resolve inside ${folder}/ of this project (a link leads elsewhere)`)
+      return { rel, full }
+    }
+    return define({
+      name: "writing_write",
+      description:
+        `Write one take of this writing job: a version of the story as a list of passage edits (the edits of story_batch_edit). River applies them to the story file in memory, checks the result and saves the take as ${folder}/take_<variant>.json; ` +
+        "the story file itself is never changed, the user reads the takes in River and keeps one. Every take starts from the story as it is on disk, not from another take. " +
+        "The result is the take's unified diff, then the lint report and the narrative notes with the problems this take brings marked (new): fix them and write the take again until none is left. " +
+        "Writing a variant again replaces it; edits: [] with remove: true deletes it.",
+      inputSchema: {
+        variant: z.enum(WRITING_VARIANTS).describe("The take's letter; its card is labelled A..E"),
+        storyFile,
+        caption: z.string().max(160).optional().describe('One line shown under the take\'s card, e.g. "Drier: the dog gets the last word". Needed unless remove'),
+        summary: z.string().max(600).optional().describe("What this take changes and why, in a sentence or two. Needed unless remove"),
+        edits: z.array(storyEdit).max(STORY_EDITS_MAX).describe("The take's edits, in order. rawText is passage text without the :: header line; passageId is the id, not the name"),
+        remove: z.boolean().optional().describe("With edits: [], delete this take"),
+      },
+      mutating: true,
+      async run({ variant, storyFile: file, caption, summary, edits, remove }) {
+        const take = takeFile(variant)
+        const letter = variant.toUpperCase()
+        if (remove) {
+          if (edits.length > 0) throw new Error("river: remove deletes the take; send it with edits: []")
+          const had = existsSync(take.full)
+          await rm(take.full, { force: true })
+          return { text: had ? `Removed take ${letter} (${take.rel}).` : `There is no take ${letter} to remove.`, data: { file: take.rel, removed: had } }
+        }
+        if (edits.length === 0) throw new Error("river: a take needs at least one edit (edits: [] with remove: true deletes a take)")
+        const line = caption?.replace(/\s+/g, " ").trim()
+        if (!line) throw new Error("river: a take needs a caption: one line that tells this take from the others")
+        if (!summary?.trim()) throw new Error("river: a take needs a summary: what it changes and why, in a sentence or two")
+        // Stored as applied, so whoever applies the take's edits again gets the same text.
+        const stored: StoryEdit[] = edits.map((e) => (e.op === "write" ? { ...e, rawText: normalRawText(e.rawText) } : e))
+        const staged = await stageEdits(file, stored)
+        const diff = unifiedDiff(staged.before, staged.after, staged.rel)
+        if (!diff) throw new Error(`river: these edits change nothing in ${staged.rel}; a take has to differ from the story`)
+        const report = stagedReport(staged)
+        const notes = narrativeTally(staged.narrative)
+        const saved: WritingTakeFile = {
+          version: 1,
+          writingId,
+          variant,
+          caption: line,
+          summary: summary.trim(),
+          storyFile: staged.rel,
+          edits: stored,
+          passageIds: staged.passageIds,
+          baseSha256: createHash("sha256").update(staged.before, "utf8").digest("hex"),
+          text: staged.after,
+          diff,
+          lintErrors: report.errors,
+          lintWarnings: report.warnings,
+          narrativeWarnings: notes.warnings,
+          narrativeInfos: notes.infos,
+          writtenAt: new Date().toISOString(),
+        }
+        await writeAtomic(take.full, `${JSON.stringify(saved, null, 2)}\n`)
+        const fresh = report.newProblems.filter((d) => d.severity !== "info")
+        const lines = [
+          `Wrote take ${letter} of ${staged.rel} to ${take.rel} (${plural(edits.length, "edit")}). The story file is unchanged; the user reads the takes in River and keeps one.`,
+          "",
+          diff,
+        ]
+        if (staged.newlyBroken.length > 0) lines.push(`Links this take breaks (${staged.newlyBroken.length}):`, ...staged.newlyBroken.map((l) => `  ${l}`))
+        lines.push(...report.lines)
+        lines.push(fresh.length > 0 ? `This take brings ${plural(fresh.length, "new problem")}, marked (new) above. Fix that and write take ${letter} again.` : "This take brings no new errors or warnings.")
+        return { text: lines.join("\n"), data: { file: take.rel, take: saved, diagnostics: staged.diagnostics, narrative: staged.narrative, newProblems: report.newProblems } }
+      },
+    })
+  }
+
   tools.push(...boardTools(project, defaultAuthor))
-  // A concept job's own server never starts another job.
+  // A job's own server never starts another job, of either kind.
   if (opts.conceptId !== undefined) tools.push(conceptWrite(project, opts.conceptId))
-  else tools.push(conceptRequest(project, defaultAuthor, opts.jobLauncher ?? launchConceptJob))
+  else if (opts.writingId !== undefined) tools.push(writingWrite(opts.writingId))
+  else {
+    tools.push(conceptRequest(project, defaultAuthor, opts.jobLauncher ?? launchConceptJob))
+    tools.push(writingRequest(project, defaultAuthor, opts.writingJobLauncher ?? launchWritingJob))
+  }
   return tools
+}
+
+const SAFE_WRITING_ID = /^[A-Za-z0-9_-]{1,64}$/
+/** Device names Windows reserves: a folder named "con" or "nul" cannot be made there. */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+
+function assertWritingId(writingId: string): void {
+  if (typeof writingId !== "string" || !SAFE_WRITING_ID.test(writingId) || WINDOWS_RESERVED.test(writingId)) throw new Error(`river: invalid writing id ${JSON.stringify(writingId)}`)
+}
+
+/** .river/writing/<writingId>: where a writing job's takes are kept, relative to the project root. */
+export function writingPath(writingId: string): string {
+  assertWritingId(writingId)
+  return `.river/writing/${writingId}`
 }
 
 function conceptWrite(project: Project, conceptId: string): RiverTool {
@@ -1148,7 +2150,6 @@ function boardTools(project: Project, author: string): RiverTool[] {
 }
 
 const BACKENDS = ["claude-code", "api-key"] as const
-const MODELS = ["claude-sonnet-5-5", "claude-opus-5-5"] as const
 
 /** concept_request: a River concept job for a mark, run by `river job start` in its own process. */
 function conceptRequest(project: Project, author: string, launch: JobLauncher): RiverTool {
@@ -1163,7 +2164,7 @@ function conceptRequest(project: Project, author: string, launch: JobLauncher): 
       board: boardName,
       markId: entityId,
       backend: z.enum(BACKENDS).optional().describe('Default "claude-code": the user\'s own Claude Code sign-in'),
-      model: z.enum(MODELS).optional().describe('Default "claude-sonnet-5-5"'),
+      model: modelId.optional().describe('Any model id, e.g. claude-haiku-4-5. Default "claude-sonnet-5-5"'),
     },
     mutating: true,
     async run({ board: name, markId, backend, model }) {
@@ -1179,6 +2180,42 @@ function conceptRequest(project: Project, author: string, launch: JobLauncher): 
           `Started River concept job ${jobId} for ${markId} (${settings.backend}, ${settings.model})${job ? `; it is ${job.status}` : ""}. Its log: ${started.log}.`,
           "It runs in the background for a few minutes, then River lays its note and options beside the mark. Nothing is drawn until the user reads and approves the scripts in River (or with river job approve).",
           `The mark now follows the job: do not reply on it with a status. board_read shows the job's cards as pending; card_view shows a render once it exists.`,
+        ].join("\n"),
+        data: { jobId, log: started.log },
+      }
+    },
+  })
+}
+
+/** writing_request: a River writing job for a mark, run by `river write-job start` in its own process. */
+function writingRequest(project: Project, author: string, launch: JobLauncher): RiverTool {
+  const root = project.root
+  return define({
+    name: "writing_request",
+    description:
+      "Ask River's story writer to rewrite the prose a mark is on: the way to answer requests to rewrite, punch up, shorten or re-voice story text (make the pond scene calmer, 3 takes on this line, tighten the ending). " +
+      "It starts a River writing job and returns its id at once; the job takes a few minutes in the background and puts its takes beside the mark as cards. " +
+      "Nothing in the story changes until the user reads the takes in River and keeps one; the mark then follows the job, so do not answer it yourself.",
+    inputSchema: {
+      board: boardName,
+      markId: entityId,
+      backend: z.enum(BACKENDS).optional().describe('Default "claude-code": the user\'s own Claude Code sign-in'),
+      model: modelId.optional().describe('Any model id, e.g. claude-haiku-4-5. Default "claude-sonnet-5-5"'),
+    },
+    mutating: true,
+    async run({ board: name, markId, backend, model }) {
+      const b = name ?? DEFAULT_BOARD
+      const mark = (await loadBoard(root, b)).marks.find((m) => m.id === markId)
+      if (!mark) throw new Error(`no mark "${markId}" on board ${b}`)
+      const jobId = newBoardId("j_")
+      const settings = { backend: backend ?? "claude-code", model: model ?? "claude-sonnet-5-5" } as const
+      const started = await launch({ root, board: b, markId, jobId, by: author, ...settings })
+      const job = await loadJob(root, jobId).catch(() => undefined)
+      return {
+        text: [
+          `Started River writing job ${jobId} for ${markId} (${settings.backend}, ${settings.model})${job ? `; it is ${job.status}` : ""}. Its log: ${started.log}.`,
+          "It runs in the background for a few minutes, then River lays its takes beside the mark. The story files do not change until the user keeps a take in River.",
+          `The mark now follows the job: do not reply on it with a status. board_read shows the job's takes as pending cards; card_read shows a take's text.`,
         ].join("\n"),
         data: { jobId, log: started.log },
       }

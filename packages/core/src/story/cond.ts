@@ -9,9 +9,12 @@ type Token =
   | { t: "op"; v: CmpOp }
   | { t: "lp" }
   | { t: "rp" }
+  | { t: "visit"; fn: "visited" | "visits"; id: string }
 
 const KEYWORDS = new Set(["and", "or", "not", "true", "false"])
 const IDENT = /^[A-Za-z_][A-Za-z0-9_.]*$/
+/** `visited(id)`, `visits("odd id")`. The id is anything up to ")" (a quoted id may hold ")"). */
+const VISIT_CALL = /^(visited|visits)\s*\(\s*("(?:[^"\\]|\\.)*"|[^()"]*?)\s*\)/
 
 function tokenize(src: string): Token[] {
   const out: Token[] = []
@@ -19,6 +22,20 @@ function tokenize(src: string): Token[] {
   while (i < src.length) {
     const c = src[i]!
     if (/\s/.test(c)) { i++; continue }
+    // `visited(id)` / `visits(id)`: only with "(" right after (spaces allowed), so both stay legal variable names.
+    const call = VISIT_CALL.exec(src.slice(i))
+    if (call && (i === 0 || !/[A-Za-z0-9_.]/.test(src[i - 1]!))) {
+      const raw = call[2]!.trim()
+      let id = raw
+      if (raw.startsWith('"')) {
+        if (raw.length < 2 || !raw.endsWith('"')) throw new Error(`unterminated string in "${src}"`)
+        id = raw.slice(1, -1).replace(/\\(.)/g, "$1")
+      }
+      if (id === "") throw new Error(`${call[1]}() needs a passage id in "${src}"`)
+      out.push({ t: "visit", fn: call[1] as "visited" | "visits", id })
+      i += call[0].length
+      continue
+    }
     if (c === "(") { out.push({ t: "lp" }); i++; continue }
     if (c === ")") { out.push({ t: "rp" }); i++; continue }
     const two = src.slice(i, i + 2)
@@ -69,6 +86,19 @@ export function parseCond(src: string): Cond {
     const t = peek()
     if (!t) throw new Error(`condition ends too early: "${src}"`)
     if (t.t === "ident" && t.v === "not") { pos++; return { kind: "not", term: parseUnary() } }
+    if (t.t === "visit") {
+      pos++
+      const op = peek()
+      if (op?.t !== "op") {
+        if (t.fn === "visits") throw new Error(`visits(${t.id}) needs a comparison, e.g. visits(${t.id}) >= 2, in "${src}"`)
+        return { kind: "visit", passageId: t.id, op: ">=", value: 1 }
+      }
+      pos++
+      const v = peek()
+      if (v?.t !== "num") throw new Error(`${t.fn}(${t.id}) compares with a number in "${src}"`)
+      pos++
+      return { kind: "visit", passageId: t.id, op: op.v, value: v.v }
+    }
     if (t.t === "lp") {
       pos++
       const inner = parseOr()
@@ -122,14 +152,34 @@ export function formatCond(cond: Cond): string {
     case "and": return cond.terms.map(wrap).join(" and ")
     case "or": return cond.terms.map(wrap).join(" or ")
     case "not": return `not ${wrap(cond.term)}`
+    case "visit": {
+      const id = /^[A-Za-z0-9_.-]+$/.test(cond.passageId) ? cond.passageId : JSON.stringify(cond.passageId)
+      return cond.op === ">=" && cond.value === 1 ? `visited(${id})` : `visits(${id}) ${cond.op} ${cond.value}`
+    }
   }
 }
 
-export function evalCond(cond: Cond, state: GameState): boolean {
+function compare(a: number, op: CmpOp, b: number): boolean {
+  switch (op) {
+    case "==": return a === b
+    case "!=": return a !== b
+    case "<": return a < b
+    case "<=": return a <= b
+    case ">": return a > b
+    case ">=": return a >= b
+  }
+}
+
+/**
+ * True when the condition holds in `state`. `visits` maps passage ids to how many times the player entered them
+ * (for `visited(id)` / `visits(id)`); without it every count is 0.
+ */
+export function evalCond(cond: Cond, state: GameState, visits: Readonly<Record<string, number>> = {}): boolean {
   switch (cond.kind) {
-    case "and": return cond.terms.every((t) => evalCond(t, state))
-    case "or": return cond.terms.some((t) => evalCond(t, state))
-    case "not": return !evalCond(cond.term, state)
+    case "and": return cond.terms.every((t) => evalCond(t, state, visits))
+    case "or": return cond.terms.some((t) => evalCond(t, state, visits))
+    case "not": return !evalCond(cond.term, state, visits)
+    case "visit": return compare(Object.hasOwn(visits, cond.passageId) ? visits[cond.passageId]! : 0, cond.op, cond.value)
     case "cmp": {
       const a = state[cond.variable]
       const b = cond.value

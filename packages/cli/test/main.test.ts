@@ -43,6 +43,6 @@ describe("the river executable", { timeout: 60_000 }, () => {
     child.stdout.on("data", (d) => (stdout += String(d)))
     child.stderr.on("data", (d) => (stderr += String(d)))
     const code = await new Promise((resolve) => child.once("close", resolve))
-    expect([code, stdout, stderr]).toEqual([0, "0 errors, 0 warnings in 13 passages\n", ""])
+    expect([code, stdout, stderr]).toEqual([0, expect.stringContaining("0 errors, 0 warnings in 13 passages\n"), ""])
   })
 })

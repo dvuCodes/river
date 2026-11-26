@@ -29,6 +29,8 @@ export function markLockFile(workspaceRoot: string, board: string, markId: strin
 
 export const briefLockFile = (workspaceRoot: string) => path.join(workspaceRoot, ".river", "locks", "brief.lock")
 
+export const voiceLockFile = (workspaceRoot: string) => path.join(workspaceRoot, ".river", "locks", "voice.lock")
+
 async function readOwner(file: string): Promise<{ text: string; owner?: LockOwner; ageMs: number } | undefined> {
   try {
     const [text, info] = await Promise.all([readFile(file, "utf8"), stat(file)])

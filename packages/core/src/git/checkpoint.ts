@@ -74,6 +74,18 @@ export async function listCheckpoints(root: string): Promise<Checkpoint[]> {
   return list.sort((a, b) => refNumber(b.ref) - refNumber(a.ref))
 }
 
+/**
+ * Keep the newest `keep` checkpoints (by number) and delete the older refs. The commits stay in the object store
+ * until git's own gc. Returns the deleted checkpoints, newest first.
+ */
+export async function pruneCheckpoints(root: string, keep: number): Promise<Checkpoint[]> {
+  if (!Number.isInteger(keep) || keep < 0) throw new Error(`river: keep must be a whole number of checkpoints, 0 or more (got ${String(keep)})`)
+  const old = (await listCheckpoints(root)).slice(keep)
+  // The old value makes each delete fail rather than drop a ref another process just moved.
+  for (const c of old) await git(root, ["update-ref", "-d", c.ref, c.sha])
+  return old
+}
+
 /** Paths (posix, root-relative) of all blobs in a tree. */
 async function treeFiles(root: string, tree: string): Promise<string[]> {
   const out = await git(root, ["-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--name-only", tree])

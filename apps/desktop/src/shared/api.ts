@@ -14,6 +14,7 @@ import type {
 import type {
   Card,
   ChangePlan,
+  CheckDataResult,
   Edge,
   Job,
   Mark,
@@ -40,6 +41,8 @@ export interface ProjectInfo {
   engine: string
   stories: string[]
   shots: ShotDef[]
+  /** river.json names a checkData command (the Story map's Check data button runs it). */
+  hasCheckData?: boolean
   /** Project could not be loaded: the message, with root set to the folder tried. */
   error?: string
 }
@@ -84,9 +87,48 @@ export interface StoryDTO {
 
 export interface PathDTO {
   steps: { passageId: string; choiceIndex?: number }[]
-  end: "ending" | "dead-end" | "loop"
+  /** "return": an interrupt route that ends by taking its `@return` choice. */
+  end: "ending" | "dead-end" | "loop" | "return"
   satisfiable: boolean
   conditions: string[]
+}
+
+export interface PathsResultDTO {
+  /** Routes from the start passage. */
+  routes: PathDTO[]
+  /** Routes through each interrupt passage, from its entry to `@return` (or an ending, dead end or loop). */
+  interrupts: PathDTO[]
+  /** The route limit (500 per list) cut either list short. */
+  truncated: boolean
+}
+
+export interface PlayChoiceDTO {
+  label: string
+  target: string
+  open: boolean
+  when?: string
+  /** The choice's `@hint`, a short line a game shows with the option. */
+  hint?: string
+  /** Why a closed choice is closed: its @when, what its @cost needs, its target's @when on arrival, or "already chosen". */
+  closedReason?: string
+  broken: boolean
+}
+
+export interface PlayInterruptDTO {
+  id: string
+  name: string
+  /** Can start now: its @when holds, no interrupt is running, and the story has not ended. */
+  open: boolean
+  when?: string
+}
+
+export interface PlayStoryletDTO {
+  id: string
+  name: string
+  open: boolean
+  weight: number
+  priority: number
+  cooldownLeft: number
 }
 
 export interface OpenStateDTO {
@@ -97,7 +139,15 @@ export interface OpenStateDTO {
 export interface PlaySnapshot {
   sessionId: string
   passage: PassageDTO
-  choices: { label: string; target: string; open: boolean; when?: string; broken: boolean }[]
+  /** The passage prose with its templates ({when}, {var}, {once}, {cycle}…) filled in for this state and visit. */
+  renderedText: string
+  choices: PlayChoiceDTO[]
+  /** The story's interrupt passages and whether each can start now. */
+  interrupts: PlayInterruptDTO[]
+  /** The story's storylet passages, with whether each can be drawn now, its weight, priority and cooldown. */
+  storylets?: PlayStoryletDTO[]
+  /** An interrupt is running: a `@return` choice goes back to where it started. */
+  inInterrupt: boolean
   state: GameState
   /** Passage names visited, oldest first. */
   history: string[]
@@ -135,6 +185,10 @@ export interface AgentStatus {
   /** True when the user picked the backend (false: it is the default). */
   backendChosen: boolean
   model: AgentModel
+  /** Models River knows by name (@river/agent KNOWN_MODELS), for the pickers. Any other safe model id is accepted too. */
+  knownModels: AgentModel[]
+  /** The model for self-check turns (the look at renders, the table read). Absent: the job's own model. */
+  selfCheckModel?: AgentModel
   claudePath?: string
   /** After Godot renders a job's scripts, one more short turn looks at the pictures and may rewrite the note and captions. */
   selfCheck: boolean
@@ -145,6 +199,8 @@ export interface AgentStatus {
 export interface AgentPrefsUpdate {
   backend?: AgentBackend
   model?: AgentModel
+  /** Empty string clears it (self-check turns use the job's own model). */
+  selfCheckModel?: AgentModel
   /** Empty string clears it (use PATH). */
   claudePath?: string
   selfCheck?: boolean
@@ -191,6 +247,10 @@ export type CardView =
   | { kind: "note"; job?: ConceptJob }
 
 export type ConceptJob = Pick<Job, "id" | "status" | "summary" | "error" | "scripts"> & {
+  /** "writing" for a story writer's job; absent or "concept" for the concept artist's. */
+  kind?: "concept" | "writing"
+  /** Writing jobs: the takes the writer offered, one note card each. */
+  takes?: Job["takes"]
   /** The user replied on the mark since this answer, or the job failed: it can be revised. */
   revisable: boolean
   /** The agent is looking at the renders this app approved (the job is still "rendering"); jobStopLook ends it. */
@@ -262,16 +322,32 @@ export interface RiverApi {
   renamePassage(rel: string, passageId: string, newName: string): Promise<StoryDTO>
   /** Write card positions (passage id -> [x, y]) into the story file passage headers. Only the given passages change. */
   savePositions(rel: string, positions: Record<string, [number, number]>): Promise<void>
-  paths(rel: string): Promise<PathDTO[]>
+  paths(rel: string): Promise<PathsResultDTO>
   openState(rel: string, state: GameState): Promise<OpenStateDTO>
+  /** Add a passage (name, optional tags, raw body text) to the story file. */
+  addPassage(rel: string, name: string, rawText: string, tags?: string[]): Promise<StoryDTO>
+  /** Replace a passage's tags. */
+  setPassageTags(rel: string, passageId: string, tags: string[]): Promise<StoryDTO>
+  /** Remove a passage (never the start passage). Links to it are left as written; lint reports them. */
+  deletePassage(rel: string, passageId: string): Promise<StoryDTO>
+  /** Write the story's JSON export to `<manifest export folder>/<stem>.json`. */
+  exportStory(rel: string): Promise<{ outFile: string; passageCount: number }>
+  /** Run river.json's checkData command after a fresh export of every story. */
+  checkData(): Promise<CheckDataResult>
   // playtest
   playStart(rel: string, from?: string): Promise<PlaySnapshot>
   playChoose(sessionId: string, index: number): Promise<PlaySnapshot>
   playUndo(sessionId: string): Promise<PlaySnapshot>
   playSetVar(sessionId: string, name: string, value: number | string | boolean): Promise<PlaySnapshot>
+  /** Start an interrupt passage (by name) from the current passage. */
+  playInterrupt(sessionId: string, name: string): Promise<PlaySnapshot>
+  /** Draw one open storylet from the deck. */
+  playDrawStorylet(sessionId: string): Promise<PlaySnapshot>
   // frames and review
   frames(): Promise<FramesDTO>
   capture(shotId: string): Promise<CaptureDTO>
+  /** Capture every shot in river.json (one engine call when the adapter can batch). */
+  captureAll(): Promise<CaptureDTO[]>
   addThread(target: ReviewThread["target"], text: string): Promise<ReviewThread>
   reply(threadId: string, text: string): Promise<ReviewThread>
   setThreadStatus(threadId: string, status: ReviewStatus): Promise<ReviewThread>
@@ -283,6 +359,8 @@ export interface RiverApi {
   boardOpen(name: string): Promise<BoardDTO>
   /** One card, mark or edge as it is on disk now; null when it was deleted. */
   boardCard(name: string, cardId: string): Promise<CardDTO | null>
+  /** Several cards at once, resolved together (each story file and capture folder is read once). Null for a deleted card. */
+  boardCards(name: string, cardIds: string[]): Promise<Record<string, CardDTO | null>>
   boardMark(name: string, markId: string): Promise<Mark | null>
   boardEdge(name: string, edgeId: string): Promise<Edge | null>
   boardSaveEdge(name: string, edge: NewEdge): Promise<Edge>
@@ -336,6 +414,15 @@ export interface RiverApi {
   jobStopLook(jobId: string): Promise<void>
   /** The runner's output for a job started outside the app (.river/logs/<job>.log); null when there is none. */
   jobLog(jobId: string): Promise<string | null>
+  // writing jobs (the story writer answers a mark with takes, one note card each)
+  /** Ask the story writer about a mark. Runs in the background like jobStart. */
+  writeJobStart(board: string, markId: string): Promise<void>
+  /** New takes answering the user's replies on the mark. */
+  writeJobRevise(jobId: string): Promise<void>
+  /** Apply take `variant` ("a".."e") to the story file. `saveExemplar` (default true) keeps a line of it in .river/voice.md. */
+  writeJobAccept(jobId: string, variant: string, saveExemplar?: boolean): Promise<void>
+  /** `reason`, when given, goes into .river/voice.md under "Lines we cut". */
+  writeJobDismiss(jobId: string, reason?: string): Promise<void>
   // agent
   agentStatus(): Promise<AgentStatus>
   agentStart(req: AgentStartRequest): Promise<string>

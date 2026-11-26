@@ -30,7 +30,7 @@ describe("buildQueryOptions", () => {
     expect(o.strictMcpConfig).toBe(true)
     expect(o.permissionMode).toBe("default")
     expect(o.tools).toEqual(["Read", "Glob", "Grep"])
-    expect(o.includePartialMessages).toBe(false)
+    expect(o.includePartialMessages).toBe(true)
     expect(o.resume).toBeUndefined()
   })
 
@@ -52,7 +52,7 @@ describe("buildQueryOptions", () => {
     const story = buildQueryOptions(req({ mode: "story" }), deps()).allowedTools!
     expect(story).not.toContain("mcp__river__plan_save")
     expect(story).not.toContain("mcp__river__story_write_passage")
-    expect(story).toHaveLength(16)
+    expect(story).toHaveLength(23)
 
     const impl = buildQueryOptions(req({ mode: "implement", planId: "p_1" }), deps()).allowedTools!
     expect(impl).not.toContain("mcp__river__implement_edit")

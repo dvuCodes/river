@@ -4,6 +4,7 @@ import path from "node:path"
 import picomatch from "picomatch"
 import { DEFAULT_EDITABLE } from "../project/project"
 import type { ChangePlan, Project, ReviewStatus, ReviewThread } from "../project/types"
+import { IO_CONCURRENCY, mapLimit } from "../util/map-limit"
 import { assertSafeId, newId, readJson, writeJsonAtomic } from "./store"
 
 const STATUSES: ReviewStatus[] = ["open", "planned", "accepted", "done", "wontfix"]
@@ -56,11 +57,9 @@ async function findThread(p: Project, threadId: string): Promise<{ shotId: strin
 /** Threads from .river/review/*.json. With shotId, only that shot. */
 export async function listThreads(project: Project, shotId?: string): Promise<ReviewThread[]> {
   if (shotId !== undefined) return readThreads(threadFile(project, shotId))
-  const out: ReviewThread[] = []
-  for (const name of await jsonFilesIn(reviewDir(project))) {
-    out.push(...(await readThreads(path.join(reviewDir(project), name))))
-  }
-  return out
+  const dir = reviewDir(project)
+  const lists = await mapLimit(await jsonFilesIn(dir), IO_CONCURRENCY, (name) => readThreads(path.join(dir, name)))
+  return lists.flat()
 }
 
 export async function addThread(project: Project, target: ReviewThread["target"], author: string, text: string): Promise<ReviewThread> {
@@ -119,11 +118,7 @@ export async function loadPlan(project: Project, planId: string): Promise<Change
 }
 
 export async function listPlans(project: Project): Promise<ChangePlan[]> {
-  const out: ChangePlan[] = []
-  for (const name of await jsonFilesIn(plansDir(project))) {
-    out.push(await loadPlan(project, name.slice(0, -".json".length)))
-  }
-  return out
+  return mapLimit(await jsonFilesIn(plansDir(project)), IO_CONCURRENCY, (name) => loadPlan(project, name.slice(0, -".json".length)))
 }
 
 export async function setPlanStatus(project: Project, planId: string, status: ChangePlan["status"]): Promise<ChangePlan> {

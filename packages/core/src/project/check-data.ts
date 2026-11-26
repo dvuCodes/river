@@ -1,8 +1,9 @@
 import { exec } from "node:child_process"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { exportStory } from "../export/export"
+import { loadStoryWorkspace } from "../story/workspace"
 import type { StateSchema } from "../story/types"
 import { listStories, loadStory } from "./project"
 import type { Project } from "./types"
@@ -18,6 +19,29 @@ export interface CheckDataResult {
 
 const TIMEOUT_MS = 60_000
 
+const stripStoryExt = (p: string) => p.replace(/\.(twee|tw)$/i, "")
+
+function storyIdsFor(files: readonly string[], storiesDir: string): Map<string, string> {
+  const norm = files.map((f) => f.replace(/\\/g, "/"))
+  const stems = norm.map((f) => stripStoryExt(path.basename(f)))
+  const counts = new Map<string, number>()
+  for (const s of stems) counts.set(s.toLowerCase(), (counts.get(s.toLowerCase()) ?? 0) + 1)
+  const dir = storiesDir.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "")
+  const prefix = dir && dir !== "." ? `${dir}/` : ""
+  const out = new Map<string, string>()
+  for (let i = 0; i < norm.length; i++) {
+    const f = norm[i]!
+    const stem = stems[i]!
+    if ((counts.get(stem.toLowerCase()) ?? 0) > 1) {
+      const under = prefix && f.startsWith(prefix) ? f.slice(prefix.length) : f.replace(/^\.\//, "")
+      out.set(files[i]!, stripStoryExt(under))
+    } else {
+      out.set(files[i]!, stem)
+    }
+  }
+  return out
+}
+
 /**
  * Run river.json's `checkData` command from the project root, after exporting every story to a temporary folder
  * it gets as RIVER_EXPORT_DIR, so it never checks a stale export. The command is the user's own, like an npm
@@ -28,11 +52,21 @@ export async function runCheckData(project: Project, schema: StateSchema): Promi
   if (!command) throw new Error("river.json has no checkData command")
   const dir = await mkdtemp(path.join(tmpdir(), "river-export-"))
   try {
-    for (const rel of await listStories(project)) {
-      const { story } = await loadStory(project, rel)
-      const stem = path.basename(rel).replace(/\.(twee|tw)$/i, "")
+    const files = await listStories(project)
+    const ids = storyIdsFor(files, project.manifest.stories)
+    const loaded = await Promise.all(
+      files.map(async (rel) => {
+        const { story } = await loadStory(project, rel)
+        return { file: rel, id: ids.get(rel) ?? stripStoryExt(path.basename(rel)), story }
+      }),
+    )
+    const workspace = loaded.length >= 2 ? loadStoryWorkspace(loaded) : undefined
+    for (const { file: rel, id, story } of loaded) {
       try {
-        await writeFile(path.join(dir, `${stem}.json`), JSON.stringify(exportStory(story, schema, stem), null, 2) + "\n", "utf8")
+        const exported = exportStory(story, schema, id, workspace ? { workspace } : undefined)
+        const dest = path.join(dir, ...id.split("/")) + ".json"
+        await mkdir(path.dirname(dest), { recursive: true })
+        await writeFile(dest, JSON.stringify(exported, null, 2) + "\n", "utf8")
       } catch {
         return { command, ok: false, output: "", problem: `not run: ${rel} has lint errors, so there is no export to check` }
       }

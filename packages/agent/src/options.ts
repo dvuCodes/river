@@ -56,17 +56,18 @@ export function preAllowedTools(mode: AgentTurnRequest["mode"]): string[] {
   return [...readTools, ...autoWrites].map((t) => MCP_PREFIX + t)
 }
 
-/** The stdio config of the "river" MCP server, shared by both backends. A concept turn gets `--concept <id>`. */
+/** The stdio config of the "river" MCP server, shared by both backends. A concept turn gets `--concept <id>`, a writer turn `--writing <id>`. */
 export function riverMcpServer(
-  req: Pick<AgentTurnRequest, "mode" | "conceptId">,
+  req: Pick<AgentTurnRequest, "mode" | "conceptId" | "writingId">,
   root: string,
   launch: McpLaunch,
   extraArgs: string[] = [],
 ): { command: string; args: string[]; env: Record<string, string> } {
   const concept = req.mode === "concept" && req.conceptId ? ["--concept", req.conceptId] : []
+  const writing = req.mode === "writer" && req.writingId ? ["--writing", req.writingId] : []
   return {
     command: launch.command,
-    args: [...launch.args, "--root", root, "--tools", MODE_TOOLS[req.mode].join(","), ...concept, ...extraArgs],
+    args: [...launch.args, "--root", root, "--tools", MODE_TOOLS[req.mode].join(","), ...concept, ...writing, ...extraArgs],
     // The River server needs no Anthropic key; make sure it does not inherit one.
     // Inside Electron, process.execPath is the app itself; ELECTRON_RUN_AS_NODE makes it run the script as Node.
     env: { ANTHROPIC_API_KEY: "", ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}) },
@@ -121,7 +122,8 @@ export function buildQueryOptions(req: AgentTurnRequest, deps: QueryOptionDeps):
     effort: deps.effort ?? "high",
     maxTurns: deps.maxTurns ?? 40,
     abortController: deps.abortController,
-    includePartialMessages: false,
+    // Stream text as it is written ("text-delta" events); whole messages still arrive after.
+    includePartialMessages: true,
   }
   if (req.sessionId) options.resume = req.sessionId
   if (deps.pathToClaudeCodeExecutable) options.pathToClaudeCodeExecutable = deps.pathToClaudeCodeExecutable

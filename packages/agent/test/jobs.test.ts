@@ -360,6 +360,28 @@ describe("concept jobs", { timeout: 120_000 }, () => {
     }
   })
 
+  it("looks at the renders on selfCheckModel when given, and on the job's model otherwise", async () => {
+    for (const [override, expected] of [[undefined, "claude-sonnet-5-5"], ["claude-haiku-4-5", "claude-haiku-4-5"]] as const) {
+      const turns: AgentTurnRequest[] = []
+      const job = await start({ runTurn: fakeTurn(DRAW, turns), render: fakeRender() })
+      expect(job.status).toBe("approval")
+      const deps: JobDeps = { runTurn: fakeTurn(DRAW, turns), render: fakeRender(), env: { GODOT_BIN: "godot-not-run" }, ...(override ? { selfCheckModel: override } : {}) }
+      const answered = await approveJobScript(game, job.id, sha(DRAW), deps)
+      expect(answered.status).toBe("answered")
+      // Turn 1 is the concept turn (the job's model); turn 2 is the look at the renders.
+      expect(turns.map((t) => t.model)).toEqual(["claude-sonnet-5-5", expected])
+      expect(turns[1]!.prompt).toContain("River rendered your scripts.")
+      await dismissJob(game, job.id)
+    }
+  })
+
+  it("refuses an invalid selfCheckModel before starting a job", async () => {
+    const turns: AgentTurnRequest[] = []
+    await expect(start({ runTurn: fakeTurn(DRAW, turns), selfCheckModel: "-x" })).rejects.toThrow(/invalid selfCheckModel/)
+    await expect(start({ runTurn: fakeTurn(DRAW, turns), selfCheckModel: "has space" })).rejects.toThrow(/invalid selfCheckModel/)
+    expect(turns).toEqual([])
+  })
+
   it("accepts nothing from a crafted job commit whose tree names paths out of the concept folder", async () => {
     const job = await answeredJob()
     const object = (type: string, input: Buffer) =>

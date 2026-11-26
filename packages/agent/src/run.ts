@@ -6,7 +6,7 @@ import { MessageMapper } from "./events"
 import { buildQueryOptions, type McpLaunch } from "./options"
 import { createCanUseTool, decideToolCall, type PolicyContext } from "./policy"
 import { turnContext } from "./prompts"
-import type { AgentTurnHandlers, AgentTurnRequest } from "./types"
+import { isValidModel, WRITING_ID, type AgentTurnHandlers, type AgentTurnRequest } from "./types"
 
 /** Injection points: packaging (MCP command, CLI binary) and tests (query). */
 export interface AgentDeps {
@@ -37,6 +37,8 @@ interface Turn {
 export async function startAgentTurn(req: AgentTurnRequest, h: AgentTurnHandlers, deps: AgentDeps = {}): Promise<void> {
   const emitError = (message: string) => h.onEvent({ type: "error", message })
   const backend = req.backend ?? "api-key"
+  // The model id reaches the claude CLI as `--model=<id>` and the SDK as an option: refuse anything that is not a plain id.
+  if (!isValidModel(req.model)) return emitError(`Invalid model ${JSON.stringify(String(req.model).slice(0, 80))}: use a model id such as "claude-opus-5-5" (letters, digits, . _ : - only).`)
 
   let project: Project
   try {
@@ -63,11 +65,16 @@ export async function startAgentTurn(req: AgentTurnRequest, h: AgentTurnHandlers
       return emitError(errMsg(err))
     }
   }
+  if (req.mode === "writer") {
+    if (!req.writingId) return emitError("Writer mode needs a writingId.")
+    if (!WRITING_ID.test(req.writingId)) return emitError(`Invalid writing id ${JSON.stringify(req.writingId)}.`)
+  }
   if (backend !== "api-key" && backend !== "claude-code") return emitError(`Unknown agent backend: ${String(backend)}`)
   if (backend === "api-key" && !req.apiKey) return emitError("No Anthropic API key.")
   if (h.signal?.aborted) return emitError("Turn aborted.")
 
   let checkpointRef: string | undefined
+  // "concept" and "writer" turns run in their job's own worktree, so only these two need a checkpoint.
   if (req.mode === "story" || req.mode === "implement") {
     try {
       checkpointRef = (await checkpoint(project.root, `${req.mode}: ${req.prompt.slice(0, 60)}`)).ref
@@ -94,6 +101,7 @@ export async function startAgentTurn(req: AgentTurnRequest, h: AgentTurnHandlers
       project,
       ...(plan ? { plan } : {}),
       ...(req.mode === "concept" && req.conceptId ? { conceptId: req.conceptId } : {}),
+      ...(req.mode === "writer" && req.writingId ? { writingId: req.writingId } : {}),
       onPermission: (r) => h.onPermission(r),
     },
     mapper,

@@ -10,7 +10,7 @@ export {
   type McpLaunch,
   type QueryOptionDeps,
 } from "./options"
-export { BRIEF_MAX, SYSTEM_PROMPTS, systemPrompt, turnContext } from "./prompts"
+export { BRIEF_MAX, VOICE_MAX, SYSTEM_PROMPTS, systemPrompt, turnContext } from "./prompts"
 export {
   createCanUseTool,
   decideToolCall,
@@ -58,3 +58,23 @@ export {
   type JobScript,
   type RunTurn,
 } from "./jobs"
+export {
+  acceptWritingJob,
+  applyTakeEdits,
+  dismissWritingJob,
+  parseTake,
+  readWritingTakes,
+  reviseWritingJob,
+  startWritingJob,
+  takePath,
+  writingFolder,
+  writingJobCards,
+  TAKE_VARIANTS,
+  WRITER_ROLE,
+  WritingTakeSchema,
+  type WritingJobDeps,
+  type WritingJobRequest,
+  type WritingTakeData,
+  type WritingTakeView,
+} from "./writing-jobs"
+export { applyStoryEdits, newPassage, touchedPassages, StoryEditSchema, StoryEditsSchema, type StoryEdit } from "./story-edits"

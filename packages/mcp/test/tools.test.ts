@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { beforeEach, describe, expect, it } from "vitest"
 import { addThread, loadPlan, loadProject, setPlanStatus } from "@river/core"
@@ -17,6 +18,8 @@ export const EXPECTED_TOOLS = [
   "implement_edit", "plan_mark_implemented", "frames_capture",
   "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row",
   "board_update_note", "board_remove_card", "concept_request",
+  "story_outline", "story_read_passage", "story_search", "story_pacing", "story_sample_transcripts", "story_simulate", "voice_read",
+  "story_rename_passage", "story_delete_passage", "story_batch_edit", "voice_note", "writing_request",
 ]
 
 let dir: string
@@ -35,11 +38,12 @@ beforeEach(async () => {
 })
 
 describe("tool list", () => {
-  it("has the 32 contract names, with the write tools marked mutating", () => {
+  it("has the 44 contract names, with the write tools marked mutating", () => {
     expect([...tools.map((t) => t.name)].sort()).toEqual([...EXPECTED_TOOLS].sort())
-    expect([...RIVER_TOOL_NAMES].sort()).toEqual([...EXPECTED_TOOLS, "concept_write"].sort())
+    expect(tools).toHaveLength(44)
+    expect([...RIVER_TOOL_NAMES].sort()).toEqual([...EXPECTED_TOOLS, "concept_write", "writing_write"].sort())
     expect(tools.filter((t) => t.mutating).map((t) => t.name).sort()).toEqual(
-      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture", "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row", "board_update_note", "board_remove_card", "concept_request"].sort(),
+      ["story_write_passage", "story_add_passage", "review_reply", "plan_save", "implement_edit", "plan_mark_implemented", "frames_capture", "mark_claim", "mark_reply", "board_add_note", "board_add_card", "board_connect", "board_place_row", "board_update_note", "board_remove_card", "concept_request", "story_rename_passage", "story_delete_passage", "story_batch_edit", "voice_note", "writing_request"].sort(),
     )
   })
 
@@ -85,6 +89,41 @@ describe("read tools", () => {
     expect(r.text).toContain(
       "warn   Long path → Fetch: the choice can show while Fetch's @when energy >= 20 is false. Give the choice @when energy >= 20, or loosen Fetch's @when.",
     )
+  })
+
+  it("story_lint resolves cross-story links in multi-file workspaces and reports broken-cross-link", async () => {
+    const wsDir = mkdtempSync(join(tmpdir(), "river-mcp-ws-"))
+    mkdirSync(join(wsDir, "stories"), { recursive: true })
+    writeFileSync(
+      join(wsDir, "river.json"),
+      JSON.stringify({ name: "WsTest", engine: "none", stories: "stories", state: "state.json", export: "data" }),
+    )
+    writeFileSync(join(wsDir, "state.json"), JSON.stringify({ energy: { type: "int", min: 0, max: 100, initial: 50 } }))
+    writeFileSync(
+      join(wsDir, "stories", "ch1.twee"),
+      `:: StoryTitle\nCh1\n\n:: StoryData\n{"ifid":"11111111-1111-4111-8111-111111111111","start":"Intro"}\n\n:: Intro\nHello.\n[[Go->ch2::End]]\n`,
+    )
+    writeFileSync(
+      join(wsDir, "stories", "ch2.twee"),
+      `:: StoryTitle\nCh2\n\n:: StoryData\n{"ifid":"22222222-2222-4222-8222-222222222222","start":"End"}\n\n:: End\n@end\n--\nDone.\n`,
+    )
+    const wsProject = await loadProject(wsDir)
+    const wsLint = createRiverTools(wsProject).find((t) => t.name === "story_lint")!
+
+    const okAll = await wsLint.handler({ narrative: false })
+    expect(okAll.text).toContain("0 errors, 0 warnings in 2 passages")
+    const okSingle = await wsLint.handler({ file: "stories/ch1.twee", narrative: false })
+    expect(okSingle.text).toContain("0 errors, 0 warnings in 1 passage")
+
+    // Invalid cross-story link reports broken-cross-link
+    writeFileSync(
+      join(wsDir, "stories", "ch1.twee"),
+      `:: StoryTitle\nCh1\n\n:: StoryData\n{"ifid":"11111111-1111-4111-8111-111111111111","start":"Intro"}\n\n:: Intro\nHello.\n[[Go->ch2::Missing]]\n`,
+    )
+    const bad = await wsLint.handler({ file: "stories/ch1.twee", narrative: false })
+    expect(bad.text).toContain('no passage "Missing" in story "ch2"')
+    const filesData = (bad.data as { files: { diagnostics: { code: string }[] }[] }).files
+    expect(filesData[0]!.diagnostics.some((d) => d.code === "broken-cross-link")).toBe(true)
   })
 
   it("story_paths formats routes like the CLI", async () => {

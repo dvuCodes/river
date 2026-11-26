@@ -4,8 +4,9 @@ import path from "node:path"
 import { listBoards, loadBoard } from "../boards/boards"
 import { currentRev } from "../git/checkpoint"
 import type { Board } from "../boards/types"
-import type { Capture, EngineAdapter, Project } from "../project/types"
+import type { Capture, EngineAdapter, Project, ShotDef } from "../project/types"
 import { assertSafeId, readJson, writeJsonAtomic } from "../review/store"
+import { IO_CONCURRENCY, mapLimit } from "../util/map-limit"
 
 const capturesRoot = (root: string) => path.join(root, ".river", "captures")
 
@@ -29,20 +30,82 @@ async function revOf(root: string): Promise<string> {
  * the returned Capture has them absolute. .river/captures is meant to be gitignored in the game repo.
  */
 export async function captureShot(project: Project, shotId: string, adapter: EngineAdapter): Promise<Capture> {
+  const shot = findShot(project, shotId)
+  // Read the rev before the adapter writes anything, so the capture itself never makes it "+dirty".
+  const rev = await revOf(project.root)
+  const at = new Date().toISOString()
+  const outDir = await prepareOutDir(project, shotId, at)
+  try {
+    const files = await adapter.capture(project, shot, outDir)
+    if (files.length === 0) {
+      throw new Error(`river: the ${adapter.id} adapter returned no frames for shot ${JSON.stringify(shot.id)}`)
+    }
+    return await recordCapture(project, shotId, rev, at, outDir, files)
+  } catch (err) {
+    await rm(outDir, { recursive: true, force: true }).catch(() => {})
+    throw err
+  }
+}
+
+function findShot(project: Project, shotId: string): ShotDef {
   const shot = project.manifest.shots.find((s) => s.id === shotId)
   if (!shot) {
     const ids = project.manifest.shots.map((s) => s.id)
     throw new Error(`river: no shot ${JSON.stringify(shotId)} in the manifest (shots: ${ids.join(", ") || "none yet"})`)
   }
-  // Read the rev before the adapter writes anything, so the capture itself never makes it "+dirty".
-  const rev = await revOf(project.root)
-  const at = new Date().toISOString()
+  return shot
+}
+
+async function prepareOutDir(project: Project, shotId: string, at: string): Promise<string> {
   const outDir = path.join(capturesDir(project.root, shotId), at.replace(/:/g, "-"))
   await mkdir(outDir, { recursive: true })
-  const files = await adapter.capture(project, shot, outDir)
+  return outDir
+}
+
+async function recordCapture(project: Project, shotId: string, rev: string, at: string, outDir: string, files: string[]): Promise<Capture> {
   const rel = files.map((f) => path.relative(project.root, f).split(path.sep).join("/"))
   await writeJsonAtomic(path.join(outDir, "capture.json"), { shotId, rev, at, files: rel } satisfies Capture)
   return { shotId, rev, at, files }
+}
+
+/**
+ * Capture several shots. Every id is checked before anything runs. When the adapter has `captureBatch` and there
+ * is more than one distinct shot, they run in one engine call (one rev, one stamp); otherwise one by one with
+ * `captureShot`. Returns the captures in the order of `shotIds`.
+ */
+export async function captureShots(project: Project, shotIds: readonly string[], adapter: EngineAdapter): Promise<Capture[]> {
+  const shots = shotIds.map((id) => findShot(project, id))
+  const distinct = new Set(shotIds).size === shotIds.length
+  if (shotIds.length > 1 && distinct && adapter.captureBatch) {
+    const rev = await revOf(project.root)
+    const at = new Date().toISOString()
+    const items: { shot: ShotDef; outDir: string }[] = []
+    try {
+      for (const shot of shots) items.push({ shot, outDir: await prepareOutDir(project, shot.id, at) })
+      const files = await adapter.captureBatch(project, items)
+      for (const { shot } of items) {
+        if (!files[shot.id]) {
+          throw new Error(`river: the ${adapter.id} adapter's batch capture returned no frames for shot ${JSON.stringify(shot.id)}`)
+        }
+      }
+      for (const { shot } of items) {
+        if (files[shot.id]!.length === 0) {
+          throw new Error(`river: the ${adapter.id} adapter's batch capture returned no frames for shot ${JSON.stringify(shot.id)}`)
+        }
+      }
+      const out: Capture[] = []
+      for (const { shot, outDir } of items) {
+        out.push(await recordCapture(project, shot.id, rev, at, outDir, files[shot.id]!))
+      }
+      return out
+    } catch (err) {
+      await Promise.all(items.map(({ outDir }) => rm(outDir, { recursive: true, force: true }).catch(() => {})))
+      throw err
+    }
+  }
+  const out: Capture[] = []
+  for (const id of shotIds) out.push(await captureShot(project, id, adapter))
+  return out
 }
 
 /**
@@ -63,13 +126,12 @@ async function capturesIn(root: string, shotId: string): Promise<(Capture & { fo
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return []
     throw err
   }
-  const captures: (Capture & { folder: string })[] = []
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    const folder = path.join(dir, entry.name)
+  const folders = entries.filter((e) => e.isDirectory()).map((e) => path.join(dir, e.name))
+  const read = await mapLimit(folders, IO_CONCURRENCY, async (folder) => {
     const capture = await readJson<Capture | undefined>(path.join(folder, "capture.json"), undefined)
-    if (capture) captures.push({ ...capture, files: capture.files.map((f) => framePath(root, folder, f)), folder })
-  }
+    return capture ? { ...capture, files: capture.files.map((f) => framePath(root, folder, f)), folder } : undefined
+  })
+  const captures = read.filter((c): c is Capture & { folder: string } => c !== undefined)
   return captures.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
 }
 

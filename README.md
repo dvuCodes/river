@@ -2,12 +2,12 @@
 
 River is a game dev harness for branching stories and game frames. It works with any engine.
 
-- **Story map.** Stories are Twee 3 text files in your game repo. The map shows passages and branches, the path list shows every route to each ending, and the linter catches broken links, dead ends and conditions that can never be true.
-- **Typed game state.** You declare variables once (`stories/state.json`). Passages and choices read them with `@when` and change them with `@set` and `@cost`; variables the game moves on its own are marked `engine`.
-- **Playtest and export.** Play a story as text with live state, then export JSON that your engine loads.
-- **Frame review.** Capture deterministic shots from your engine, comment on a frame, and compare before and after.
-- **In-app agent.** The agent drafts branches and writes change plans for frame comments. An implementer edits only the files that the approved plan names. Every turn starts from a git checkpoint.
-- **MCP server.** `river-mcp` gives Claude Code the same tools.
+- **Story map & narrative craft.** Stories are Twee 3 text files in your game repo. The map shows passages and branches with inline add/rename/tag/delete editing, the path list shows routes and interrupts, the linter checks both structure and narrative craft (Chekhov's Gun unused variables, copy budgets, duplicate copy, reachability from initial state), and `river simulate` runs Monte Carlo playtests to chart ending and state distributions.
+- **Typed game state & reactive Twee3+.** Declare variables once (`stories/state.json`, with `engine: true` for game-driven meters). Passages and choices support `@when`, `@set`, `@cost`, `@hint`, `@once`, `@meta`, `@shot`, `@cue`, inline reactive templates (`{when cond: a | b}`, `{var}`, `{once: ...}`, `{cycle: ...}`, `{shuffle: ...}`), visit memory (`visited(id)`, `visits(id)`), `[interrupt]` / `@auto` global transitions, and `[storylet]` encounter decks (`@weight`, `@priority`, `@cooldown`).
+- **Playtest, table read & engine runtime.** Play a story live with interrupts and template rendering, run `river pacing` / `river table-read`, export JSON for your engine, or drop in River's official Godot 4 runtime addon (`river godot install-runtime`).
+- **Frame review & visual diff.** Capture deterministic shots from Godot (single-process batch capture for `--all`) or any custom engine (`adapter.<engine>.command`), scrub/loop multi-frame flipbooks, compare Before/After with Side-by-side, Swipe, Onion-skin, or pixel Diff overlays, comment on frames, and drive change plans.
+- **In-app agent & writing jobs.** Streaming chat across Story, Plan, and Implement modes with configurable models (`Opus 5.5`, `Sonnet 5.5`, `Haiku 4.5`, or custom IDs), `.river/brief.md` + `.river/voice.md` taste memory, and Canvas Writing Jobs that draft A/B/C passage takes in isolated git worktrees with an automated Table Read pass.
+- **MCP server.** `river-mcp` exposes 44 tools (scoped passage reads, batch edits, playtesting, simulation, pacing, table reads, voice bible, storyboard, concept & writing jobs, and batch frame capture) to Claude Code and other MCP clients.
 
 River reads and writes Twee 3 and imports Twine 2 archives, using the published specs. It is not affiliated with Twine.
 
@@ -25,9 +25,10 @@ Both use the same permission policy: reads stay inside the game repo, every writ
 The storyboard is a canvas of passage cards, notes and images. You leave requests on it as marks: circle a card and write what you want. Agents answer beside the mark, with an arrow from your request to their answer:
 
 - **River's concept artist** answers "draw it" requests with options drawn by small Godot scripts. You read the scripts in a separate review window and approve them there before anything runs. Every line is the agent's code and runs on your computer with your permissions once you approve; `Kit.name(...)` calls use River's drawing helpers, but River cannot prove a script only draws, so read all of it. Then keep the options you like or dismiss the answer with a reason that goes into `.river/brief.md`.
-- **Claude Code**, through `river-mcp`, takes the other requests: it claims a mark, reads the story and the brief, answers with notes and images, and hands drawing requests to the concept artist. See [packages/mcp/README.md](packages/mcp/README.md) to set it up, including on Windows and for headless `claude -p` runs.
+- **River's story writer** answers passage marks with 2–3 distinct A/B/C takes in a worktree, runs a Table Read self-check, and lays out diff + preview cards beside the mark. Accepted takes record exemplars and dismissed takes record cut reasons in `.river/voice.md`.
+- **Claude Code**, through `river-mcp`, takes the other requests: it claims a mark, reads the story, brief, and voice bible, answers with notes and images, and hands drawing or writing requests to the concept artist or story writer. See [packages/mcp/README.md](packages/mcp/README.md) to set it up, including on Windows and for headless `claude -p` runs.
 
-From the terminal: `river card add`, `river mark add`, `river mark reply`, `river board show` and `river job ...` (`pnpm river --help` lists them).
+From the terminal: `river lint`, `river pacing`, `river table-read`, `river simulate`, `river voice`, `river godot install-runtime`, `river capture --all`, `river checkpoints prune`, `river card add`, `river mark ...`, `river job ...`, and `river write-job ...` (`pnpm river --help` lists them all).
 
 ## Set up a game
 

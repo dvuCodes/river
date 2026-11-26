@@ -26,7 +26,8 @@ if (smokeUserData) {
 
 // Images of captures are served from the project root through this scheme; webSecurity stays on.
 protocol.registerSchemesAsPrivileged([
-  { scheme: "river-file", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+  // corsEnabled + the Access-Control-Allow-Origin header below let the Frames diff read pixels of a crossOrigin="anonymous" image.
+  { scheme: "river-file", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
 ])
 
 function argProject(): string | undefined {
@@ -1302,7 +1303,11 @@ async function smokeBoard(w: BrowserWindow, dir: string, waitFor: (view: ViewId,
   await mkdir(outside, { recursive: true })
   await writeFile(join(outside, "secret.txt"), "secret")
   await symlink(outside, join(p.root, "linked"), "junction")
-  const served = (await net.fetch("river-file://project/river.json")).status
+  const servedRes = await net.fetch("river-file://project/river.json")
+  const served = servedRes.status
+  // The Frames diff reads pixels of crossOrigin="anonymous" images, which needs this header on every file.
+  const cors = servedRes.headers.get("access-control-allow-origin")
+  check(`river-file:// answers with Access-Control-Allow-Origin: * (${String(cors)}; content-type ${String(servedRes.headers.get("content-type"))})`, cors === "*")
   const linked = (await net.fetch("river-file://project/linked/secret.txt")).status
   await rm(join(p.root, "linked"))
   await rm(outside, { recursive: true, force: true })
@@ -1983,11 +1988,15 @@ app.whenReady().then(async () => {
   // Smoke runs can pin the theme so both themes can be checked: RIVER_SMOKE_THEME=light|dark.
   const smokeTheme = process.env["RIVER_SMOKE_THEME"]
   if (isSmoke && (smokeTheme === "light" || smokeTheme === "dark")) nativeTheme.themeSource = smokeTheme
-  protocol.handle("river-file", (request) => {
+  protocol.handle("river-file", async (request) => {
     const p = currentProject()
     const abs = p && riverFilePath(p, request.url)
     if (!abs) return new Response("Not found", { status: 404 })
-    return net.fetch(pathToFileURL(abs).toString())
+    const res = await net.fetch(pathToFileURL(abs).toString())
+    // The page loads these with crossOrigin="anonymous" so a canvas can read their pixels (Frames diff).
+    const headers = new Headers(res.headers)
+    headers.set("Access-Control-Allow-Origin", "*")
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
   })
   registerIpc(() => win, isSmoke && process.env["RIVER_SMOKE_JOB"] === "1" ? { jobDeps: smokeJobDeps, onApprove: () => approveCalls++, smoke: true } : { smoke: isSmoke })
 

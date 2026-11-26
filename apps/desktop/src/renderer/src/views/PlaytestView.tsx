@@ -89,8 +89,9 @@ export function PlaytestView(props: {
                     <span className="kw">on enter</span> {snap.passage.onEnter}
                   </p>
                 )}
+                {snap.inInterrupt && <p className="page-interrupt">Interrupt · a return choice goes back to where it started</p>}
                 <div className="page-prose">
-                  {prose(snap.passage.text).map((para, i) => (
+                  {prose(snap.renderedText).map((para, i) => (
                     <p key={i}>{para}</p>
                   ))}
                 </div>
@@ -103,11 +104,15 @@ export function PlaytestView(props: {
                         onClick={() => void call(() => window.river.playChoose(snap.sessionId, i))}
                       >
                         <span className="choice-n mono">{i + 1}</span>
-                        <span className="choice-label">{c.label}</span>
+                        <span className="choice-text">
+                          <span className="choice-label">{c.label}</span>
+                          {c.hint && <span className="choice-hint">{c.hint}</span>}
+                        </span>
                         {c.broken ? (
                           <span className="choice-why mono">missing “{c.target}”</span>
-                        ) : !c.open && c.when ? (
-                          <span className="choice-why mono">needs {c.when}</span>
+                        ) : !c.open && (c.closedReason ?? c.when) ? (
+                          // A closed @when reads "needs <cond>"; @cost, the target's @when and @once say their own reason.
+                          <span className="choice-why mono">{c.closedReason === undefined || c.closedReason === c.when ? `needs ${c.when}` : c.closedReason}</span>
                         ) : c.when ? (
                           <span className="choice-ok mono">{c.when}</span>
                         ) : null}
@@ -139,6 +144,60 @@ export function PlaytestView(props: {
               />
             )}
           </section>
+          {snap && snap.interrupts.length > 0 && (
+            <section className="panel-sec">
+              <header className="sec-head">
+                <h3>Interrupts</h3>
+                <span className="sec-hint">{snap.inInterrupt ? "one is running" : "start from here"}</span>
+              </header>
+              <ul className="interrupt-list">
+                {snap.interrupts.map((it) => (
+                  <li key={it.id}>
+                    <button
+                      className={cx("interrupt-btn", !it.open && "is-closed")}
+                      data-interrupt={it.name}
+                      disabled={!it.open}
+                      title={it.open ? `Enter ${it.name} now` : it.when ? `@when ${it.when}` : "Cannot start now"}
+                      onClick={() => void call(() => window.river.playInterrupt(snap.sessionId, it.name))}
+                    >
+                      <span className="interrupt-name">{it.name}</span>
+                      {!it.open && <span className="interrupt-why mono">{snap.inInterrupt ? "an interrupt is running" : snap.passage.isEnding ? "the story has ended" : it.when ? `needs ${it.when}` : "closed"}</span>}
+                      {it.open && it.when && <span className="choice-ok mono">{it.when}</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {snap && (snap.storylets?.length ?? 0) > 0 && (
+            <section className="panel-sec">
+              <header className="sec-head">
+                <h3>Storylets</h3>
+                <span className="sec-hint">
+                  {snap.storylets!.filter((s) => s.open).length} of {snap.storylets!.length} open
+                </span>
+              </header>
+              <button
+                className="btn btn-primary storylet-draw"
+                data-action="draw-storylet"
+                disabled={!snap.storylets!.some((s) => s.open)}
+                onClick={() => void call(() => window.river.playDrawStorylet(snap.sessionId))}
+              >
+                Draw storylet
+              </button>
+              <ul className="storylet-list">
+                {snap.storylets!.map((s) => (
+                  <li key={s.id} className={cx("storylet-row", !s.open && "is-closed")}>
+                    <span className="storylet-name">{s.name}</span>
+                    <span className="storylet-meta mono">
+                      {s.priority !== 0 && `p${s.priority} · `}
+                      {s.cooldownLeft > 0 ? `cd ${s.cooldownLeft}` : s.open ? "open" : "closed"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           <section className="panel-sec grow">
             <header className="sec-head">
               <h3>Steps</h3>

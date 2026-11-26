@@ -9,7 +9,7 @@
  * bounds because applyEffects clamps. Unknown variables are never constrained.
  */
 import { settleNumber } from "../story/cond"
-import type { CmpOp, Cond, Effect, StateSchema, VarDecl } from "../story/types"
+import type { CmpOp, Cond, Effect, GameState, StateSchema, VarDecl } from "../story/types"
 
 type Atom = { variable: string; op: CmpOp; value: number | string | boolean }
 
@@ -19,6 +19,7 @@ const NEGATE: Record<CmpOp, CmpOp> = { "==": "!=", "!=": "==", "<": ">=", "<=": 
 function nnf(c: Cond, neg: boolean): Cond {
   switch (c.kind) {
     case "cmp": return neg ? { ...c, op: NEGATE[c.op] } : c
+    case "visit": return neg ? { ...c, op: NEGATE[c.op] } : c
     case "not": return nnf(c.term, !neg)
     case "and": {
       const terms = c.terms.map((t) => nnf(t, neg))
@@ -31,6 +32,9 @@ function nnf(c: Cond, neg: boolean): Cond {
   }
 }
 
+/** The name a visit count goes by inside the solver. It is not an identifier, so no schema declares it. */
+export const visitVariable = (passageId: string) => `@visits(${passageId})`
+
 const MAX_CLAUSES = 2000
 const MAX_BOXES = 32
 
@@ -38,6 +42,8 @@ const MAX_BOXES = 32
 function dnf(c: Cond): Atom[][] | null {
   switch (c.kind) {
     case "cmp": return [[{ variable: c.variable, op: c.op, value: c.value }]]
+    // Visit counts are not part of the state schema: a variable no schema declares, so never constrained.
+    case "visit": return [[{ variable: visitVariable(c.passageId), op: c.op, value: c.value }]]
     case "not": return null // never happens after nnf
     case "or": {
       const out: Atom[][] = []
@@ -265,4 +271,107 @@ export function satisfiable(conds: Cond[], schema: StateSchema): boolean {
   if (conds.length === 0) return true
   const all: Cond = conds.length === 1 ? conds[0]! : { kind: "and", terms: conds }
   return narrow(anyState(), all, schema).length > 0
+}
+
+function domKey(d: Dom): string {
+  if (d.kind === "set") return `s${JSON.stringify([...d.values].map(String).sort())}`
+  const lo = `${d.loStrict ? "(" : "["}${d.lo}`
+  const hi = `${d.hi}${d.hiStrict ? ")" : "]"}`
+  return `n${d.isInt ? "i" : ""}${lo},${hi}${d.not.size > 0 ? `!${[...d.not].sort((a, b) => a - b).join("|")}` : ""}`
+}
+
+/** A canonical string for one box: equal keys mean the same set of states. */
+export function boxKey(box: Box): string {
+  return [...box.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([v, d]) => `${v}=${domKey(d)}`).join(";")
+}
+
+/** The union of two box lists, without duplicates; too many boxes merge into one that covers them all. */
+export function unionBoxes(a: Box[], b: Box[]): Box[] {
+  const seen = new Set<string>()
+  const out: Box[] = []
+  for (const box of [...a, ...b]) {
+    const k = boxKey(box)
+    if (!seen.has(k)) { seen.add(k); out.push(box) }
+  }
+  return capped(out)
+}
+
+/** A canonical string for a box list (order does not matter). */
+export function boxesKey(boxes: Box[]): string {
+  return boxes.map(boxKey).sort().join(" | ")
+}
+
+/** A box pinning every schema variable to its value in `state`, optionally leaving `engine` variables free. */
+export function stateBox(state: GameState, schema: StateSchema, leaveEngineFree = false): Box {
+  const box: Box = new Map()
+  for (const [name, decl] of Object.entries(schema)) {
+    if (leaveEngineFree && decl.engine) continue
+    const v = state[name]
+    if (v === undefined) continue
+    if (decl.type === "number" || decl.type === "int") {
+      if (typeof v === "number") box.set(name, point(v, decl.type === "int"))
+    } else if (typeof v === "string" || typeof v === "boolean") {
+      box.set(name, { kind: "set", values: new Set([v]) })
+    }
+  }
+  return box
+}
+
+function pickDomValue(d: Dom, current?: number | string | boolean): number | string | boolean | undefined {
+  if (d.kind === "set") {
+    if (current !== undefined && d.values.has(current as string | boolean)) return current
+    for (const v of d.values) return v
+    return undefined
+  }
+  const inNum = (x: number) =>
+    !d.not.has(x) &&
+    (d.loStrict ? x > d.lo : x >= d.lo) &&
+    (d.hiStrict ? x < d.hi : x <= d.hi) &&
+    (!d.isInt || Number.isInteger(x))
+  if (typeof current === "number" && inNum(current)) return current
+  if (d.isInt) {
+    const { lo, hi } = intBounds(d)
+    if (lo > hi) return undefined
+    if (Number.isFinite(lo)) {
+      for (let x = lo; x <= hi; x++) if (!d.not.has(x)) return x
+      return undefined
+    }
+    if (Number.isFinite(hi)) {
+      for (let x = hi; x >= lo; x--) if (!d.not.has(x)) return x
+      return undefined
+    }
+    for (let k = 0; ; k++) {
+      if (!d.not.has(k)) return k
+      if (!d.not.has(-k)) return -k
+    }
+  }
+  if (Number.isFinite(d.lo) && !d.loStrict && inNum(d.lo)) return d.lo
+  if (Number.isFinite(d.hi) && !d.hiStrict && inNum(d.hi)) return d.hi
+  if (Number.isFinite(d.lo) && Number.isFinite(d.hi)) {
+    if (d.lo >= d.hi) return undefined
+    for (let n = 2; n <= 16; n++) {
+      const mid = d.lo + (d.hi - d.lo) / n
+      if (inNum(mid)) return mid
+    }
+    return undefined
+  }
+  if (Number.isFinite(d.lo)) {
+    for (let k = 1; ; k++) if (inNum(d.lo + k)) return d.lo + k
+  }
+  if (Number.isFinite(d.hi)) {
+    for (let k = 1; ; k++) if (inNum(d.hi - k)) return d.hi - k
+  }
+  for (let k = 0; ; k++) if (inNum(k)) return k
+}
+
+/** Pick values for any `engine: true` variables constrained by `box` that differ from `state`. */
+export function sampleEngineUpdates(box: Box, state: GameState, schema: StateSchema): GameState | undefined {
+  const updates: GameState = {}
+  for (const [name, dom] of box) {
+    if (!schema[name]?.engine) continue
+    const val = pickDomValue(dom, state[name])
+    if (val === undefined) return undefined
+    if (val !== state[name]) updates[name] = val
+  }
+  return updates
 }
